@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ImportGroup Label="PropertySheets" />
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <IncludePath>D:\library\libjson\include;D:\library\assimp-6.0.2\include;D:\library\glm\glm-master;D:\library\glfw\bin\include;D:\library\glew-2.2.0\bin\include;$(IncludePath)</IncludePath>
+    <LibraryPath>D:\library\libjson\lib;D:\library\assimp-6.0.2\lib\Release;D:\library\glfw\bin\Release;D:\library\glew-2.2.0\bin\lib\Release;$(LibraryPath)</LibraryPath>
+    <_PropertySheetDisplayName>PropertySheet_release</_PropertySheetDisplayName>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <Link>
+      <AdditionalDependencies>glew32.lib;glfw3.lib;opengl32.lib;unit.lib;assimp-vc143-mt.lib;json_vc71_libmt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+    <PreBuildEvent>
+      <Command>xcopy /y "$(ProjectDir)\bin\release\*.dll" "$(TargetDir)"</Command>
+    </PreBuildEvent>
+    <ClCompile>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup />
+</Project>

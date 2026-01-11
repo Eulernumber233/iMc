@@ -3,6 +3,10 @@
 ##
 ## Get latest from https://github.com/github/gitignore/blob/master/VisualStudio.gitignore
 
+# ºöÂÔstb_image
+scr/stb_image.h
+scr/stb_image.cpp
+
 # User-specific files
 *.rsuser
 *.suo

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ImportGroup Label="PropertySheets" />
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <ExecutablePath>$(ExecutablePath)</ExecutablePath>
+    <IncludePath>D:\library\libjson\include;D:\library\assimp-6.0.2\include;D:\library\glm\glm-master;D:\library\glew-2.2.0\bin\include;D:\library\glfw\bin\include;$(IncludePath)</IncludePath>
+    <LibraryPath>D:\library\libjson\lib;D:\library\assimp-6.0.2\lib\Debug;D:\library\glew-2.2.0\bin\lib\Debug;D:\library\glfw\bin\Debug;$(LibraryPath)</LibraryPath>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <Link>
+      <AdditionalDependencies>glew32d.lib;glfw3.lib;opengl32.lib;assimp-vc143-mtd.lib;unit.lib;json_vc71_libmtd.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+    <PreBuildEvent>
+      <Command>xcopy /y "$(ProjectDir)\bin\debug\*.dll" "$(TargetDir)"</Command>
+    </PreBuildEvent>
+    <ClCompile>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup />
+</Project>

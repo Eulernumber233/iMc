@@ -15,8 +15,242 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="iMc.cpp">
+    <ClCompile Include="scr\chunk\BlockType.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="scr\chunk\Chunk.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\chunk\ChunkManager.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\collision\Ray.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\generate\Noise.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\generate\TerrainGenerator.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\render\BlockOutlineRenderer.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\render\RenderSystem.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\UI\UIManager.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\Camera.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\iMc.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\Shader.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\std_image.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\TextureMgr.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="scr\chunk\BlockType.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\chunk\Chunk.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\chunk\ChunkManager.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\collision\Ray.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\generate\Noise.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\generate\TerrainGenerator.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\render\BlockOutlineRenderer.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\render\RenderSystem.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\UI\UIManager.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\Camera.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\Shader.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\stb_image.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\TextureMgr.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\World.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\World_4.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\core.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\Data.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="shader\deferred_lighting.vert" />
+    <None Include="shader\deferred_lighting.frag" />
+    <None Include="shader\g_buffer.frag" />
+    <None Include="shader\g_buffer.vert" />
+    <None Include="shader\outline.frag" />
+    <None Include="shader\outline.vert" />
+    <None Include="assert\textures\textures_config.json" />
+    <None Include="assert\textures\Minecraft砖块贴图 %282%29.7z" />
+    <None Include="shader\ui.frag" />
+    <None Include="shader\ui.vert" />
+    <None Include=".gitattributes" />
+    <None Include=".gitignore" />
+    <None Include="PropertySheet.props" />
+    <None Include="PropertySheet_debug.props" />
+    <None Include="README.md" />
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="assert\textures\block\birch_log.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\block\birch_log_top.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\block\birch_normal.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\block\birch_specular.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\block\bricks.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\block\deepslate_diamond_ore.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\block\dirt.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\block\grass_block_side.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\block\grass_block_top.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\block\oak_log.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\block\oak_log_top.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\block\oak_planks.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\block\pure_white.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\block\redstone_lamp.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\block\redstone_lamp_on.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\block\stone.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\item\Axolotl_Bucket.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\skybox\back.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\skybox\front.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\skybox\right.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\skybox\top.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\skybox\left.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\skybox\bottom.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\Torch.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\topsb.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\top.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\right.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\middlesb.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\left.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\front.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\DefaultPack2.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\ch.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\bottomsb.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\bottom.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\back.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\UI\crosshair.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\UI\crosshair_1.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\UI\hotbar_offhand_left.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\UI\hotbar_offhand_right.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\UI\hotbar_selection.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="assert\textures\UI\inventory.png">
+      <Filter>资源文件</Filter>
+    </Image>
   </ItemGroup>
 </Project>

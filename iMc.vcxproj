@@ -65,9 +65,11 @@
   </ImportGroup>
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+    <Import Project="PropertySheet_debug.props" />
   </ImportGroup>
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+    <Import Project="PropertySheet.props" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
@@ -123,7 +125,99 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="iMc.cpp" />
+    <ClCompile Include="scr\Camera.cpp" />
+    <ClCompile Include="scr\chunk\BlockType.cpp" />
+    <ClCompile Include="scr\chunk\Chunk.cpp" />
+    <ClCompile Include="scr\chunk\ChunkManager.cpp" />
+    <ClCompile Include="scr\collision\Ray.cpp" />
+    <ClCompile Include="scr\generate\Noise.cpp" />
+    <ClCompile Include="scr\generate\TerrainGenerator.cpp" />
+    <ClCompile Include="scr\iMc.cpp" />
+    <ClCompile Include="scr\render\BlockOutlineRenderer.cpp" />
+    <ClCompile Include="scr\render\RenderSystem.cpp" />
+    <ClCompile Include="scr\Shader.cpp" />
+    <ClCompile Include="scr\std_image.cpp" />
+    <ClCompile Include="scr\TextureMgr.cpp" />
+    <ClCompile Include="scr\UI\UIManager.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="scr\Camera.h" />
+    <ClInclude Include="scr\chunk\BlockType.h" />
+    <ClInclude Include="scr\chunk\Chunk.h" />
+    <ClInclude Include="scr\chunk\ChunkManager.h" />
+    <ClInclude Include="scr\collision\Ray.h" />
+    <ClInclude Include="scr\core.h" />
+    <ClInclude Include="scr\Data.h" />
+    <ClInclude Include="scr\generate\Noise.h" />
+    <ClInclude Include="scr\generate\TerrainGenerator.h" />
+    <ClInclude Include="scr\render\BlockOutlineRenderer.h" />
+    <ClInclude Include="scr\render\RenderSystem.h" />
+    <ClInclude Include="scr\Shader.h" />
+    <ClInclude Include="scr\stb_image.h" />
+    <ClInclude Include="scr\TextureMgr.h" />
+    <ClInclude Include="scr\UI\UIManager.h" />
+    <ClInclude Include="scr\World.h" />
+    <ClInclude Include="scr\World_4.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include=".gitattributes" />
+    <None Include=".gitignore" />
+    <None Include="PropertySheet.props" />
+    <None Include="PropertySheet_debug.props" />
+    <None Include="README.md" />
+    <None Include="shader\deferred_lighting.frag" />
+    <None Include="shader\deferred_lighting.vert" />
+    <None Include="shader\g_buffer.frag" />
+    <None Include="shader\g_buffer.vert" />
+    <None Include="shader\outline.frag" />
+    <None Include="shader\outline.vert" />
+    <None Include="assert\textures\Minecraft砖块贴图 %282%29.7z" />
+    <None Include="assert\textures\textures_config.json" />
+    <None Include="shader\ui.frag" />
+    <None Include="shader\ui.vert" />
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="assert\textures\back.png" />
+    <Image Include="assert\textures\block\birch_log.png" />
+    <Image Include="assert\textures\block\birch_log_top.png" />
+    <Image Include="assert\textures\block\birch_normal.png" />
+    <Image Include="assert\textures\block\birch_specular.png" />
+    <Image Include="assert\textures\block\bricks.png" />
+    <Image Include="assert\textures\block\deepslate_diamond_ore.png" />
+    <Image Include="assert\textures\block\dirt.png" />
+    <Image Include="assert\textures\block\grass_block_side.png" />
+    <Image Include="assert\textures\block\grass_block_top.png" />
+    <Image Include="assert\textures\block\oak_log.png" />
+    <Image Include="assert\textures\block\oak_log_top.png" />
+    <Image Include="assert\textures\block\oak_planks.png" />
+    <Image Include="assert\textures\block\pure_white.png" />
+    <Image Include="assert\textures\block\redstone_lamp.png" />
+    <Image Include="assert\textures\block\redstone_lamp_on.png" />
+    <Image Include="assert\textures\block\stone.png" />
+    <Image Include="assert\textures\bottom.png" />
+    <Image Include="assert\textures\bottomsb.png" />
+    <Image Include="assert\textures\ch.png" />
+    <Image Include="assert\textures\DefaultPack2.png" />
+    <Image Include="assert\textures\front.png" />
+    <Image Include="assert\textures\item\Axolotl_Bucket.png" />
+    <Image Include="assert\textures\left.png" />
+    <Image Include="assert\textures\middlesb.png" />
+    <Image Include="assert\textures\right.png" />
+    <Image Include="assert\textures\skybox\back.png" />
+    <Image Include="assert\textures\skybox\bottom.png" />
+    <Image Include="assert\textures\skybox\front.png" />
+    <Image Include="assert\textures\skybox\left.png" />
+    <Image Include="assert\textures\skybox\right.png" />
+    <Image Include="assert\textures\skybox\top.png" />
+    <Image Include="assert\textures\top.png" />
+    <Image Include="assert\textures\topsb.png" />
+    <Image Include="assert\textures\Torch.png" />
+    <Image Include="assert\textures\UI\crosshair.png" />
+    <Image Include="assert\textures\UI\crosshair_1.png" />
+    <Image Include="assert\textures\UI\hotbar_offhand_left.png" />
+    <Image Include="assert\textures\UI\hotbar_offhand_right.png" />
+    <Image Include="assert\textures\UI\hotbar_selection.png" />
+    <Image Include="assert\textures\UI\inventory.png" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

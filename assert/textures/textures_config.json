@@ -1,0 +1,285 @@
+{ //grass_block_top
+    "2d_textures": [
+        {
+            "name": "oak_log_top",
+            "path": "block/oak_log_top.png",
+            "is_srgb": false,
+            "wrap_s": "repeat",
+            "wrap_t": "repeat",
+            "min_filter": "linear_mipmap_linear",
+            "mag_filter": "linear"
+        },
+        {
+            "name": "crosshair_1",
+            "path": "UI/crosshair_1.png",
+            "is_srgb": false
+        },
+        {
+            "name": "crosshair",
+            "path": "UI/crosshair.png",
+            "is_srgb": false
+        },
+        {
+            "name": "dirt",
+            "path": "block/dirt.png",
+            "is_srgb": false
+        },
+        {
+            "name": "grass_block_side",
+            "path": "block/grass_block_side.png",
+            "is_srgb": false
+        },
+        {
+            "name": "grass_block_top",
+            "path": "block/grass_block_top.png",
+            "is_srgb": false
+        },
+        {
+            "name": "stone",
+            "path": "block/stone.png",
+            "is_srgb": false
+        },
+        {
+            "name": "oak_log",
+            "path": "block/oak_log.png",
+            "is_srgb": false
+        },
+        {
+            "name": "birch_specular",
+            "path": "block/birch_specular.png",
+            "is_srgb": false
+        },
+        {
+            "name": "oak_normal",
+            "path": "block/birch_normal.png",
+            "is_srgb": false
+        },
+        {
+            "name": "birch_log_top",
+            "path": "block/birch_log_top.png",
+            "is_srgb": false
+        },
+        {
+            "name": "birch_log",
+            "path": "block/birch_log.png",
+            "is_srgb": false
+        },
+        {
+            "name": "deepslate_diamond_ore",
+            "path": "block/deepslate_diamond_ore.png",
+            "is_srgb": false
+        },
+        {
+            "name": "birch_normal",
+            "path": "block/birch_normal.png",
+            "is_srgb": false
+        },
+        {
+            "name": "rusted_iron_albedo",
+            "path": "other/textures/pbr/rusted_iron/albedo.png",
+            "is_srgb": false
+        },
+        {
+            "name": "rusted_iron_ao",
+            "path": "other/textures/pbr/rusted_iron/ao.png",
+            "is_srgb": false
+        },
+        {
+            "name": "rusted_iron_metallic",
+            "path": "other/textures/pbr/rusted_iron/metallic.png",
+            "is_srgb": false
+        },
+        {
+            "name": "rusted_iron_normal",
+            "path": "other/textures/pbr/rusted_iron/normal.png",
+            "is_srgb": false
+        },
+        {
+            "name": "rusted_iron_roughness",
+            "path": "other/textures/pbr/rusted_iron/roughness.png",
+            "is_srgb": false
+        }
+    ],
+    "cube_textures": [
+        {
+            "name": "oak_diffuse_cube",
+            "faces": [
+                "block/oak_log.png",
+                "block/oak_log.png",
+                "block/oak_log_top.png",
+                "block/oak_log_top.png",
+                "block/oak_log.png",
+                "block/oak_log.png"
+            ],
+            "wrap_s": "clamp_to_edge",
+            "min_filter": "linear"
+        },
+        {
+            "name": "oak_normal_cube",
+            "faces": [
+                "block/birch_normal.png",
+                "block/birch_normal.png",
+                "block/birch_normal.png",
+                "block/birch_normal.png",
+                "block/birch_normal.png",
+                "block/birch_normal.png"
+            ],
+            "wrap_s": "clamp_to_edge",
+            "min_filter": "linear"
+        },
+        {
+            "name": "oak_specular_cube",
+            "faces": [
+                "block/birch_specular.png",
+                "block/birch_specular.png",
+                "block/birch_specular.png",
+                "block/birch_specular.png",
+                "block/birch_specular.png",
+                "block/birch_specular.png"
+            ],
+            "wrap_s": "clamp_to_edge",
+            "min_filter": "linear"
+        },
+        {
+            "name": "birch_diffuse_cube",
+            "faces": [
+                "block/birch_log.png",
+                "block/birch_log.png",
+                "block/birch_log_top.png",
+                "block/birch_log_top.png",
+                "block/birch_log.png",
+                "block/birch_log.png"
+            ]
+        },
+        {
+            "name": "birch_normal_cube",
+            "faces": [
+                "block/birch_normal.png",
+                "block/birch_normal.png",
+                "block/birch_normal.png",
+                "block/birch_normal.png",
+                "block/birch_normal.png",
+                "block/birch_normal.png"
+            ],
+            "wrap_s": "clamp_to_edge",
+            "min_filter": "linear"
+        },
+        {
+            "name": "birch_specular_cube",
+            "faces": [
+                "block/birch_specular.png",
+                "block/birch_specular.png",
+                "block/birch_specular.png",
+                "block/birch_specular.png",
+                "block/birch_specular.png",
+                "block/birch_specular.png"
+            ],
+            "wrap_s": "clamp_to_edge",
+            "min_filter": "linear"
+        },
+        {
+            "name": "skybox_cube",
+            "faces": [
+                "skybox/back.png",
+                "skybox/back.png",
+                "skybox/top.png",
+                "skybox/bottom.png",
+                "skybox/back.png",
+                "skybox/back.png"
+            ],
+            "wrap_s": "clamp_to_edge",
+            "min_filter": "linear"
+        },
+        {
+            "name": "redstone_lamp_cube",
+            "faces": [
+                "block/redstone_lamp.png",
+                "block/redstone_lamp.png",
+                "block/redstone_lamp.png",
+                "block/redstone_lamp.png",
+                "block/redstone_lamp.png",
+                "block/redstone_lamp.png"
+            ],
+            "wrap_s": "clamp_to_edge",
+            "min_filter": "linear"
+        },
+        {
+            "name": "redstone_lamp_on_cube",
+            "faces": [
+                "block/redstone_lamp_on.png",
+                "block/redstone_lamp_on.png",
+                "block/redstone_lamp_on.png",
+                "block/redstone_lamp_on.png",
+                "block/redstone_lamp_on.png",
+                "block/redstone_lamp_on.png"
+            ],
+            "wrap_s": "clamp_to_edge",
+            "min_filter": "linear"
+        },
+        {
+            "name": "bricks_cube",
+            "faces": [
+                "block/bricks.png",
+                "block/bricks.png",
+                "block/bricks.png",
+                "block/bricks.png",
+                "block/bricks.png",
+                "block/bricks.png"
+            ],
+            "wrap_s": "clamp_to_edge",
+            "min_filter": "linear"
+        },
+        {
+            "name": "deepslate_diamond_ore_cube",
+            "faces": [
+                "block/deepslate_diamond_ore.png",
+                "block/deepslate_diamond_ore.png",
+                "block/deepslate_diamond_ore.png",
+                "block/deepslate_diamond_ore.png",
+                "block/deepslate_diamond_ore.png",
+                "block/deepslate_diamond_ore.png"
+            ],
+            "wrap_s": "clamp_to_edge",
+            "min_filter": "linear"
+        },
+        {
+            "name": "pure_white_cube",
+            "faces": [
+                "block/pure_white.png",
+                "block/pure_white.png",
+                "block/pure_white.png",
+                "block/pure_white.png",
+                "block/pure_white.png",
+                "block/pure_white.png"
+            ],
+            "wrap_s": "clamp_to_edge",
+            "min_filter": "linear"
+        },
+        {
+            "name": "dirt_cube",
+            "faces": [
+                "block/dirt.png",
+                "block/dirt.png",
+                "block/dirt.png",
+                "block/dirt.png",
+                "block/dirt.png",
+                "block/dirt.png"
+            ],
+            "wrap_s": "clamp_to_edge",
+            "min_filter": "linear"
+        },
+        {
+            "name": "grass_block_cube",
+            "faces": [
+                "block/pure_white.png",
+                "block/pure_white.png",
+                "block/pure_white.png",
+                "block/pure_white.png",
+                "block/pure_white.png",
+                "block/pure_white.png"
+            ],
+            "wrap_s": "clamp_to_edge",
+            "min_filter": "linear"
+        }
+    ]
+}
