@@ -9,6 +9,8 @@ uniform sampler2D gNormal;
 uniform sampler2D gAlbedo;
 uniform sampler2D gProperties;
 
+uniform sampler2D ssao;
+
 // 光照参数
 uniform vec3 uLightDirection;    // 平行光方向
 uniform vec3 uLightColor;        // 平行光颜色
@@ -78,10 +80,14 @@ void main() {
     
     // 计算光照
     //vec3 lighting = calculateLighting(data);
-    
-    vec3 lighting = data.albedo; // 环境光
+
+    // 获取环境光遮蔽因子
+    float ao = texture(ssao, vTexCoord).r;
+
+    vec3 lighting = data.albedo * (1-ao)  ;//+ data.albedo; 
     
     // 输出最终颜色
-    FragColor = vec4(lighting, 1.0);
-    //FragColor = vec4(0.1,0.5,0.3, 1.0);
+    FragColor = vec4(vec3(ao),1.0);
+    //FragColor = vec4(lighting,1.0);
+    //FragColor = vec4(data.albedo,1.0);
 }

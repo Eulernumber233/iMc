@@ -18,49 +18,46 @@
 //    };
 //}
 // 定义BlockFaceType的静态成员变量
-std::unordered_map<BlockFaceType, GLuint> BlockFaceType::type_to_texture;
+std::unordered_map<BlockFaceType, int> BlockFaceType::type_to_texture;
+
+int BlockFaceType::getTextureLayer(BlockFaceType key) {
+    auto it = type_to_texture.find(key);
+    return (it != type_to_texture.end()) ? it->second : -1;
+}
 
 void BlockFaceType::init_type_map()
 {
-    auto& texture_all = TextureMgr::GetInstance()->GetAllTextures2D();
+    auto texMgr = TextureMgr::GetInstance();
     // stone
-    type_to_texture[{ BLOCK_STONE, RIGHT }] = texture_all["stone"];
-    type_to_texture[{ BLOCK_STONE, LEFT }] = texture_all["stone"];
-    type_to_texture[{ BLOCK_STONE, UP }] = texture_all["stone"];
-    type_to_texture[{ BLOCK_STONE, DOWN }] = texture_all["stone"];
-    type_to_texture[{ BLOCK_STONE, FRONT }] = texture_all["stone"];
-    type_to_texture[{ BLOCK_STONE, BACK }] = texture_all["stone"];
+    type_to_texture[{ BLOCK_STONE, RIGHT }] = texMgr->GetTextureLayerIndex("stone");
+    type_to_texture[{ BLOCK_STONE, LEFT }] = texMgr->GetTextureLayerIndex("stone");
+    type_to_texture[{ BLOCK_STONE, UP }] = texMgr->GetTextureLayerIndex("stone");
+    type_to_texture[{ BLOCK_STONE, DOWN }] = texMgr->GetTextureLayerIndex("stone");
+    type_to_texture[{ BLOCK_STONE, FRONT }] = texMgr->GetTextureLayerIndex("stone");
+    type_to_texture[{ BLOCK_STONE, BACK }] = texMgr->GetTextureLayerIndex("stone");
 
     // grass
-    type_to_texture[{ BLOCK_GRASS, RIGHT }] = texture_all["grass_block_side"];
-    type_to_texture[{ BLOCK_GRASS, LEFT }] = texture_all["grass_block_side"];
-    type_to_texture[{ BLOCK_GRASS, UP }] = texture_all["grass_block_top"];
-    type_to_texture[{ BLOCK_GRASS, DOWN }] = texture_all["dirt"];
-    type_to_texture[{ BLOCK_GRASS, FRONT }] = texture_all["grass_block_side"];
-    type_to_texture[{ BLOCK_GRASS, BACK }] = texture_all["grass_block_side"];
+    type_to_texture[{ BLOCK_GRASS, RIGHT }] = texMgr->GetTextureLayerIndex("grass_block_side");
+    type_to_texture[{ BLOCK_GRASS, LEFT }] = texMgr->GetTextureLayerIndex("grass_block_side");
+    type_to_texture[{ BLOCK_GRASS, UP }] = texMgr->GetTextureLayerIndex("grass_block_top");
+    type_to_texture[{ BLOCK_GRASS, DOWN }] = texMgr->GetTextureLayerIndex("dirt");
+    type_to_texture[{ BLOCK_GRASS, FRONT }] = texMgr->GetTextureLayerIndex("grass_block_side");
+    type_to_texture[{ BLOCK_GRASS, BACK }] = texMgr->GetTextureLayerIndex("grass_block_side");
 
     // DIRT
-    type_to_texture[{ BLOCK_DIRT, RIGHT }] = texture_all["dirt"];
-    type_to_texture[{ BLOCK_DIRT, LEFT }] = texture_all["dirt"];
-    type_to_texture[{ BLOCK_DIRT, UP }] = texture_all["dirt"];
-    type_to_texture[{ BLOCK_DIRT, DOWN }] = texture_all["dirt"];
-    type_to_texture[{ BLOCK_DIRT, FRONT }] = texture_all["dirt"];
-    type_to_texture[{ BLOCK_DIRT, BACK }] = texture_all["dirt"];
+    type_to_texture[{ BLOCK_DIRT, RIGHT }] = texMgr->GetTextureLayerIndex("dirt");
+    type_to_texture[{ BLOCK_DIRT, LEFT }] = texMgr->GetTextureLayerIndex("dirt");
+    type_to_texture[{ BLOCK_DIRT, UP }] = texMgr->GetTextureLayerIndex("dirt");
+    type_to_texture[{ BLOCK_DIRT, DOWN }] = texMgr->GetTextureLayerIndex("dirt");
+    type_to_texture[{ BLOCK_DIRT, FRONT }] = texMgr->GetTextureLayerIndex("dirt");
+    type_to_texture[{ BLOCK_DIRT, BACK }] = texMgr->GetTextureLayerIndex("dirt");
 
     // BLOCK_WOOD
-    type_to_texture[{ BLOCK_WOOD, RIGHT }] = texture_all["oak_log"];
-    type_to_texture[{ BLOCK_WOOD, LEFT }] = texture_all["oak_log"];
-    type_to_texture[{ BLOCK_WOOD, UP }] = texture_all["oak_log_top"];
-    type_to_texture[{ BLOCK_WOOD, DOWN }] = texture_all["oak_log_top"];
-    type_to_texture[{ BLOCK_WOOD, FRONT }] = texture_all["oak_log"];
-    type_to_texture[{ BLOCK_WOOD, BACK }] = texture_all["oak_log"];
+    type_to_texture[{ BLOCK_WOOD, RIGHT }] = texMgr->GetTextureLayerIndex("oak_log");
+    type_to_texture[{ BLOCK_WOOD, LEFT }] = texMgr->GetTextureLayerIndex("oak_log");
+    type_to_texture[{ BLOCK_WOOD, UP }] = texMgr->GetTextureLayerIndex("oak_log_top");
+    type_to_texture[{ BLOCK_WOOD, DOWN }] = texMgr->GetTextureLayerIndex("oak_log_top");
+    type_to_texture[{ BLOCK_WOOD, FRONT }] = texMgr->GetTextureLayerIndex("oak_log");
+    type_to_texture[{ BLOCK_WOOD, BACK }] = texMgr->GetTextureLayerIndex("oak_log");
 }
 
-GLuint BlockFaceType::getTexture(BlockFaceType key)
-{
-    auto it = type_to_texture.find(key);
-    if (it != type_to_texture.end()) {
-        return it->second;
-    }
-    return 0;
-}

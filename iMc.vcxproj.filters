@@ -57,6 +57,9 @@
     <ClCompile Include="scr\TextureMgr.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="scr\World_4.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="scr\chunk\BlockType.h">
@@ -127,6 +130,10 @@
     <None Include="PropertySheet.props" />
     <None Include="PropertySheet_debug.props" />
     <None Include="README.md" />
+    <None Include="shader\ssao.vert" />
+    <None Include="shader\ssao.frag" />
+    <None Include="shader\ssao_blur.frag" />
+    <None Include="shader\ssao_blur.vert" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="assert\textures\block\birch_log.png">

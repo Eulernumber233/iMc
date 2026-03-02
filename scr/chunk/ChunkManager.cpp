@@ -2,8 +2,10 @@
 #include <iostream>
 #include <algorithm>
 #include "Chunk.h"
-ChunkManager::ChunkManager()
+ChunkManager::ChunkManager(unsigned int seed)
     : m_renderRadius(8) {
+	generator = std::make_shared<TerrainGenerator>();
+	generator->setSeed(seed);
 }
 
 ChunkManager::~ChunkManager() {
@@ -12,10 +14,7 @@ ChunkManager::~ChunkManager() {
     m_visibleChunks.clear();
 
     // 清理渲染数据
-    for (auto& pair : m_renderData) {
-        pair.second.clear();
-        pair.second.shrink_to_fit();
-    }
+    m_instanceData.clear();
 }
 
 void ChunkManager::initialize(int renderRadius, const glm::vec3& cameraPos) {
@@ -88,9 +87,9 @@ void ChunkManager::setRenderRadius(int radius) {
 
 int ChunkManager::getTotalInstances() const {
     int total = 0;
-    for (const auto& pair : m_renderData) {
-        total += pair.second.size();
-    }
+    //for (const auto& pair : m_renderData) {
+    //    total += pair.second.size();
+    //}
     return total;
 }
 
@@ -185,26 +184,35 @@ void ChunkManager::unloadChunk(const glm::ivec2& chunkPos) {
 }
 
 void ChunkManager::mergeRenderData() {
+
+    std::lock_guard<std::mutex> lock(m_renderDataMutex);
+
     // 清空现有渲染数据
-    for (auto& pair : m_renderData) {
-        pair.second.clear();
-    }
+    m_instanceData.clear();
 
     // 合并所有可见区块的实例化数据
     for (Chunk* chunk : m_visibleChunks) {
         if (!chunk->isVisible()|| !chunk->is_can_render(m_camera)) continue;
 
-        const auto& chunkData = chunk->getInstanceData();
-
-        for (const auto& pair : chunkData) {
-            BlockFaceType type = pair.first;
-            const std::vector<glm::mat4>& matrices = pair.second;
-
-            // 添加到全局渲染数据
-            m_renderData[type].insert(m_renderData[type].end(),
-                matrices.begin(), matrices.end());
+        const auto& chunkDatas = chunk->getInstanceData();
+		auto chunk_pos = glm::ivec2(chunk->getPosition().x * Chunk::WIDTH, chunk->getPosition().y * Chunk::DEPTH);
+        // 转换为实例数据
+        for (const auto& chunkData : chunkDatas) {
+            if (chunkData.blockType == BlockType::BLOCK_ERRER) {
+                continue;
+            }
+            InstanceData data;
+            // 假设 chunkData.loc.x,y,z 为全局整数坐标，加上0.5得到方块中心
+            data.position = glm::vec3(chunkData.loc.x + 0.5f + chunk_pos.x, chunkData.loc.y + 0.5f, chunkData.loc.z + 0.5f + chunk_pos.y);
+            data.faceIndex = static_cast<int>(chunkData.loc.face_id);
+            data.blockType = static_cast<int>(chunkData.blockType);
+            // 从映射表获取纹理层索引
+            BlockFaceType bft{ chunkData.blockType, chunkData.loc.face_id };
+            data.textureLayer = BlockFaceType::getTextureLayer(bft); // 返回层索引
+            m_instanceData.push_back(data);
         }
     }
+
 }
 
 bool ChunkManager::shouldChunkBeVisible(const glm::ivec2& chunkPos,
@@ -226,4 +234,42 @@ float ChunkManager::distanceToCamera(const glm::ivec2& chunkPos,
     );
 
     return glm::distance(chunkCenter, cameraPos);
+}
+
+// 设置方块（世界坐标）
+bool ChunkManager::setBlock(const glm::ivec3& worldPos, BlockType type) {
+    glm::ivec2 chunkPos(
+        static_cast<int>(std::floor(worldPos.x / (float)Chunk::WIDTH)),
+        static_cast<int>(std::floor(worldPos.z / (float)Chunk::DEPTH))
+    );
+    Chunk* chunk = getChunk(chunkPos);
+    if (!chunk) return false;
+
+    glm::ivec3 localPos(
+        ((worldPos.x % Chunk::WIDTH) + Chunk::WIDTH) % Chunk::WIDTH,
+        worldPos.y,
+        ((worldPos.z % Chunk::DEPTH) + Chunk::DEPTH) % Chunk::DEPTH
+    );
+    if (localPos.y < 0 || localPos.y >= Chunk::HEIGHT) return false;
+
+    chunk->setBlockAndUpdate(localPos.x, localPos.y, localPos.z, type);
+    return true;
+}
+
+// 获取方块类型（世界坐标）
+BlockType ChunkManager::getBlockAt(const glm::ivec3& worldPos){
+    glm::ivec2 chunkPos(
+        static_cast<int>(std::floor(worldPos.x / (float)Chunk::WIDTH)),
+        static_cast<int>(std::floor(worldPos.z / (float)Chunk::DEPTH))
+    );
+    Chunk* chunk = getChunk(chunkPos);
+    if (!chunk) return BLOCK_AIR;
+
+    glm::ivec3 localPos(
+        ((worldPos.x % Chunk::WIDTH) + Chunk::WIDTH) % Chunk::WIDTH,
+        worldPos.y,
+        ((worldPos.z % Chunk::DEPTH) + Chunk::DEPTH) % Chunk::DEPTH
+    );
+    if (localPos.y < 0 || localPos.y >= Chunk::HEIGHT) return BLOCK_AIR;
+    return chunk->getBlock(localPos.x, localPos.y, localPos.z);
 }

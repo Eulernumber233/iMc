@@ -6,18 +6,19 @@
 #include <glm/glm.hpp>
 #include "BlockType.h"
 #include "../Camera.h"
+#include <mutex>   
+
+//#include "../generate/TerrainGenerator.h"
 // 区块键（64位整数）
 using ChunkKey = int64_t;
 
-//  
-
-
 // 区块管理器 - 负责加载、卸载和管理区块
 class Chunk;
+class TerrainGenerator;
 class ChunkManager {
 public:
     // 构造函数/析构函数
-    ChunkManager();
+    ChunkManager(unsigned int seed);
     ~ChunkManager();
 
     // 初始化
@@ -27,9 +28,10 @@ public:
     void update(std::shared_ptr<Camera> camera);
 
     // 获取渲染数据
-    const std::unordered_map<BlockFaceType, std::vector<glm::mat4>>& getRenderData() const {
-        return m_renderData;
+    const std::vector<InstanceData>& getRenderData() const {
+        return m_instanceData;
     }
+    std::mutex& getRenderDataMutex() { return m_renderDataMutex; }  
 
     // 获取区块
     Chunk* getChunk(const glm::ivec2& chunkPos);
@@ -45,14 +47,23 @@ public:
     int getTotalInstances() const;
     void printStats() const;
 
+    std::shared_ptr<TerrainGenerator> getTerrainGenerator() { return generator; }
+
+    // 方块修改与查询
+    bool setBlock(const glm::ivec3& worldPos, BlockType type);
+    BlockType getBlockAt(const glm::ivec3& worldPos);// const
+
 private:
+    std::shared_ptr<TerrainGenerator> generator = nullptr;
+
     std::shared_ptr<Camera> m_camera;
     // 区块存储
     std::unordered_map<ChunkKey, std::unique_ptr<Chunk>> m_loadedChunks;
     std::vector<Chunk*> m_visibleChunks;
 
     // 渲染数据（合并所有可见区块的实例化数据）
-    std::unordered_map<BlockFaceType, std::vector<glm::mat4>> m_renderData;
+    std::vector<InstanceData> m_instanceData;
+    mutable std::mutex m_renderDataMutex;   // 保护 m_instanceData
 
     // 渲染半径
     int m_renderRadius;

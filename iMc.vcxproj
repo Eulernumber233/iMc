@@ -139,6 +139,7 @@
     <ClCompile Include="scr\std_image.cpp" />
     <ClCompile Include="scr\TextureMgr.cpp" />
     <ClCompile Include="scr\UI\UIManager.cpp" />
+    <ClCompile Include="scr\World_4.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="scr\Camera.h" />
@@ -173,6 +174,10 @@
     <None Include="shader\outline.vert" />
     <None Include="assert\textures\Minecraft砖块贴图 %282%29.7z" />
     <None Include="assert\textures\textures_config.json" />
+    <None Include="shader\ssao.frag" />
+    <None Include="shader\ssao.vert" />
+    <None Include="shader\ssao_blur.frag" />
+    <None Include="shader\ssao_blur.vert" />
     <None Include="shader\ui.frag" />
     <None Include="shader\ui.vert" />
   </ItemGroup>

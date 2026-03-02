@@ -1,5 +1,4 @@
 #include "Chunk.h"
-#include "../generate/TerrainGenerator.h"
 #include <iostream>
 #include <algorithm>
 #include <cstring>
@@ -10,6 +9,7 @@ Chunk::Chunk(const glm::ivec2& position,ChunkManager* chunkManeger)
     , m_isVisible(false)
 	, m_chunkManager(chunkManeger)
 {
+	generator = chunkManeger->getTerrainGenerator();
     m_minPos.x = m_position.x * WIDTH;
     m_minPos.y = 0;  // Y轴从0开始
     m_minPos.z = m_position.y * DEPTH;
@@ -48,10 +48,8 @@ void Chunk::unload() {
     if (!m_isLoaded) return;
 
     // 清空实例化数据
-    for (auto& pair : m_instanceData) {
-        pair.second.clear();
-        pair.second.shrink_to_fit();
-    }
+	m_instanceData.clear();
+    m_PosToInstanceIndex.clear();
 
     // 清空方块数据
     m_blocks.clear();
@@ -165,23 +163,15 @@ void Chunk::setBlock(int x, int y, int z, BlockType block)
 
 void Chunk::generateTerrain() {
     // 使用地形生成器填充方块
-    TerrainGenerator generator;
-
-    // 设置参数
-    auto& params = generator.getParams();
-    params.seed = 123312312345;
-
-
     // 生成地形
-    generator.fillChunk(this, m_position);
+    generator->fillChunk(this, m_position);
     //TerrainGenerator::fillChunk(this, m_position);
 }
 
 void Chunk::calculateVisibility() {
     // 清空现有实例化数据
-    for (auto& pair : m_instanceData) {
-        pair.second.clear();
-    }
+	m_instanceData.clear();
+
     BlockFace Faces[] = { BlockFace::RIGHT, BlockFace::LEFT, BlockFace::FRONT, BlockFace::BACK, BlockFace::UP, BlockFace::DOWN };
 
     // 遍历所有方块
@@ -249,9 +239,9 @@ bool Chunk::isFaceVisible(int x, int y, int z, BlockFace face) const {
 }
 
 void Chunk::addFaceToInstanceData(int x, int y, int z, BlockFace face, BlockType blockType) {
-    glm::mat4 matrix = createFaceMatrix(x, y, z, face);
-    m_instanceData[{blockType,face}].push_back(matrix);
-	//m_PosToBlockFace[{(uint8_t)x, (uint8_t)y, (uint8_t)z, (uint8_t)face}]++; // TODO 用于以后增删方块查询
+    //glm::mat4 matrix = createFaceMatrix(x, y, z, face);
+    m_instanceData.push_back({ { (uint8_t)x, (uint8_t)y, (uint8_t)z, face }, blockType });
+	m_PosToInstanceIndex[{ (uint8_t)x, (uint8_t)y, (uint8_t)z, face }] = m_instanceData.size() - 1;
 }
 
 glm::mat4 Chunk::createFaceMatrix(int x, int y, int z, BlockFace face) const {
@@ -329,9 +319,9 @@ Chunk* Chunk::getNeighborChunk(int x, int z) const
 
 int Chunk::getTotalInstances() const {
     int total = 0;
-    for (const auto& pair : m_instanceData) {
-        total += pair.second.size();
-    }
+    //for (const auto& pair : m_instanceData) {
+    //    total += pair.second.size();
+    //}
     return total;
 }
 
@@ -346,12 +336,12 @@ void Chunk::printDebugInfo() const {
 
 void Chunk::print_m_instanceData() const
 {
-    std::cout << "Chunk (" << m_position.x << ", " << m_position.y
-        << ") loaded. Total instances: " << getTotalInstances() << std::endl;
-    for (auto data : m_instanceData) {
-		std::cout << "BlockType " << static_cast<int>(data.first.type)<< "BlockFace " 
-            << static_cast<int>(data.first.face_id) << " has " << data.second.size() << " instances." << std::endl;
-    }
+  //  std::cout << "Chunk (" << m_position.x << ", " << m_position.y
+  //      << ") loaded. Total instances: " << getTotalInstances() << std::endl;
+  //  for (auto data : m_instanceData) {
+		//std::cout << "BlockType " << static_cast<int>(data.first.type)<< "BlockFace " 
+  //          << static_cast<int>(data.first.face_id) << " has " << data.second.size() << " instances." << std::endl;
+  //  }
 }
 
 bool Chunk::is_can_render(std::shared_ptr<Camera> camera)
@@ -409,4 +399,126 @@ bool Chunk::isAABBInFrustum(const glm::vec3& min, const glm::vec3& max,
         }
     }
     return true;
+}
+
+
+
+BlockType Chunk::setBlockAndUpdate(int x, int y, int z, BlockType newType) {
+    std::lock_guard<std::mutex> lock(m_mutex);   // 锁定整个更新过程
+
+    BlockType oldType = getBlock(x, y, z);
+    if (oldType == newType) return oldType;
+
+    setBlock(x, y, z, newType);
+
+    // 1. 删除旧方块的所有面
+    if (oldType != BLOCK_AIR) {
+        for (int face = 0; face < 6; ++face) {
+            removeFaceUnlocked({ (uint8_t)x, (uint8_t)y, (uint8_t)z, (BlockFace)face });
+        }
+    }
+
+    // 2. 添加新方块的面（如果新方块非空气）
+    if (newType != BLOCK_AIR) {
+        BlockFace faces[6] = { RIGHT, LEFT, FRONT, BACK, UP, DOWN };
+        for (int i = 0; i < 6; ++i) {
+            if (isFaceVisible(x, y, z, faces[i])) {
+                addFaceUnlocked(x, y, z, faces[i], newType);
+            }
+        }
+    }
+
+    // 3. 更新六个邻居的面
+    glm::ivec3 neighbors[6] = {
+        {x + 1,y,z}, {x - 1,y,z}, {x,y + 1,z}, {x,y - 1,z}, {x,y,z + 1}, {x,y,z - 1}
+    };
+    BlockFace neighborFaces[6] = { LEFT, RIGHT, DOWN, UP, BACK, FRONT };
+
+    for (int i = 0; i < 6; ++i) {
+        int nx = neighbors[i].x;
+        int ny = neighbors[i].y;
+        int nz = neighbors[i].z;
+
+        if (ny < 0 || ny >= HEIGHT) continue;   // Y轴超出，不处理
+
+        Chunk* neighborChunk = this;
+        int lx = nx, lz = nz;
+        if (nx < 0 || nx >= WIDTH || nz < 0 || nz >= DEPTH) {
+            neighborChunk = getNeighborChunk(nx, nz);
+            if (!neighborChunk) continue;
+            lx = (nx + WIDTH) % WIDTH;
+            lz = (nz + DEPTH) % DEPTH;
+        }
+
+        // 锁定邻居区块
+        //std::lock_guard<std::mutex> neighborLock(neighborChunk->m_mutex);
+        neighborChunk->updateFaceUnlocked(lx, ny, lz, neighborFaces[i]);
+    }
+
+    // 4. 检查是否需要压缩
+    if (m_errerCount > m_instanceData.size() / 4) {
+        compactInstanceDataUnlocked();
+    }
+
+    return oldType;
+}
+
+void Chunk::removeFaceUnlocked(const BlockFaceLocKey& key) {
+    auto it = m_PosToInstanceIndex.find(key);
+    if (it != m_PosToInstanceIndex.end()) {
+        int index = it->second;
+        m_instanceData[index].blockType = BLOCK_ERRER;   // 标记为错误类型（不渲染）
+        m_PosToInstanceIndex.erase(it);
+        m_errerCount++;
+    }
+}
+
+void Chunk::addFaceUnlocked(int x, int y, int z, BlockFace face, BlockType type) {
+    BlockFaceLocKey key{ (uint8_t)x, (uint8_t)y, (uint8_t)z, face };
+    if (m_PosToInstanceIndex.find(key) != m_PosToInstanceIndex.end()) {
+        return;   // 已经存在，理论上不应发生
+    }
+    m_instanceData.push_back({ key, type });
+    m_PosToInstanceIndex[key] = m_instanceData.size() - 1;
+}
+
+void Chunk::updateFaceUnlocked(int x, int y, int z, BlockFace face) {
+    BlockType block = getBlock(x, y, z);
+    BlockFaceLocKey key{ (uint8_t)x, (uint8_t)y, (uint8_t)z, face };
+
+    if (block == BLOCK_AIR) {
+        // 空气方块不应该有面，删除可能存在的面
+        removeFaceUnlocked(key);
+        return;
+    }
+
+    bool visible = isFaceVisible(x, y, z, face);
+    if (visible) {
+        if (m_PosToInstanceIndex.find(key) == m_PosToInstanceIndex.end()) {
+            addFaceUnlocked(x, y, z, face, block);
+        }
+    }
+    else {
+        removeFaceUnlocked(key);
+    }
+}
+
+void Chunk::compactInstanceDataUnlocked() {
+    if (m_errerCount == 0) return;
+
+    std::vector<DrawFaceKey> newData;
+    std::unordered_map<BlockFaceLocKey, int> newMap;
+    newData.reserve(m_instanceData.size() - m_errerCount);
+
+    for (size_t i = 0; i < m_instanceData.size(); ++i) {
+        if (m_instanceData[i].blockType != BLOCK_ERRER) {
+            BlockFaceLocKey key = m_instanceData[i].loc;
+            newMap[key] = newData.size();
+            newData.push_back(m_instanceData[i]);
+        }
+    }
+
+    m_instanceData.swap(newData);
+    m_PosToInstanceIndex.swap(newMap);
+    m_errerCount = 0;
 }

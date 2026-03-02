@@ -7,6 +7,9 @@
 #include <glm/glm.hpp>
 #include <memory>
 #include "../Camera.h"
+#include "../generate/TerrainGenerator.h"
+#include <mutex>   // 新增
+
 // 区块类 - 管理16x64x16区域的方块
 class Chunk {
 public:
@@ -42,8 +45,12 @@ public:
     // 设置方块
     void setBlock(int x, int y, int z, BlockType block);
 
+    // 新增：增量更新方块（返回旧类型）
+    BlockType setBlockAndUpdate(int x, int y, int z, BlockType newType);
+
+
     // 获取实例化数据
-    const std::unordered_map<BlockFaceType, std::vector<glm::mat4>>& getInstanceData() const {
+    const std::vector<DrawFaceKey>& getInstanceData() const {
         return m_instanceData;
     }
 
@@ -61,7 +68,11 @@ public:
     bool isAABBInFrustum(const glm::vec3& min, const glm::vec3& max,
         const std::array<glm::vec4, 6>& planes) const;
 
+    // 新增：互斥锁（为方便 ChunkManager 访问，设为 public）
+    mutable std::mutex m_mutex;
 private:
+    std::shared_ptr<TerrainGenerator> generator;
+
 	ChunkManager* m_chunkManager;  // 指向区块管理器的指针
     // 方块数据
     std::vector<BlockType> m_blocks;
@@ -72,8 +83,13 @@ private:
     glm::vec3 m_maxPos;
 
     // 实例化数据：每种方块类型对应一个矩阵列表
-    std::unordered_map<BlockFaceType, std::vector<glm::mat4>> m_instanceData;
+    //std::unordered_map<BlockFaceType, std::vector<glm::mat4>> m_instanceData;
     //std::unordered_map<BlockFaceKey, int> m_PosToBlockFace;
+
+    // 待删除计数器
+    int m_errerCount = 0;
+    std::vector<DrawFaceKey> m_instanceData = {}; // 存储所有可见面的坐标和面信息，用于增删方块时快速查询
+	std::unordered_map<BlockFaceLocKey, int> m_PosToInstanceIndex; // 存储每个方块面对应的实例化数据索引，方便增删方块时更新实例化数据
 
     // 状态标志
     bool m_isLoaded;
@@ -105,5 +121,11 @@ private:
 
     std::vector<Chunk*> NeighborChunk = std::vector<Chunk*>(4, nullptr);// 0:+X  1:-X  2:+Z  3:-Z
 
-    friend class ChunkManager;  // 允许ChunkManager访问私有方法
+    // 新增：无锁版本的辅助函数（假设已持有锁）
+    void removeFaceUnlocked(const BlockFaceLocKey& key);
+    void addFaceUnlocked(int x, int y, int z, BlockFace face, BlockType type);
+    void updateFaceUnlocked(int x, int y, int z, BlockFace face);
+    void compactInstanceDataUnlocked();
+
+    friend class ChunkManager;  
 };

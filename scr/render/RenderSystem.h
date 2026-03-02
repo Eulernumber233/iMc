@@ -26,11 +26,14 @@ public:
     bool initialize();
 
     // 渲染方块类型
-    void render(BlockFaceType type, const std::vector<glm::mat4>& instanceMatrices,
+    void render(const std::vector<InstanceData>& instanceMatrices,
         const glm::mat4& view, const glm::mat4& projection);
 
     // 获取VAO
     GLuint getVAO() const { return VAO; }
+
+    // 设置纹理数组
+    void setTextureArray(GLuint texArray) { m_textureArray = texArray; }
 
 private:
     // 创建单位立方体的面
@@ -39,8 +42,8 @@ private:
     GLuint VAO;            // 顶点数组对象
     GLuint VBO;            // 顶点缓冲区对象
 	GLuint EBO;			// 索引缓冲区对象
-    GLuint m_instanceVBO;    // 实例化矩阵缓冲区
-
+    GLuint m_instanceDataVBO;    // 实例化矩阵缓冲区
+    GLuint m_textureArray = 0; 
     std::vector<unsigned int> m_indices; // 单个面的索引数据
     std::vector<FaceVertex> m_vertices;
 
@@ -93,12 +96,12 @@ public:
 
     // UI相关方法
     void initUI();
-    void renderUI();
     UIManager& getUIManager() { return UIManager::getInstance(); }
     // 设置屏幕尺寸供UI使用
     void setScreenSize(int width, int height);
 
 private:
+
     // 屏幕尺寸
     int m_screenWidth;
     int m_screenHeight;
@@ -107,8 +110,19 @@ private:
     GLuint m_gBuffer;
     GLuint m_gPosition, m_gNormal, m_gAlbedo, m_gProperties;
     GLuint m_rboDepth;
-
+    GLuint m_ssaoFBO, m_ssaoBlurFBO;
+    GLuint m_ssaoColorBuffer, m_ssaoColorBufferBlur;
+	GLuint m_noiseTexture;// SSAO噪声纹理
+	std::vector<glm::vec3> ssaoKernel;// SSAO采样核
     // 着色器程序
+    Shader m_ssaoShader{ {
+        { GL_VERTEX_SHADER,"shader/ssao.vert" },
+        { GL_FRAGMENT_SHADER, "shader/ssao.frag" }
+        } };
+    Shader m_ssaoBlurShader{ {
+        { GL_VERTEX_SHADER,"shader/ssao_blur.vert" },
+        { GL_FRAGMENT_SHADER, "shader/ssao_blur.frag" }
+        } };
     Shader m_deferredLightingShader{ {
             { GL_VERTEX_SHADER,"shader/deferred_lighting.vert" },
             { GL_FRAGMENT_SHADER, "shader/deferred_lighting.frag" }
@@ -149,14 +163,21 @@ private:
     void createScreenQuad();
     void createSampleUI();
 
-    // 渲染阶段
+    // 渲染
+	// 全屏四边形
+    void RenderQuad();
+	// 几何阶段
     void geometryPass(const ChunkManager& chunkManager,
         const glm::mat4& view,
         const glm::mat4& projection);
-
+	// ssao阶段
+	void ssaoPass(const glm::mat4& view, const glm::mat4& projection);
+    // ssao模糊
+	void ssaoBlurPass();
+	// 光照计算
+    void lightingPass(const glm::vec3& cameraPos);
     // 渲染边框
     void renderOutlines(const glm::mat4& view, const glm::mat4& projection);
-
-    void lightingPass(const glm::vec3& cameraPos);
-
+	// 渲染UI
+    void renderUI();
 };

@@ -3,8 +3,9 @@
 #include <fstream>
 #include <sstream>
 #include "../TextureMgr.h"
+#include <random>
 BlockRenderer::BlockRenderer()
-    : VAO(0), VBO(0), m_instanceVBO(0), EBO(0) {
+    : VAO(0), VBO(0), m_instanceDataVBO(0), EBO(0) {
 
 }
 
@@ -19,7 +20,7 @@ bool BlockRenderer::initialize() {
     glGenVertexArrays(1, &VAO);
     glGenBuffers(1, &VBO);
     glGenBuffers(1, &EBO);
-    glGenBuffers(1, &m_instanceVBO);
+    glGenBuffers(1, &m_instanceDataVBO);
 
     glBindVertexArray(VAO);
     // 绑定顶点数据
@@ -57,68 +58,65 @@ bool BlockRenderer::initialize() {
     //glEnableVertexAttribArray(4);
 
 
-    glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
-    // 预分配空间（假设最大1000个实例）
-    glBufferData(GL_ARRAY_BUFFER, sizeof(glm::mat4) * 6000, NULL, GL_DYNAMIC_DRAW);
-
-    // 设置实例矩阵属性（location 5-8）
-    GLsizei vec4Size = sizeof(glm::vec4);
+    glBindBuffer(GL_ARRAY_BUFFER, m_instanceDataVBO);
+    // 预分配空间（假设最大10000个实例）
+    glBufferData(GL_ARRAY_BUFFER, sizeof(glm::mat4) * 10000, NULL, GL_DYNAMIC_DRAW);
+    
+    // 设置实例属性 (location 5-8)
+    // 位置 (vec3)
     glEnableVertexAttribArray(5);
-    glVertexAttribPointer(5, 4, GL_FLOAT, GL_FALSE, 4 * vec4Size, (void*)0);
-    glEnableVertexAttribArray(6);
-    glVertexAttribPointer(6, 4, GL_FLOAT, GL_FALSE, 4 * vec4Size, (void*)(1 * vec4Size));
-    glEnableVertexAttribArray(7);
-    glVertexAttribPointer(7, 4, GL_FLOAT, GL_FALSE, 4 * vec4Size, (void*)(2 * vec4Size));
-    glEnableVertexAttribArray(8);
-    glVertexAttribPointer(8, 4, GL_FLOAT, GL_FALSE, 4 * vec4Size, (void*)(3 * vec4Size));
-
-    // 设置实例属性除数
+    glVertexAttribPointer(5, 3, GL_FLOAT, GL_FALSE, sizeof(InstanceData), (void*)offsetof(InstanceData, position));
     glVertexAttribDivisor(5, 1);
-    glVertexAttribDivisor(6, 1);
-    glVertexAttribDivisor(7, 1);
-    glVertexAttribDivisor(8, 1);
 
+    // 面索引 (int)
+    glEnableVertexAttribArray(6);
+    glVertexAttribIPointer(6, 1, GL_INT, sizeof(InstanceData), (void*)offsetof(InstanceData, faceIndex));
+    glVertexAttribDivisor(6, 1);
+
+    // 方块类型 (int)
+    glEnableVertexAttribArray(7);
+    glVertexAttribIPointer(7, 1, GL_INT, sizeof(InstanceData), (void*)offsetof(InstanceData, blockType));
+    glVertexAttribDivisor(7, 1);
+
+    // 纹理层索引 (int)
+    glEnableVertexAttribArray(8);
+    glVertexAttribIPointer(8, 1, GL_INT, sizeof(InstanceData), (void*)offsetof(InstanceData, textureLayer));
+    glVertexAttribDivisor(8, 1);
 
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
 
+
     return true;
 }
+void BlockRenderer::render(
+    const std::vector<InstanceData>& instanceData,
+    const glm::mat4& view,
+    const glm::mat4& projection 
+    ) 
+{
+    if (instanceData.empty()) return;
 
-void BlockRenderer::render(BlockFaceType type, const std::vector<glm::mat4>& instanceMatrices,
-    const glm::mat4& view, const glm::mat4& projection) {
-    if (instanceMatrices.empty()) return;
-    // TODO: 根据方块类型设置材质属性
-    auto texture = BlockFaceType::getTexture(type);
-
-    // 使用着色器
     m_shader.use();
-
-    // 设置统一变量
     m_shader.setMat4("uView", view);
     m_shader.setMat4("uProjection", projection);
-	m_shader.setInt("diffuse", 0); // 纹理单元0
-    m_shader.setInt("BlockType", static_cast<int>(type.type)); 
-    m_shader.setInt("BlockFace", static_cast<int>(type.face_id));
 
-    if (type.type == BLOCK_GRASS && type.face_id == UP) {
-        m_shader.setVec3("textureParam",glm::vec3(140, 230, 60));
-    }
-
+    // 绑定纹理数组
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, texture);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, m_textureArray);
+    m_shader.setInt("uTextureArray", 0);
 
-    // 上传实例化矩阵数据
-    glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
-    glBufferData(GL_ARRAY_BUFFER,
-        instanceMatrices.size() * sizeof(glm::mat4),
-        instanceMatrices.data(), GL_STREAM_DRAW);
+    // 上传实例数据
+    glBindBuffer(GL_ARRAY_BUFFER, m_instanceDataVBO);
+    glBufferData(GL_ARRAY_BUFFER, instanceData.size() * sizeof(InstanceData),
+        instanceData.data(), GL_STREAM_DRAW);
 
-    // 绑定VAO并绘制
+    // 绘制
     glBindVertexArray(VAO);
     glDrawElementsInstanced(GL_TRIANGLES,
         static_cast<GLsizei>(m_indices.size()),
-        GL_UNSIGNED_INT, 0, instanceMatrices.size());
+        GL_UNSIGNED_INT, 0,
+        static_cast<GLsizei>(instanceData.size()));
     glBindVertexArray(0);
 }
 
@@ -196,6 +194,10 @@ bool RenderSystem::initialize() {
         std::cerr << "Failed to initialize BlockRenderer!" << std::endl;
         return false;
     }
+    // 从 TextureMgr 获取纹理数组并设置给 BlockRenderer
+    auto texMgr = TextureMgr::GetInstance();
+    m_blockRenderer.setTextureArray(texMgr->GetTextureArray());
+
 
     // 初始化边框渲染器
     if (!m_outlineRenderer.initialize()) {
@@ -205,7 +207,6 @@ bool RenderSystem::initialize() {
 
     // 初始化UI系统
     initUI();
-
 
     // 配置边框
     BlockOutlineRenderer::OutlineConfig outlineConfig;
@@ -229,12 +230,57 @@ bool RenderSystem::initialize() {
     createScreenQuad();
 
     m_deferredLightingShader.use();
-
     m_deferredLightingShader.setInt("gPosition", 0);
     m_deferredLightingShader.setInt("gNormal", 1);
     m_deferredLightingShader.setInt("gAlbedo", 2);
     m_deferredLightingShader.setInt("gProperties", 3);
+    m_deferredLightingShader.setInt("ssao", 4);
 
+    // Sample kernel
+    std::uniform_real_distribution<GLfloat> randomFloats(0.0, 1.0);
+    std::default_random_engine generator;
+    ssaoKernel.clear();
+    for (GLuint i = 0; i < 64; ++i) {
+        glm::vec3 sample;
+        // 在半球内生成随机方向（z >= 0）
+        do {
+            sample = glm::vec3(randomFloats(generator) * 2.0f - 1.0f,
+                randomFloats(generator) * 2.0f - 1.0f,
+                randomFloats(generator));  // z在[0,1]
+        } while (glm::length(sample) > 1.0f);  // 保证在单位半球内
+        sample = glm::normalize(sample);
+        sample *= randomFloats(generator);     // 随机距离 [0,1]
+
+        // 按索引缩放，使采样点更集中在中心
+        float scale = (float)i / 64.0f;
+        scale = 0.1f + scale * scale * 0.9f;   // 从0.1线性增加到1.0
+        sample *= scale;
+
+        ssaoKernel.push_back(sample);
+    }
+
+    // Noise texture
+    std::vector<glm::vec3> ssaoNoise;
+    for (GLuint i = 0; i < 16; i++)
+    {
+        glm::vec3 noise(randomFloats(generator) * 2.0 - 1.0, randomFloats(generator) * 2.0 - 1.0, 0.0f); // rotate around z-axis (in tangent space)
+        ssaoNoise.push_back(noise);
+    }
+    glGenTextures(1, &m_noiseTexture);
+    glBindTexture(GL_TEXTURE_2D, m_noiseTexture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, 4, 4, 0, GL_RGB, GL_FLOAT, &ssaoNoise[0]);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    m_ssaoShader.use();
+    m_ssaoShader.setInt("gPositionDepth", 0);
+    m_ssaoShader.setInt("gNormal", 1);
+    m_ssaoShader.setInt("texNoise", 2);
+    m_ssaoShader.setVec2("uScreenSize", glm::vec2(m_screenWidth, m_screenHeight));
+
+    m_ssaoBlurShader.use();
+    m_ssaoBlurShader.setInt("ssaoInput", 0);
     std::cout << "RenderSystem initialized successfully!" << std::endl;
     return true;
 }
@@ -258,7 +304,7 @@ void RenderSystem::createSampleUI() {
     crosshair->anchor = glm::vec2(0.5f); // 居中
     crosshair->zIndex = 100; // 最高层级
     // 如果要使用原版原图需: “硬像素对齐 + 最近邻过滤 + 正确 Alpha 混合”，
-    crosshair->loadTextureByTextureName("crosshair_1");
+    crosshair->loadTextureByTextureName("crosshair");
 
 
     //// 水平线
@@ -304,7 +350,6 @@ void RenderSystem::setScreenSize(int width, int height) {
     // 通知UI管理器屏幕尺寸变化
     m_uiManager.onScreenResize(width, height);
 }
-
 
 
 bool RenderSystem::createGBuffer() {
@@ -366,6 +411,35 @@ bool RenderSystem::createGBuffer() {
         return false;
     }
 
+    // Also create framebuffer to hold SSAO processing stage 
+    glGenFramebuffers(1, &m_ssaoFBO);  
+    glBindFramebuffer(GL_FRAMEBUFFER, m_ssaoFBO);
+    // - SSAO color buffer
+    glGenTextures(1, &m_ssaoColorBuffer);
+    glBindTexture(GL_TEXTURE_2D, m_ssaoColorBuffer);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, SCR_WIDTH, SCR_HEIGHT, 0, GL_RGB, GL_FLOAT, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_ssaoColorBuffer, 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        std::cout << "SSAO Framebuffer not complete!" << std::endl;
+    
+    // - and blur stage
+    glGenFramebuffers(1, &m_ssaoBlurFBO);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_ssaoBlurFBO);
+    glGenTextures(1, &m_ssaoColorBufferBlur);
+    glBindTexture(GL_TEXTURE_2D, m_ssaoColorBufferBlur);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R16F, SCR_WIDTH, SCR_HEIGHT, 0, GL_RED, GL_FLOAT, nullptr);    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_ssaoColorBufferBlur, 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        std::cout << "SSAO Blur Framebuffer not complete!" << std::endl;
+    
+    
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     return true;
 }
@@ -419,6 +493,11 @@ void RenderSystem::render(const ChunkManager& chunkManager,
     // 几何Pass：填充G-Buffer
     geometryPass(chunkManager, view, projection);
 
+	// SSAO Pass
+	ssaoPass(view, projection);
+	// SSAO模糊Pass
+	ssaoBlurPass();
+
     // 光照Pass：计算光照
     lightingPass(camera->Position);
 
@@ -463,6 +542,13 @@ void printt_RenderData(const std::unordered_map<BlockFaceType, std::vector<glm::
     }
 }
 
+void RenderSystem::RenderQuad()
+{
+    glBindVertexArray(m_screenQuadVAO);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+}
+
 void RenderSystem::geometryPass(const ChunkManager& chunkManager,
     const glm::mat4& view,
     const glm::mat4& projection) {
@@ -483,18 +569,43 @@ void RenderSystem::geometryPass(const ChunkManager& chunkManager,
     const auto& renderData = chunkManager.getRenderData();
     //printt_RenderData(renderData);
 
-    // 渲染每种方块类型
-    for (const auto& pair : renderData) {
-        BlockFaceType type = pair.first;
-        const std::vector<glm::mat4>& matrices = pair.second;
-
-        if (!matrices.empty()) {
-            m_blockRenderer.render(type, matrices, view, projection);
-            m_drawCalls++;
-            m_totalInstances += matrices.size();
-        }
+    if (!renderData.empty()) {
+        m_blockRenderer.render(renderData, view, projection);
+        m_drawCalls++;
+        m_totalInstances += renderData.size();
     }
     // 解绑FBO
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+void RenderSystem::ssaoPass(const glm::mat4& view, const glm::mat4& projection)
+{
+    glBindFramebuffer(GL_FRAMEBUFFER, m_ssaoFBO);
+    glClear(GL_COLOR_BUFFER_BIT);
+    m_ssaoShader.use();
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_gPosition);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, m_gNormal);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, m_noiseTexture);
+    // Send kernel + rotation 
+    for (GLuint i = 0; i < 64; ++i)
+        m_ssaoShader.setVec3("samples[" + std::to_string(i) + "]", ssaoKernel[i]);
+    m_ssaoShader.setMat4("projection", projection);
+    m_ssaoShader.setMat4("view", view);
+    RenderQuad();
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+void RenderSystem::ssaoBlurPass()
+{
+    glBindFramebuffer(GL_FRAMEBUFFER, m_ssaoBlurFBO);
+    glClear(GL_COLOR_BUFFER_BIT);
+    m_ssaoBlurShader.use();
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_ssaoColorBuffer);
+    RenderQuad();
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
@@ -518,7 +629,8 @@ void RenderSystem::lightingPass(const glm::vec3& cameraPos) {
     glBindTexture(GL_TEXTURE_2D, m_gAlbedo);
     glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_2D, m_gProperties);
-
+    glActiveTexture(GL_TEXTURE4); // Add extra SSAO texture to lighting pass
+    glBindTexture(GL_TEXTURE_2D, m_ssaoColorBufferBlur);
 
     // 设置光照参数
     m_deferredLightingShader.setVec3("uLightDirection",m_lightDirection);
@@ -528,9 +640,7 @@ void RenderSystem::lightingPass(const glm::vec3& cameraPos) {
     m_deferredLightingShader.setVec3("uViewPos",cameraPos);
 
     // 渲染屏幕四边形
-    glBindVertexArray(m_screenQuadVAO);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-    glBindVertexArray(0);
+    RenderQuad();
 
     // 重新启用深度测试
     glEnable(GL_DEPTH_TEST);

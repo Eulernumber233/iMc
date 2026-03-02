@@ -1,10 +1,12 @@
 #pragma once
 #include <cstdint>
-#include "../core.h"
+//#include "../core.h"
 #include "../TextureMgr.h"
+#include <functional>
 #include <unordered_map> 
 // 方块类型枚举
 enum BlockType : uint8_t {
+	BLOCK_ERRER = 255, // 错误类型
     BLOCK_AIR = 0,
     BLOCK_STONE = 1,
     BLOCK_DIRT = 2,
@@ -13,7 +15,7 @@ enum BlockType : uint8_t {
     BLOCK_SAND = 5,
     BLOCK_WOOD = 6,
     BLOCK_LEAVES = 7,
-    BLOCK_COUNT  // 方块类型总数
+    BLOCK_COUNT  // 方块类型总数 
 };
 enum BlockFace :uint8_t {
     RIGHT = 0,
@@ -23,7 +25,35 @@ enum BlockFace :uint8_t {
     UP = 4,
     DOWN = 5,
 };
+struct BlockFaceLocKey
+{
+    uint8_t x;
+    uint8_t y;
+    uint8_t z;
+    BlockFace face_id;
 
+    bool operator==(const BlockFaceLocKey& other) const noexcept {
+        // 只有两个成员都相等，才算同一个key
+        return (x == other.x) && (y == other.y) && (z == other.z) && (face_id == other.face_id);
+    }
+
+    BlockFaceLocKey(const uint8_t& x, const uint8_t& y, const uint8_t& z, const BlockFace& face_id)
+        : x(x), y(y), z(z), face_id(face_id)
+    {
+    }
+};
+namespace std {
+    template<>
+    struct hash<BlockFaceLocKey> {
+        inline size_t operator()(const BlockFaceLocKey& bf) const noexcept {
+            size_t hash_x = hash<uint8_t>{}(static_cast<uint8_t>(bf.x));
+            size_t hash_y = hash<uint8_t>{}(static_cast<uint8_t>(bf.y));
+            size_t hash_z = hash<uint8_t>{}(static_cast<uint8_t>(bf.z));
+            size_t hash_face = hash<uint8_t>{}(static_cast<uint8_t>(bf.face_id));
+            return hash_face | (hash_x << 8) | (hash_y << 16) | (hash_z << 24);
+        }
+    };
+}
 struct BlockFaceType
 {
     BlockType type;
@@ -33,10 +63,10 @@ struct BlockFaceType
         // 只有两个成员都相等，才算同一个key
         return (type == other.type) && (face_id == other.face_id);
     }
-    static std::unordered_map<BlockFaceType, GLuint> type_to_texture;
+    // 改为存储层索引 (int)
+    static std::unordered_map<BlockFaceType, int> type_to_texture;
     static void init_type_map();
-
-    static GLuint getTexture(BlockFaceType key);
+    static int getTextureLayer(BlockFaceType key);
 };
 namespace std {
     template<>
@@ -46,15 +76,29 @@ namespace std {
             size_t hash_type = hash<uint8_t>{}(static_cast<uint8_t>(bf.type));
             size_t hash_face = hash<uint8_t>{}(static_cast<uint8_t>(bf.face_id));
             return hash_type ^ (hash_face << 1);
-        }  
+        }
     };
 }
-struct BlockFaceKey
+
+
+struct DrawFaceKey
 {
-    uint8_t x;
-    uint8_t y;
-    uint8_t z;
-    BlockFace face_id;
+    BlockFaceLocKey loc;
+    BlockType blockType;
+
+
+    DrawFaceKey(const BlockFaceLocKey& loc, const BlockType& blockType)
+        : loc(loc), blockType(blockType)
+    {
+    }
+};
+
+// 绘制是需将 DrawFaceKey 转化为 InstanceData 进行实例化渲染
+struct InstanceData {
+    glm::vec3 position;   // 方块中心世界坐标 (x+0.5, y+0.5, z+0.5)
+    int faceIndex;        // 面索引 (0-5)
+    int blockType;        // 方块类型枚举值
+    int textureLayer;     // 纹理数组层索引（由CPU预先计算）
 };
 
 // 获取方块名称
