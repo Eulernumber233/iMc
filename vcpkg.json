@@ -1,0 +1,36 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg/master/scripts/vcpkg.schema.json",
+  "name": "imc",
+  "version": "1.0.0",
+  "description": "OpenGL Minecraft-inspired project",
+  "dependencies": [
+    "glfw3",
+    "glew",
+    "glm",
+    "assimp",
+    "jsoncpp"
+  ],
+  "builtin-baseline": "b0ef0e7e6e6ba4d8f0b5c5c5c5c5c5c5c5c5c5c5c",
+  "overrides": [
+    {
+      "name": "glfw3",
+      "version": "3.3.8"
+    },
+    {
+      "name": "glew",
+      "version": "2.2.0"
+    },
+    {
+      "name": "glm",
+      "version": "0.9.9.8"
+    },
+    {
+      "name": "assimp",
+      "version": "5.3.1"
+    },
+    {
+      "name": "jsoncpp",
+      "version": "1.9.5"
+    }
+  ]
+}
