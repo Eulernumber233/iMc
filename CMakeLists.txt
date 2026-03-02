@@ -171,10 +171,15 @@ add_custom_target(copy_resources ALL
 # 复制着色器文件
 file(GLOB_RECURSE SHADER_FILES "shader/*")
 foreach(shader_file ${SHADER_FILES})
+    # 计算相对路径
+    file(RELATIVE_PATH rel_path "${CMAKE_CURRENT_SOURCE_DIR}/shader" "${shader_file}")
+    get_filename_component(rel_dir "${rel_path}" DIRECTORY)
     add_custom_command(TARGET copy_resources POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+        "$<TARGET_FILE_DIR:iMc>/shader/${rel_dir}"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${shader_file}"
-        "$<TARGET_FILE_DIR:iMc>/shader/${shader_file}"
+        "$<TARGET_FILE_DIR:iMc>/shader/${rel_path}"
     )
 endforeach()
 
@@ -192,6 +197,13 @@ foreach(asset_file ${ASSET_FILES})
         "$<TARGET_FILE_DIR:iMc>/assert/${rel_path}"
     )
 endforeach()
+
+# 复制debug版本的配置文件
+add_custom_command(TARGET copy_resources POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "${CMAKE_CURRENT_SOURCE_DIR}/PropertySheet_debug.props"
+    "$<TARGET_FILE_DIR:iMc>/PropertySheet_debug.props"
+)
 
 # 设置调试和发布的预处理器定义
 target_compile_definitions(iMc PRIVATE $<$<CONFIG:Debug>:${DEBUG_DEFINITIONS}>)

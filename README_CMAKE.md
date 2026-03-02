@@ -17,10 +17,10 @@ git clone <仓库地址>
 cd iMc
 ```
 
-### 2. 使用 CMake 生成解决方案
+### 2. 配置CMake
 
-#### 方法一：使用 CMake GUI
-1. 打开 CMake GUI
+#### 方法一：使用CMake GUI
+1. 打开CMake GUI
 2. 设置源代码路径为 `iMc` 目录
 3. 设置构建路径（例如 `iMc/build`）
 4. 点击 "Configure"，选择 "Visual Studio 17 2022" 作为生成器
@@ -28,6 +28,9 @@ cd iMc
 
 #### 方法二：使用命令行
 ```bash
+# 清理旧的构建文件（如果存在）
+if exist build rmdir /s /q build
+
 # 创建构建目录
 mkdir build
 cd build

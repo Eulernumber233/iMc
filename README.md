@@ -19,7 +19,7 @@
 
 1. 克隆仓库：
    ```bash
-   git clone https://github.com/Eulernumber233/iMc.git
+   git clone <仓库地址>
    cd iMc
    ```
 
@@ -37,6 +37,10 @@
 
 4. 运行程序：
    - 可执行文件位于 `build/Debug/iMc.exe`
+
+### 详细构建指南
+
+请参考 [CMake构建指南](README_CMAKE.md) 获取详细的构建步骤和依赖项管理信息。
 
 ### 依赖项
 
