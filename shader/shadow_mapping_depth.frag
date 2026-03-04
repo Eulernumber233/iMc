@@ -1,26 +1,20 @@
 #version 330 core
-out vec2 FragColor; // �����rgͨ���洢m1(���)��m2(���ƽ��)
+
+out vec2 FragColor;
 flat in int vBlockType;
 
-// ��ԴͶӰ����
 uniform float dir_near;
 uniform float dir_far;
 
-// ���Ի���ȣ���[0,1]���תΪ������ȣ�
-float LinearizeDepth(float depth)
-{
-    float z = depth * 2.0 - 1.0; // NDC[-1,1]
-    return (2.0 * dir_near * dir_far) / (dir_far + dir_near - z * (dir_far - dir_near));
-}
+const int BLOCK_ERRER = 255;
 
-const int BLOCK_ERRER = 255; // ���󷽿�����
-void main()
-{
+void main() {
     if (vBlockType == BLOCK_ERRER) discard;
-    // ��ȡ��ǰ���ص���ȣ���һ��[0,1]��
-    float depth = gl_FragCoord.z;
-    float linear_depth = LinearizeDepth(depth); // תΪ������ȣ������������
-    
-    // �洢��Ⱦ�ֵm1�����ƽ����ֵm2
-    FragColor = vec2(linear_depth, linear_depth * linear_depth + 1e-6);
+
+    // 正交投影下 gl_FragCoord.z 已经是线性深度（范围 [0,1]）
+    // 转换为实际线性深度： depth = near + (far - near) * z
+    float depth_linear = dir_near + (dir_far - dir_near) * gl_FragCoord.z;
+
+    // 存储一阶矩（深度）和二阶矩（深度平方）
+    FragColor = vec2(depth_linear, depth_linear * depth_linear + 1e-6);
 }
