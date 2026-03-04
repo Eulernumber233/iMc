@@ -299,7 +299,7 @@ bool RenderSystem::initialize() {
     m_ssaoShader.setInt("gPositionDepth", 0);
     m_ssaoShader.setInt("gNormal", 1);
     m_ssaoShader.setInt("texNoise", 2);
-    m_ssaoShader.setVec2("uScreenSize", glm::vec2(m_screenWidth, m_screenHeight));
+    m_ssaoShader.setVec2("screenSize", glm::vec2(m_screenWidth, m_screenHeight));
 
     m_ssaoBlurShader.use();
     m_ssaoBlurShader.setInt("ssaoInput", 0);

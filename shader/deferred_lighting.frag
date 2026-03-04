@@ -283,7 +283,7 @@ void main() {
 
     // ��ȡ�������ڱ����� 
     float ao = texture(ssao, vTexCoord).r;
-    ao = 1;
+    //ao = 1;
     vec3 ambient = sunShineAmbient * data.albedo * ao;
     vec3 result = ambient + dirLightResult;
     //result = vec3(ao);
