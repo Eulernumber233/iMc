@@ -134,6 +134,8 @@
     <None Include="shader\ssao.frag" />
     <None Include="shader\ssao_blur.frag" />
     <None Include="shader\ssao_blur.vert" />
+    <None Include="shader\shadow_mapping_depth.vert" />
+    <None Include="shader\shadow_mapping_depth.frag" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="assert\textures\block\birch_log.png">

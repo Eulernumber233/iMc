@@ -7,6 +7,7 @@ const int FACELEFT = 1;
 const int FACEUP = 4;
 const int FACEDOWN = 5;
 
+const int BLOCK_ERRER = 255; // ¥ÌŒÛ∑ΩøÈ¿‡–Õ
 const int BLOCK_AIR = 0;
 const int BLOCK_STONE = 1;
 const int BLOCK_DIRT = 2;
@@ -39,6 +40,7 @@ float LinearizeDepth(float depth) {
 }
 
 void main() {
+    if (vBlockType == BLOCK_ERRER) discard;
     gPosition = vec4(vWorldPos, LinearizeDepth(gl_FragCoord.z));
     gNormal = vec4(normalize(vNormal), 0.0);
 

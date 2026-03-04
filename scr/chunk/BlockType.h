@@ -1,6 +1,6 @@
 #pragma once
 #include <cstdint>
-//#include "../core.h"
+#include "../core.h"
 #include "../TextureMgr.h"
 #include <functional>
 #include <unordered_map> 
@@ -67,6 +67,11 @@ struct BlockFaceType
     static std::unordered_map<BlockFaceType, int> type_to_texture;
     static void init_type_map();
     static int getTextureLayer(BlockFaceType key);
+
+    BlockFaceType(const BlockType& type, const BlockFace& face_id)
+        : type(type), face_id(face_id)
+    {
+    }
 };
 namespace std {
     template<>
@@ -80,25 +85,25 @@ namespace std {
     };
 }
 
-
-struct DrawFaceKey
-{
-    BlockFaceLocKey loc;
-    BlockType blockType;
-
-
-    DrawFaceKey(const BlockFaceLocKey& loc, const BlockType& blockType)
-        : loc(loc), blockType(blockType)
-    {
-    }
-};
-
 // 绘制是需将 DrawFaceKey 转化为 InstanceData 进行实例化渲染
 struct InstanceData {
     glm::vec3 position;   // 方块中心世界坐标 (x+0.5, y+0.5, z+0.5)
     int faceIndex;        // 面索引 (0-5)
     int blockType;        // 方块类型枚举值
     int textureLayer;     // 纹理数组层索引（由CPU预先计算）
+
+    InstanceData(const glm::vec3& position, BlockFace faceIndex, BlockType blockType, int textureLayer)
+        : position(position), faceIndex(faceIndex), blockType(blockType), textureLayer(textureLayer)
+    {
+    }
+    static BlockFaceLocKey ChangeToBlockFaceLocKey(const InstanceData& data) {
+        return BlockFaceLocKey(
+            static_cast<uint8_t>(data.position.x - 0.5f)% ChunkConstants::CHUNK_WIDTH, // 转回方块坐标
+            static_cast<uint8_t>(data.position.y - 0.5f),
+            static_cast<uint8_t>(data.position.z - 0.5f)%ChunkConstants::CHUNK_DEPTH,
+            static_cast<BlockFace>(data.faceIndex)
+        );
+	}
 };
 
 // 获取方块名称

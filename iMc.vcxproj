@@ -174,6 +174,8 @@
     <None Include="shader\outline.vert" />
     <None Include="assert\textures\Minecraft砖块贴图 %282%29.7z" />
     <None Include="assert\textures\textures_config.json" />
+    <None Include="shader\shadow_mapping_depth.frag" />
+    <None Include="shader\shadow_mapping_depth.vert" />
     <None Include="shader\ssao.frag" />
     <None Include="shader\ssao.vert" />
     <None Include="shader\ssao_blur.frag" />

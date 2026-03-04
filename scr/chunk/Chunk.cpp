@@ -240,7 +240,9 @@ bool Chunk::isFaceVisible(int x, int y, int z, BlockFace face) const {
 
 void Chunk::addFaceToInstanceData(int x, int y, int z, BlockFace face, BlockType blockType) {
     //glm::mat4 matrix = createFaceMatrix(x, y, z, face);
-    m_instanceData.push_back({ { (uint8_t)x, (uint8_t)y, (uint8_t)z, face }, blockType });
+	glm::vec2 pos_world = glm::vec2(m_position.x * ChunkConstants::CHUNK_WIDTH, m_position.y * ChunkConstants::CHUNK_DEPTH);
+    m_instanceData.push_back({ glm::vec3(x + pos_world.x + 0.5f,y + 0.5f,z + pos_world.y + 0.5f)
+        ,face, blockType,BlockFaceType::getTextureLayer({blockType,face}) });
 	m_PosToInstanceIndex[{ (uint8_t)x, (uint8_t)y, (uint8_t)z, face }] = m_instanceData.size() - 1;
 }
 
@@ -478,7 +480,9 @@ void Chunk::addFaceUnlocked(int x, int y, int z, BlockFace face, BlockType type)
     if (m_PosToInstanceIndex.find(key) != m_PosToInstanceIndex.end()) {
         return;   // 已经存在，理论上不应发生
     }
-    m_instanceData.push_back({ key, type });
+    glm::vec2 pos_world = glm::vec2(m_position.x * ChunkConstants::CHUNK_WIDTH, m_position.y * ChunkConstants::CHUNK_DEPTH);
+    m_instanceData.push_back({ glm::vec3(x + pos_world.x + 0.5f,y + 0.5f,z + pos_world.y + 0.5f)
+        ,face, type,BlockFaceType::getTextureLayer({type,face}) });
     m_PosToInstanceIndex[key] = m_instanceData.size() - 1;
 }
 
@@ -506,13 +510,13 @@ void Chunk::updateFaceUnlocked(int x, int y, int z, BlockFace face) {
 void Chunk::compactInstanceDataUnlocked() {
     if (m_errerCount == 0) return;
 
-    std::vector<DrawFaceKey> newData;
+    std::vector<InstanceData> newData;
     std::unordered_map<BlockFaceLocKey, int> newMap;
     newData.reserve(m_instanceData.size() - m_errerCount);
 
     for (size_t i = 0; i < m_instanceData.size(); ++i) {
         if (m_instanceData[i].blockType != BLOCK_ERRER) {
-            BlockFaceLocKey key = m_instanceData[i].loc;
+            BlockFaceLocKey key = InstanceData::ChangeToBlockFaceLocKey(m_instanceData[i]);
             newMap[key] = newData.size();
             newData.push_back(m_instanceData[i]);
         }

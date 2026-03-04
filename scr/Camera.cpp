@@ -250,3 +250,54 @@ void Camera::UpdateCameraVectors()
 {
     updateCameraVectors();
 }
+
+// 获取视锥体在世界空间中的8个角点
+std::vector<glm::vec3> Camera::GetFrustumCornersWorldSpace(const glm::mat4& view, float maxDistance) const
+{
+    if (maxDistance < 0.0f) {
+        maxDistance = FarPlane;
+	}
+
+    std::vector<glm::vec3> corners;
+    corners.reserve(8);
+
+    // 计算半角正切
+    float tanHalfFOV = tan(glm::radians(FOV) * 0.5f);
+
+    // 近平面和远平面的半高和半宽
+    float nearHalfHeight = NearPlane * tanHalfFOV;
+    float nearHalfWidth = nearHalfHeight * AspectRatio;
+
+    float farHalfHeight = maxDistance * tanHalfFOV;
+    float farHalfWidth = farHalfHeight * AspectRatio;
+
+    // 视图空间中近平面和远平面四个角点
+    // 近平面四个点 (z = -NearPlane)
+    glm::vec3 nearTopLeft = glm::vec3(-nearHalfWidth, nearHalfHeight, -NearPlane);
+    glm::vec3 nearTopRight = glm::vec3(nearHalfWidth, nearHalfHeight, -NearPlane);
+    glm::vec3 nearBottomRight = glm::vec3(nearHalfWidth, -nearHalfHeight, -NearPlane);
+    glm::vec3 nearBottomLeft = glm::vec3(-nearHalfWidth, -nearHalfHeight, -NearPlane);
+
+    // 远平面四个点 (z = -maxDistance)
+    glm::vec3 farTopLeft = glm::vec3(-farHalfWidth, farHalfHeight, -maxDistance);
+    glm::vec3 farTopRight = glm::vec3(farHalfWidth, farHalfHeight, -maxDistance);
+    glm::vec3 farBottomRight = glm::vec3(farHalfWidth, -farHalfHeight, -maxDistance);
+    glm::vec3 farBottomLeft = glm::vec3(-farHalfWidth, -farHalfHeight, -maxDistance);
+
+    // 收集所有视图空间顶点（顺序：近平面4个，然后远平面4个）
+    std::vector<glm::vec3> viewSpaceCorners = {
+        nearTopLeft, nearTopRight, nearBottomRight, nearBottomLeft,
+        farTopLeft, farTopRight, farBottomRight, farBottomLeft
+    };
+
+    // 计算视图矩阵的逆矩阵
+    glm::mat4 invView = glm::inverse(view);
+
+    // 变换到世界空间
+    for (const auto& v : viewSpaceCorners) {
+        glm::vec4 worldPos = invView * glm::vec4(v, 1.0f);
+        corners.push_back(glm::vec3(worldPos) / worldPos.w);
+    }
+
+    return corners;
+}

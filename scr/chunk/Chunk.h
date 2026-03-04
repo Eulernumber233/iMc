@@ -50,7 +50,7 @@ public:
 
 
     // 获取实例化数据
-    const std::vector<DrawFaceKey>& getInstanceData() const {
+    const std::vector<InstanceData>& getInstanceData() const {
         return m_instanceData;
     }
 
@@ -88,7 +88,7 @@ private:
 
     // 待删除计数器
     int m_errerCount = 0;
-    std::vector<DrawFaceKey> m_instanceData = {}; // 存储所有可见面的坐标和面信息，用于增删方块时快速查询
+    std::vector<InstanceData> m_instanceData = {}; // 存储所有可见面的坐标和面信息，用于增删方块时快速查询
 	std::unordered_map<BlockFaceLocKey, int> m_PosToInstanceIndex; // 存储每个方块面对应的实例化数据索引，方便增删方块时更新实例化数据
 
     // 状态标志

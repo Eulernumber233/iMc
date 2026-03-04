@@ -1,9 +1,10 @@
 #version 430 core
 
+
 in vec2 vTexCoord;
 out vec4 FragColor;
 
-// G-BufferÎÆÀí
+// G-Bufferï¿½ï¿½ï¿½ï¿½
 uniform sampler2D gPosition;
 uniform sampler2D gNormal;
 uniform sampler2D gAlbedo;
@@ -11,14 +12,20 @@ uniform sampler2D gProperties;
 
 uniform sampler2D ssao;
 
-// ¹âÕÕ²ÎÊı
-uniform vec3 uLightDirection;    // Æ½ĞĞ¹â·½Ïò
-uniform vec3 uLightColor;        // Æ½ĞĞ¹âÑÕÉ«
-uniform float uLightIntensity;   // Æ½ĞĞ¹âÇ¿¶È
-uniform vec3 uAmbientColor;      // »·¾³¹âÑÕÉ«
-uniform vec3 uViewPos;           // Ïà»úÎ»ÖÃ
+// ï¿½ï¿½ï¿½Õ²ï¿½ï¿½ï¿½
+uniform vec3 sunShineAmbient;
+uniform vec3 sunShineDiffuse;
+uniform vec3 sunShineDir;       // Æ½ï¿½Ğ¹â·½ï¿½ï¿½
+uniform vec3 sunShinePos;
 
-// ´ÓG-Buffer¶ÁÈ¡Êı¾İ
+uniform sampler2D varianceShadowMap; // È«ï¿½ï¿½Æ½ï¿½Ğ¹ï¿½ VSSM ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¼ï¿½ï¿½RG32Fï¿½ï¿½
+uniform float sunShineNear ;
+uniform float sunShineFar;
+uniform int SHADOW_WIDTH ;
+uniform vec3 uViewPos;           // ï¿½ï¿½ï¿½Î»ï¿½ï¿½
+uniform mat4 lightSpaceMatrix; 
+
+// ï¿½ï¿½G-Bufferï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½
 struct GBufferData {
     vec3 position;
     vec3 normal;
@@ -33,15 +40,15 @@ GBufferData readGBuffer(vec2 texCoord) {
     GBufferData data;
     
     vec4 posData = texture(gPosition, texCoord);
-    vec4 normData = texture(gNormal, texCoord);
+    vec4 normalData = texture(gNormal, texCoord);
     vec4 albedoData = texture(gAlbedo, texCoord);
     vec4 propData = texture(gProperties, texCoord);
     
     data.position = posData.xyz;
-    data.normal = normalize(normData.xyz);
+    data.normal = normalize(normalData.xyz);
     data.albedo = albedoData.rgb;
     
-    // ½âÂëÊôĞÔ
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     data.blockType = int(propData.r * 255.0);
     data.emissive = propData.g;
     data.roughness = propData.b;
@@ -50,44 +57,239 @@ GBufferData readGBuffer(vec2 texCoord) {
     return data;
 }
 
-// ¼òµ¥µÄ¹âÕÕ¼ÆËã£¨Æ½ĞĞ¹â + »·¾³¹â£©
-vec3 calculateLighting(GBufferData data) {
-    // »·¾³¹âÕÕ
-    vec3 ambient = uAmbientColor * data.albedo;
+const float BIAS_COEFF = 0.0015;    // é˜´å½±åç½®ç³»æ•°
+const float MIN_FILTER_SIZE = 1.8;   // æœ€å°è¿‡æ»¤æ ¸
+const float MAX_FILTER_SIZE = 10.0;  // æœ€å¤§è¿‡æ»¤æ ¸
+const float LIGHT_SIZE = 0.03;       // å…‰æºå¤§å°ï¼ˆå•ä½ï¼šä¸–ç•Œç©ºé—´ï¼‰
+const float DEPTH_THRESHOLD = 0.05;  // æ·±åº¦é˜ˆå€¼
+
+// PoissonÔ²ï¿½Ì²ï¿½ï¿½ï¿½ï¿½ï¿½16ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+const vec2 poissonDisk[16] = vec2[](
+    vec2(-0.94201624, -0.39906216), vec2(0.94558609, -0.76890725),
+    vec2(-0.094184101, -0.92938870), vec2(0.34495938, 0.29387760),
+    vec2(-0.91588581, 0.45771432), vec2(-0.81544232, -0.87912464),
+    vec2(-0.38277543, 0.27676845), vec2(0.97484398, 0.75648379),
+    vec2(0.44323325, -0.97511554), vec2(0.53742981, -0.47373420),
+    vec2(-0.26496911, -0.41893023), vec2(0.79197514, 0.19090188),
+    vec2(-0.24188840, 0.99706507), vec2(-0.81409955, 0.91437590),
+    vec2(0.19984126, 0.78641367), vec2(0.14383161, -0.14100790)
+);
+
+
+float LinearizeDepth(float depth) {
+    float z = depth * 2.0 - 1.0;
+    return (2.0 * sunShineNear * sunShineFar) / (sunShineFar + sunShineNear - z * (sunShineFar - sunShineNear));
+}
+
+// ï¿½Ä½ï¿½ï¿½ï¿½biasï¿½ï¿½ï¿½ã£¬ï¿½ï¿½Ö¹ï¿½ï¿½ï¿½ï¿½Ó°
+float CalculateBias(vec3 normal, vec3 lightDir, float NdotL) {
+    float bias = BIAS_COEFF * tan(acos(clamp(NdotL, 0.0, 1.0)));
+    bias = clamp(bias, BIAS_COEFF * 0.01, BIAS_COEFF * 0.2);
+    return bias;
+}
+
+// VSSMï¿½ï¿½ï¿½Ä¼ï¿½ï¿½ï¿½
+float ChebyshevUpperBound(vec2 moments, float currentDepth) {
+    // ï¿½Ó·ï¿½ï¿½ï¿½ï¿½ï¿½Í¼ï¿½ï¿½ï¿½ï¿½È¡ï¿½ï¿½Öµï¿½ï¿½Æ½ï¿½ï¿½ï¿½ï¿½Öµ
+    float mean = moments.x;
+    float mean2 = moments.y;
     
-    // Æ½ĞĞ¹âÂş·´Éä
-    vec3 lightDir = normalize(-uLightDirection);
-    float diff = max(dot(data.normal, lightDir), 0.0);
-    vec3 diffuse = uLightColor * diff * data.albedo * uLightIntensity;
+    // ï¿½ï¿½ï¿½ã·½ï¿½ï¿½
+    float variance = mean2 - (mean * mean);
+    variance = max(variance, 0.0);
     
-    // ºÏ²¢¹âÕÕ
-    vec3 lighting = ambient + diffuse;
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+    if (variance < 0.000001) {
+        return currentDepth <= mean ? 1.0 : 0.0;
+    }
     
-    // Ìí¼Ó×Ô·¢¹â
-    lighting += data.albedo * data.emissive;
+    // ï¿½Ğ±ï¿½Ñ©ï¿½ò²»µï¿½Ê½ï¿½ï¿½ï¿½ï¿½
+    float d = currentDepth - mean;
+    if (d <= 0.0) {
+        return 1.0; // ï¿½ï¿½Ç°ï¿½ï¿½ï¿½Ğ¡ï¿½Úµï¿½ï¿½ï¿½Æ½ï¿½ï¿½ï¿½ï¿½È£ï¿½ï¿½ï¿½È«ï¿½É¼ï¿½
+    }
     
-    return lighting;
+    float p = variance / (variance + d * d);
+    
+    // ï¿½ï¿½Ç¿ï¿½Ô±È¶È£ï¿½ï¿½ï¿½Ö¹ï¿½ï¿½ï¿½ï¿½
+    float lightBleedingReduction = 0.2; // ï¿½ï¿½ï¿½Æ¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Æ³Ì¶ï¿½
+    p = clamp((p - lightBleedingReduction) / (1.0 - lightBleedingReduction), 0.0, 1.0);
+    
+    return p;
+}
+
+// ï¿½Úµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+float FindBlockerDepth_VSSM(vec3 projCoords, float currentDepth) {
+    // ï¿½ï¿½ï¿½ï¿½Mipmapï¿½ï¿½ï¿½Ù¼ï¿½ï¿½
+    vec2 mipMoments = textureLod(varianceShadowMap, projCoords.xy, 0.0).rg;
+    float mipMean = mipMoments.r;
+    
+    // ï¿½ï¿½ï¿½ï¿½ï¿½Å³ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã»ï¿½ï¿½ï¿½Úµï¿½ï¿½ï¿½ï¿½ï¿½
+    if (mipMean <= 0.001 || currentDepth <= mipMean + 0.03) {
+        return 0.0;
+    }
+    
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+    float depthDiff = currentDepth - mipMean;
+    
+    if (depthDiff < 0.1) {
+        // ï¿½ï¿½ï¿½ï¿½Ğ¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã»ï¿½ï¿½ï¿½Úµï¿½ï¿½ï¿½ï¿½Úµï¿½ï¿½ï¿½ï¿½ï¿½
+        // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È·ï¿½ï¿½
+        int found = 0;
+        float sum = 0.0;
+        
+        for (int i = 0; i < 8; i++) {
+            vec2 sampleUV = projCoords.xy + poissonDisk[i] * (1.0/SHADOW_WIDTH);
+            float depth = texture(varianceShadowMap, sampleUV).r;
+            if (depth > 0.001 && currentDepth > depth + 0.01) {
+                sum += depth;
+                found++;
+            }
+        }
+        
+        return found > 0 ? sum / float(found) : 0.0;
+    } else {
+        // ï¿½ï¿½ï¿½ï¿½ó£¬ºÜ¿ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Úµï¿½
+        // Ö±ï¿½ï¿½Ê¹ï¿½ï¿½Mipmapï¿½ï¿½Öµï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½
+        return mipMean;
+    }
+}
+
+// ï¿½ï¿½Ó°ï¿½ï¿½ï¿½ï¿½
+float CalculatePenumbraSize(float avgBlockerDepth, float currentDepth, vec3 projCoords) {
+    // ï¿½ï¿½ï¿½Ã»ï¿½ï¿½ï¿½Úµï¿½ï¿½ï£¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ğ¡ï¿½ï¿½ï¿½Ëºï¿½
+    if (avgBlockerDepth <= 0.001) {
+        return MIN_FILTER_SIZE;
+    }
+    
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Õ¼ï¿½ï¿½ĞµÄ°ï¿½Ó°ï¿½ï¿½Ğ¡
+    // PCSSï¿½ï¿½Ê½: (ï¿½ï¿½Ô´ï¿½ï¿½Ğ¡ * (ï¿½ï¿½Ç°ï¿½ï¿½ï¿½ - ï¿½Úµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½)) / ï¿½Úµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+    float worldPenumbra = (LIGHT_SIZE * (currentDepth - avgBlockerDepth)) / avgBlockerDepth;
+    
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Õ¼äµ¥Î»×ªï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½ï¿½Õ¼äµ¥Î»
+    // ï¿½ï¿½ï¿½ï¿½Í¶Ó°ï¿½Â£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È·ï¿½Î§Ó³ï¿½äµ½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+    float worldToTex = float(SHADOW_WIDTH) / (sunShineFar - sunShineNear);
+    float texPenumbra = worldPenumbra * worldToTex;
+    
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È²î¶¯Ì¬ï¿½ï¿½ï¿½ï¿½
+    float depthRatio = (currentDepth - avgBlockerDepth) / currentDepth;
+    texPenumbra *= 1.0 + depthRatio * 2.0;
+    
+    // ï¿½ï¿½ï¿½Æ¹ï¿½ï¿½ËºË´ï¿½Ğ¡
+    return clamp(texPenumbra, MIN_FILTER_SIZE, MAX_FILTER_SIZE);
+}
+
+// ï¿½Ä½ï¿½ï¿½ï¿½PCFï¿½ï¿½ï¿½ï¿½
+float PCSS_VSSM_Filter(vec3 projCoords, float filterSize, float currentDepth, float bias) {
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ø´ï¿½Ğ¡ï¿½ï¿½Ä£ï¿½ï¿½ï¿½ë¾¶
+    vec2 texelSize = 1.0 / textureSize(varianceShadowMap, 0);
+    float radius = filterSize;
+    
+    float shadow = 0.0;
+    int sampleCount = 0;
+    
+    // Ê¹ï¿½ï¿½ï¿½ï¿½×ªï¿½ï¿½PoissonÔ²ï¿½Ì²ï¿½ï¿½ï¿½
+    float randomAngle = fract(sin(dot(projCoords.xy, vec2(12.9898, 78.233))) * 43758.5453) * 6.283185;
+    mat2 rotation = mat2(cos(randomAngle), -sin(randomAngle),
+                         sin(randomAngle), cos(randomAngle));
+    
+    // ï¿½ï¿½ï¿½İ¹ï¿½ï¿½ËºË´ï¿½Ğ¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+    int samples = int(clamp(radius * 2.0, 4.0, 16.0));
+    
+    for (int i = 0; i < samples; i++) {
+        // ï¿½ï¿½×ªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+        vec2 offset = rotation * poissonDisk[i % 16] * radius * texelSize;
+        vec2 sampleUV = projCoords.xy + offset;
+        
+        // ï¿½ß½ï¿½ï¿½ï¿½
+        if (sampleUV.x < 0.0 || sampleUV.x > 1.0 || sampleUV.y < 0.0 || sampleUV.y > 1.0) {
+            continue;
+        }
+        
+        // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¼
+        vec2 moments = texture(varianceShadowMap, sampleUV).rg;
+        
+        // Ê¹ï¿½ï¿½ï¿½Ğ±ï¿½Ñ©ï¿½ï¿½ï¿½ï¿½ï¿½É¼ï¿½ï¿½ï¿½
+        shadow += ChebyshevUpperBound(moments, currentDepth - bias);
+        sampleCount++;
+    }
+    
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ğ§ï¿½ï¿½ï¿½ï¿½
+    if (sampleCount == 0) {
+        vec2 moments = texture(varianceShadowMap, projCoords.xy).rg;
+        return ChebyshevUpperBound(moments, currentDepth - bias);
+    }
+    
+    return shadow / float(sampleCount);
+}
+
+// PCSS_VSSM ï¿½ï¿½Ó°ï¿½ï¿½ï¿½ãº¯ï¿½ï¿½
+float ShadowCalculation_PCSS_VSSM(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) {
+    // 1. Í¶Ó°ï¿½ï¿½ï¿½ï¿½×ªï¿½ï¿½
+    vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
+    projCoords = projCoords * 0.5 + 0.5;
+    
+    // 2. ï¿½ß½ï¿½ï¿½ï¿½
+    if (projCoords.z > 1.0 || projCoords.x < 0.0 || projCoords.x > 1.0 || 
+        projCoords.y < 0.0 || projCoords.y > 1.0) {
+        return 0.0;
+    }
+    
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Èºï¿½bias
+    float currentDepth = LinearizeDepth(projCoords.z);
+    float NdotL = max(dot(normal, lightDir), 0.0);
+    float bias = CalculateBias(normal, lightDir, NdotL);
+    
+    // ï¿½ï¿½ï¿½ï¿½ï¿½Úµï¿½ï¿½ï¿½
+    float blockerDepth = FindBlockerDepth_VSSM(projCoords, currentDepth);
+    
+    // ï¿½ï¿½ï¿½ï¿½ï¿½Ó°ï¿½ï¿½Ğ¡
+    float filterSize = CalculatePenumbraSize(blockerDepth, currentDepth, projCoords);
+    
+    // Ö´ï¿½Ğ¹ï¿½ï¿½ï¿½
+    float visibility = PCSS_VSSM_Filter(projCoords, filterSize, currentDepth, bias);
+    
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó°ï¿½ï¿½ï¿½ï¿½
+    // Ó¦ï¿½ï¿½ï¿½ï¿½ï¿½Ë¥ï¿½ï¿½ï¿½ï¿½Ê¹Ô¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó°ï¿½ï¿½ï¿½ï¿½ï¿½
+    float depthFactor = clamp(currentDepth / sunShineFar, 0.0, 1.0);
+    visibility = mix(visibility, 1.0, depthFactor * 0.3);
+    
+    // ï¿½ï¿½ï¿½İ·ï¿½ï¿½ßºÍ¹â·½ï¿½ï¿½Î¢ï¿½ï¿½
+    visibility = mix(visibility, 1.0, (1.0 - NdotL) * 0.1);
+    
+    return 1.0 - visibility;
 }
 
 void main() {
-    // ´ÓG-Buffer¶ÁÈ¡Êı¾İ
+    // ï¿½ï¿½G-Bufferï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½
     GBufferData data = readGBuffer(vTexCoord);
     
-    // Èç¹ûÊÇ¿ÕÆø·½¿é£¨»òÉî¶È²âÊÔÊ§°ÜµÄÏñËØ£©£¬Ìø¹ı
+    // ï¿½ï¿½ï¿½ï¿½Ç¿ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½é£¨ï¿½ï¿½ï¿½ï¿½È²ï¿½ï¿½ï¿½Ê§ï¿½Üµï¿½ï¿½ï¿½ï¿½Ø£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     if (data.blockType == 0) {
         discard;
     }
     
-    // ¼ÆËã¹âÕÕ
-    //vec3 lighting = calculateLighting(data);
+    // Æ½ï¿½Ğ¹ï¿½ï¿½ï¿½Õ¼ï¿½ï¿½ï¿½
+    vec3 dirLightDir = normalize(-sunShineDir);
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+    float dirDiff = max(dot(data.normal, dirLightDir), 0.0);
+    vec3 dirDiffuse = sunShineDiffuse * dirDiff * data.albedo;
 
-    // »ñÈ¡»·¾³¹âÕÚ±ÎÒò×Ó
+    // Æ½ï¿½Ğ¹ï¿½ï¿½ï¿½Ó°
+    vec4 FragPosLightSpace = lightSpaceMatrix * vec4(data.position,1.0); // Æ¬ï¿½ï¿½ï¿½Ú¹ï¿½Õ¼ï¿½ï¿½Ğµï¿½Î»ï¿½ï¿½
+
+    float dirShadow = ShadowCalculation_PCSS_VSSM(FragPosLightSpace, data.normal, sunShineDir);
+    vec3 dirLightResult = (1.0 - dirShadow) * dirDiffuse;
+
+    // ï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ú±ï¿½ï¿½ï¿½ï¿½ï¿½ 
     float ao = texture(ssao, vTexCoord).r;
-
-    vec3 lighting = data.albedo * (1-ao)  ;//+ data.albedo; 
-    
-    // Êä³ö×îÖÕÑÕÉ«
-    FragColor = vec4(vec3(ao),1.0);
+    ao = 1;
+    vec3 ambient = sunShineAmbient * data.albedo * ao;
+    vec3 result = ambient + dirLightResult;
+    //result = vec3(ao);
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½É«
+    //FragColor = vec4(vec3(ao),1.0);
     //FragColor = vec4(lighting,1.0);
-    //FragColor = vec4(data.albedo,1.0);
+    //FragColor = (1.0 - dirShadow) * vec4(data.albedo,1.0);
+    FragColor = vec4(result,1.0);
 }

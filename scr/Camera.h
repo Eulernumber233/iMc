@@ -65,6 +65,10 @@ public:
     // 析构函数
     ~Camera() = default;
 
+	float GetFOV() const { return FOV; }
+	float GetNearPlane() const { return NearPlane; }
+	float GetFarPlane() const { return FarPlane; }
+
     // 视图矩阵
     glm::mat4 GetViewMatrix() const;
 
@@ -83,6 +87,9 @@ public:
     // 从屏幕坐标获取射线（用于鼠标拾取）
     std::shared_ptr<Ray> GetRayFromScreen(float screenX, float screenY,
         int screenWidth, int screenHeight) const;
+
+    std::vector<glm::vec3> GetFrustumCornersWorldSpace(const glm::mat4& view
+        , float maxDistance = -1.0f) const;
 
     // 更新摄像机向量
     void UpdateCameraVectors();

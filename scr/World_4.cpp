@@ -94,7 +94,7 @@ int World_4::run() {
             (float)SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, 1000.0f);
 
         // ‰÷»æ÷°
-        renderSystem.render(chunkManager, view, projection, camera);
+        renderSystem.render(chunkManager, view, projection, camera, deltaTime);
 
         glfwSwapBuffers(window);
         glfwPollEvents();

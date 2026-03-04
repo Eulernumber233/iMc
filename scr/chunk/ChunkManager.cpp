@@ -191,28 +191,26 @@ void ChunkManager::mergeRenderData() {
     m_instanceData.clear();
 
     // 合并所有可见区块的实例化数据
+    size_t total = 0;
     for (Chunk* chunk : m_visibleChunks) {
-        if (!chunk->isVisible()|| !chunk->is_can_render(m_camera)) continue;
+        if (!chunk->isVisible() || !chunk->is_can_render(m_camera)) continue;
+        total += chunk->getInstanceData().size();
+    }
+    m_instanceData.reserve(total); 
 
+    for (Chunk* chunk : m_visibleChunks) {
+        if (!chunk->isVisible() || !chunk->is_can_render(m_camera)) continue;
         const auto& chunkDatas = chunk->getInstanceData();
-		auto chunk_pos = glm::ivec2(chunk->getPosition().x * Chunk::WIDTH, chunk->getPosition().y * Chunk::DEPTH);
-        // 转换为实例数据
-        for (const auto& chunkData : chunkDatas) {
-            if (chunkData.blockType == BlockType::BLOCK_ERRER) {
-                continue;
-            }
-            InstanceData data;
-            // 假设 chunkData.loc.x,y,z 为全局整数坐标，加上0.5得到方块中心
-            data.position = glm::vec3(chunkData.loc.x + 0.5f + chunk_pos.x, chunkData.loc.y + 0.5f, chunkData.loc.z + 0.5f + chunk_pos.y);
-            data.faceIndex = static_cast<int>(chunkData.loc.face_id);
-            data.blockType = static_cast<int>(chunkData.blockType);
-            // 从映射表获取纹理层索引
-            BlockFaceType bft{ chunkData.blockType, chunkData.loc.face_id };
-            data.textureLayer = BlockFaceType::getTextureLayer(bft); // 返回层索引
-            m_instanceData.push_back(data);
-        }
+        m_instanceData.insert(m_instanceData.end(), chunkDatas.begin(), chunkDatas.end());
     }
 
+    //for (Chunk* chunk : m_visibleChunks) {
+    //    if (!chunk->isVisible() || !chunk->is_can_render(m_camera)) continue;
+    //    for (const auto& data : chunk->getInstanceData()) {
+    //        if (data.blockType != BLOCK_ERRER)
+    //            m_instanceData.push_back(data);
+    //    }
+    //}
 }
 
 bool ChunkManager::shouldChunkBeVisible(const glm::ivec2& chunkPos,
