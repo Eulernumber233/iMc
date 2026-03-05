@@ -230,6 +230,8 @@ bool RenderSystem::initialize() {
     // 初始化UI系统
     initUI();
 
+
+
     // 配置边框
     BlockOutlineRenderer::OutlineConfig outlineConfig;
     outlineConfig.color = glm::vec3(0.0f, 0.0f, 0.0f);  // 黑色边框
@@ -258,6 +260,17 @@ bool RenderSystem::initialize() {
     m_deferredLightingShader.setInt("gProperties", 3);
     m_deferredLightingShader.setInt("ssao", 4);
     m_deferredLightingShader.setInt("varianceShadowMap", 5);
+
+    m_modeShader.use();
+
+    m_modeShader.setVec3("light.position", lightPos);
+    m_modeShader.setVec3("light.ambient", 0.4f, 0.4f, 0.4f);
+    m_modeShader.setVec3("light.diffuse", 0.9f, 0.9f, 0.9f);
+    m_modeShader.setVec3("light.specular", 1.0f, 1.0f, 1.0f);
+    m_modeShader.setFloat("shininess", 256.0f);
+    m_modeShader.setFloat("light.constant", 1.0f);
+    m_modeShader.setFloat("light.linear", 0.09f);
+    m_modeShader.setFloat("light.quadratic", 0.032f);
 
     // Sample kernel
     std::uniform_real_distribution<GLfloat> randomFloats(0.0, 1.0);
@@ -451,6 +464,7 @@ void RenderSystem::renderUI() {
     m_uiManager.render();
 }
 
+
 // 添加屏幕尺寸设置方法
 void RenderSystem::setScreenSize(int width, int height) {
     m_screenWidth = width;
@@ -624,12 +638,17 @@ void RenderSystem::render(const ChunkManager& chunkManager,
     // 光照Pass：计算光照
     lightingPass(camera, sunShine_near, sunShine_far, lightSpaceMatrix);
 
+    // 测试模型加载和渲染
+    //renderModel(camera);
+
     // 渲染选中的方块边框 TODOs
     if (m_hasSelectedBlock) {
         renderOutlines(view, projection);
     }
 
     renderUI();
+
+
 }
 
 // 新增：渲染边框函数
@@ -815,8 +834,6 @@ void RenderSystem::lightingPass(const std::shared_ptr<Camera>camera
 
     // 设置光照参数  
     m_deferredLightingShader.setVec3("uViewPos", camera->Position);
-    m_deferredLightingShader.setMat4("uView", camera->GetViewMatrix());
-    m_deferredLightingShader.setMat4("projection", camera->GetViewProjectionMatrix());
     m_deferredLightingShader.setVec3("sunShinePos", lightPos);
     m_deferredLightingShader.setVec3("sunShineDir", lightDir);
     m_deferredLightingShader.setVec3("sunShineAmbient", 0.2f, 0.2f, 0.2f);
@@ -832,4 +849,26 @@ void RenderSystem::lightingPass(const std::shared_ptr<Camera>camera
 
     // 重新启用深度测试
     glEnable(GL_DEPTH_TEST);
+}
+
+void RenderSystem::renderModel(const std::shared_ptr<Camera> camera)
+{
+    // 测试模型加载和渲染
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    //glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+    //glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    m_modeShader.use();
+    m_modeShader.setMat4("projection", camera->GetProjectionMatrix());
+    m_modeShader.setMat4("view", camera->GetViewMatrix());
+    m_modeShader.setVec3("viewPos", camera->Position);
+
+    glm::mat4 model = glm::mat4(1.0f);
+    model = glm::translate(model, glm::vec3(7.0f, 62.0f, 7.5f));
+    model = glm::scale(model, glm::vec3(1.1f, 1.1f, 1.1f));
+    //model = glm::rotate(model, glm::radians((float)glfwGetTime() * 50.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+    m_modeShader.setMat4("model", model);
+
+    spyglass.Draw(m_modeShader);
+    glDepthFunc(GL_LESS);
 }

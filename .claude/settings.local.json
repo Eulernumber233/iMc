@@ -3,7 +3,9 @@
     "allow": [
       "Bash(msbuild iMc.sln /t:Build /p:Configuration=Debug /verbosity:minimal)",
       "Bash(ls -la \"e:\\\\opengl\\\\iMc\\\\assert\\\\textures\\\\item\"\" 2>/dev/null || echo \"item目录不存在 \")",
-      "Bash(ls -la e:opengliMc*.sln)"
+      "Bash(ls -la e:opengliMc*.sln)",
+      "Bash(dir \"e:\\\\opengl\\\\iMc\\\\assert\\\\mode\")",
+      "Bash(dir \"e:\\\\opengl\\\\iMc\\\\assert\\\\mode\\\\spyglass_in_hand_obj\")"
     ]
   }
 }

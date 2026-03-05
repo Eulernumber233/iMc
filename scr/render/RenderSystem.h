@@ -9,6 +9,7 @@
 #include "BlockOutlineRenderer.h"  // ����
 #include "../collision/Ray.h"                   // ����
 #include "../UI/UIManager.h"
+#include "../mode/Model.h"
 // �����涥������
 struct FaceVertex {
     glm::vec3 position;
@@ -169,6 +170,14 @@ private:
             { GL_FRAGMENT_SHADER, "shader/deferred_lighting.frag" }
             } };
 
+	// 模型渲染着色器
+    Shader m_modeShader{ {
+            {GL_VERTEX_SHADER, "shader/mode.vert"},
+            {GL_FRAGMENT_SHADER, "shader/mode.frag"}
+        } };
+    
+    // TODO:添加模型管理类
+    Model spyglass{ "assert/mode/spyglass_in_hand_obj/spyglass_in_hand.obj" };
 
 
     // ������Ⱦ��
@@ -227,4 +236,6 @@ private:
     void renderOutlines(const glm::mat4& view, const glm::mat4& projection);
     // ��ȾUI
     void renderUI();
+    // 模型物体渲染
+    void renderModel(const std::shared_ptr<Camera>camera);
 };
