@@ -3,6 +3,8 @@
 #include "generate/TerrainGenerator.h"
 #include "render/RenderSystem.h"
 #include "chunk/ChunkManager.h"
+#include "Item.h"
+#include <memory>
 
 class World_4 : public World
 {
@@ -13,34 +15,41 @@ public:
 private:
     unsigned int _seed;
 
-    // ½»»¥Ïà¹Ø
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     Ray::HitResult m_lastHitResult;
     bool m_hasSelectedBlock = false;
     glm::ivec3 m_selectedBlockPos;
     float m_interactionDistance = 8.0f;
 
-    // Êó±ê°´¼ü×´Ì¬
+    // ï¿½ï¿½ê°´ï¿½ï¿½×´Ì¬
     bool leftMousePressed = false;
     bool rightMousePressed = false;
 
-    // ²Ù×÷ÀäÈ´
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È´
     float m_lastBreakTime = 0.0f;
     float m_lastPlaceTime = 0.0f;
     const float ACTION_COOLDOWN = 0.25f;
 
-    // Êó±ê³õÊ¼±êÖ¾
+    // ï¿½ï¿½ï¿½ï¿½Ê¼ï¿½ï¿½Ö¾
     bool firstMouse = true;
     float lastX, lastY;
 
-    // ÊäÈë´¦Àíº¯Êı
+    // ç‰©å“æ ç›¸å…³
+    std::vector<std::shared_ptr<Item>> m_hotbarItems;
+    void initHotbarItems();
+    std::shared_ptr<Item> getSelectedItem() const;
+
+    // ï¿½ï¿½ï¿½ë´¦ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     void processMouse(double xpos, double ypos);
     void processMouseButton(int button, int action);
     void processKey(int key, int action);
+    void processMouseScroll(double xoffset, double yoffset);
     void updateBlockSelection(ChunkManager& chunkManager, RenderSystem& renderSystem);
 
-    // ¾²Ì¬»Øµ÷º¯Êı
+    // ï¿½ï¿½Ì¬ï¿½Øµï¿½ï¿½ï¿½ï¿½ï¿½
     static void framebufferSizeCallback(GLFWwindow* window, int width, int height);
     static void mouseCallback(GLFWwindow* window, double xpos, double ypos);
     static void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
     static void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);
+    static void mouseScrollCallback(GLFWwindow* window, double xoffset, double yoffset);
 };

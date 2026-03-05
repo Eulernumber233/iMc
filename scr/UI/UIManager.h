@@ -7,13 +7,13 @@
 #include <string>
 #include <functional>
 
-// UI×é¼þ»ùÀà
+// UIï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 class UIComponent {
 public:
     UIComponent(const std::string& id);
     virtual ~UIComponent();
 
-    // Í¨ÓÃÊôÐÔ
+    // Í¨ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     std::string id;
     glm::vec2 position = glm::vec2(0.0f);
     glm::vec2 size = glm::vec2(100.0f, 50.0f);
@@ -21,26 +21,26 @@ public:
     float alpha = 1.0f;
     bool visible = true;
     bool interactive = false;
-    int zIndex = 0; // äÖÈ¾Ë³Ðò
+    int zIndex = 0; // ï¿½ï¿½È¾Ë³ï¿½ï¿½
 
-    // ±ä»»
+    // ï¿½ä»»
     glm::mat4 transform = glm::mat4(1.0f);
     float rotation = 0.0f;
 
-    // Ãªµã (0-1)
+    // Ãªï¿½ï¿½ (0-1)
     glm::vec2 anchor = glm::vec2(0.0f);
 
-    // ¸üÐÂºÍäÖÈ¾
+    // ï¿½ï¿½ï¿½Âºï¿½ï¿½ï¿½È¾
     virtual void update(float deltaTime) {}
     virtual void render(const glm::mat4& projection) = 0;
 
-    // ½»»¥ 
+    // ï¿½ï¿½ï¿½ï¿½ 
     virtual bool containsPoint(const glm::vec2& point) const;
     virtual void onClick() {}
     virtual void onHoverEnter() {}
     virtual void onHoverLeave() {}
 
-    // ±ä»»¸¨Öúº¯Êý
+    // ï¿½ä»»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     void setPosition(float x, float y);
     void setSize(float width, float height);
     void setColor(float r, float g, float b, float a = 1.0f);
@@ -51,13 +51,13 @@ protected:
     bool isHovered = false;
 };
 
-// ¾ØÐÎ×é¼þ
+// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 class UIRect : public UIComponent {
 public:
     UIRect(const std::string& id);
     ~UIRect();
 
-    // ¾ØÐÎÌØ¶¨ÊôÐÔ
+    // ï¿½ï¿½ï¿½ï¿½ï¿½Ø¶ï¿½ï¿½ï¿½ï¿½ï¿½
     float borderRadius = 0.0f;
     bool filled = true;
     float borderWidth = 1.0f;
@@ -72,13 +72,13 @@ public:
     static bool s_geometryInitialized;
 };
 
-// Í¼Æ¬×é¼þ
+// Í¼Æ¬ï¿½ï¿½ï¿½
 class UIImage : public UIComponent {
 public:
     UIImage(const std::string& id);
     ~UIImage();
 
-    // Í¼Æ¬ÌØ¶¨ÊôÐÔ
+    // Í¼Æ¬ï¿½Ø¶ï¿½ï¿½ï¿½ï¿½ï¿½
     GLuint textureID = 0;
     glm::vec4 textureRect = glm::vec4(0.0f, 0.0f, 1.0f, 1.0f); // u, v, width, height
     bool preserveAspectRatio = false;
@@ -97,13 +97,13 @@ private:
     static bool s_geometryInitialized;
 };
 
-// ÎÄ±¾×é¼þ
+// ï¿½Ä±ï¿½ï¿½ï¿½ï¿½
 class UIText : public UIComponent {
 public:
     UIText(const std::string& id);
     ~UIText();
 
-    // ÎÄ±¾ÌØ¶¨ÊôÐÔ
+    // ï¿½Ä±ï¿½ï¿½Ø¶ï¿½ï¿½ï¿½ï¿½ï¿½
     std::string text;
     std::string fontName = "default";
     float fontSize = 16.0f;
@@ -113,7 +113,7 @@ public:
     void setText(const std::string& text);
     void render(const glm::mat4& projection) override;
 
-    // ×ÖÌå¹ÜÀí
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     struct FontInfo {
         GLuint textureID;
         std::unordered_map<char, glm::vec4> charUVs;
@@ -135,20 +135,20 @@ private:
     glm::vec2 m_textureSize = glm::vec2(0.0f);
 };
 
-// °´Å¥×é¼þ
+// ï¿½ï¿½Å¥ï¿½ï¿½ï¿½
 class UIButton : public UIComponent {
 public:
     UIButton(const std::string& id);
     ~UIButton();
 
-    // °´Å¥ÌØ¶¨ÊôÐÔ
+    // ï¿½ï¿½Å¥ï¿½Ø¶ï¿½ï¿½ï¿½ï¿½ï¿½
     std::string label;
     glm::vec4 normalColor = glm::vec4(0.2f, 0.2f, 0.8f, 1.0f);
     glm::vec4 hoverColor = glm::vec4(0.3f, 0.3f, 0.9f, 1.0f);
     glm::vec4 pressedColor = glm::vec4(0.1f, 0.1f, 0.7f, 1.0f);
     float borderRadius = 5.0f;
 
-    // ÊÂ¼þ»Øµ÷
+    // ï¿½Â¼ï¿½ï¿½Øµï¿½
     std::function<void()> onClickCallback;
 
     void setLabel(const std::string& label);
@@ -164,7 +164,7 @@ private:
     bool m_isPressed = false;
 };
 
-// ÈÝÆ÷×é¼þ£¨ÓÃÓÚ·Ö×é£©
+// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ú·ï¿½ï¿½é£©
 class UIContainer : public UIComponent {
 public:
     UIContainer(const std::string& id);
@@ -177,7 +177,7 @@ public:
     void render(const glm::mat4& projection) override;
     void update(float deltaTime) override;
 
-    // ±éÀú×é¼þ
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     template<typename T>
     std::vector<std::shared_ptr<T>> getComponentsOfType() {
         std::vector<std::shared_ptr<T>> result;
@@ -193,38 +193,39 @@ private:
     std::vector<std::shared_ptr<UIComponent>> m_children;
 };
 
-// UI¹ÜÀíÆ÷
+// UIï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 class UIManager {
 public:
     static UIManager& getInstance();
 
-    // ³õÊ¼»¯/ÇåÀí
+    // ï¿½ï¿½Ê¼ï¿½ï¿½/ï¿½ï¿½ï¿½ï¿½
     void initialize(int screenWidth, int screenHeight);
     void shutdown();
 
-    // ×é¼þ¹ÜÀí
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     void addComponent(std::shared_ptr<UIComponent> component);
     void removeComponent(const std::string& id);
     std::shared_ptr<UIComponent> getComponent(const std::string& id);
 
-    // »ñÈ¡×ÅÉ«Æ÷
+    // ï¿½ï¿½È¡ï¿½ï¿½É«ï¿½ï¿½
     Shader& getUIShader() { return m_uiShader; }
 
-    // ¸üÐÂºÍäÖÈ¾
+    // ï¿½ï¿½ï¿½Âºï¿½ï¿½ï¿½È¾
     void update(float deltaTime);
     void render();
 
-    // ½»»¥´¦Àí
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     void handleMouseClick(float x, float y);
     void handleMouseMove(float x, float y);
+    void handleMouseScroll(float xoffset, float yoffset);
 
-    // ÆÁÄ»³ß´ç±ä»¯
+    // ï¿½ï¿½Ä»ï¿½ß´ï¿½ä»¯
     void onScreenResize(int width, int height);
 
-    // Í¶Ó°¾ØÕó
+    // Í¶Ó°ï¿½ï¿½ï¿½ï¿½
     glm::mat4 getProjectionMatrix() const;
 
-    // ¹¤¾ßº¯Êý
+    // ï¿½ï¿½ï¿½ßºï¿½ï¿½ï¿½
     glm::vec2 screenToUIPoint(float screenX, float screenY) const;
 
 private:
@@ -234,21 +235,21 @@ private:
     int m_screenWidth = 0;
     int m_screenHeight = 0;
 
-    // äÖÈ¾×ÅÉ«Æ÷
+    // ï¿½ï¿½È¾ï¿½ï¿½É«ï¿½ï¿½
     Shader m_uiShader{
         { { GL_VERTEX_SHADER, "shader/ui.vert" },
           { GL_FRAGMENT_SHADER, "shader/ui.frag" } }
     };
 
-    // ×é¼þ´æ´¢
+    // ï¿½ï¿½ï¿½ï¿½æ´¢
     std::unordered_map<std::string, std::shared_ptr<UIComponent>> m_components;
     std::vector<std::shared_ptr<UIComponent>> m_sortedComponents;
 
-    // ½»»¥×´Ì¬
+    // ï¿½ï¿½ï¿½ï¿½×´Ì¬
     std::shared_ptr<UIComponent> m_hoveredComponent = nullptr;
     std::shared_ptr<UIComponent> m_pressedComponent = nullptr;
 
-    // Ë½ÓÐ·½·¨
+    // Ë½ï¿½Ð·ï¿½ï¿½ï¿½
     void sortComponentsByZIndex();
     bool checkComponentInteraction(const glm::vec2& point,
         std::shared_ptr<UIComponent>& result);

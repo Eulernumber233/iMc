@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(msbuild iMc.sln /t:Build /p:Configuration=Debug /verbosity:minimal)",
+      "Bash(ls -la \"e:\\\\opengl\\\\iMc\\\\assert\\\\textures\\\\item\"\" 2>/dev/null || echo \"item目录不存在 \")",
+      "Bash(ls -la e:opengliMc*.sln)"
+    ]
+  }
+}

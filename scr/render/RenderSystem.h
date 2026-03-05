@@ -121,7 +121,7 @@ private:
     // G-Buffer
     GLuint m_gBuffer;
     GLuint m_gPosition, m_gNormal, m_gAlbedo, m_gProperties;
-    GLuint m_rboDepth;
+    GLuint m_depthTexture = 0; // 深度纹理，用于边框遮挡
 
     GLuint m_ssaoFBO, m_ssaoBlurFBO;
     GLuint m_ssaoColorBuffer, m_ssaoColorBufferBlur;
@@ -142,9 +142,9 @@ private:
         time_now += deltaTime;
         // ���㵱ǰ��ת�Ƕ�
         float angle = rotate_speed * time_now;
-        lightPos.x = -1.0f * sin(angle);  // x/z����ͬ���仯��ʵ�֡�б��Գơ�
-        lightPos.y = 1.0f * cos(angle);  // y���������·��򲨶�
-        lightPos.z = -1.0f * sin(angle);
+        lightPos.x = -100.0f * sin(angle);  // x/z����ͬ���仯��ʵ�֡�б��Գơ�
+        lightPos.y = 100.0f * cos(angle);  // y���������·��򲨶�
+        lightPos.z = -100.0f * sin(angle);
 
         // 2. ��Դ����ʼ��ָ��ԭ�㣨ԭ�� - ��Դλ�ã��ٹ�һ����
         lightDir = glm::normalize(glm::vec3(0.0f, 0.0f, 0.0f) - lightPos);

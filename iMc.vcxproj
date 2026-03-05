@@ -139,6 +139,8 @@
     <ClCompile Include="scr\std_image.cpp" />
     <ClCompile Include="scr\TextureMgr.cpp" />
     <ClCompile Include="scr\UI\UIManager.cpp" />
+    <ClCompile Include="scr\UI\UIHotbar.cpp" />
+    <ClCompile Include="scr\Item.cpp" />
     <ClCompile Include="scr\World_4.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -157,6 +159,8 @@
     <ClInclude Include="scr\stb_image.h" />
     <ClInclude Include="scr\TextureMgr.h" />
     <ClInclude Include="scr\UI\UIManager.h" />
+    <ClInclude Include="scr\UI\UIHotbar.h" />
+    <ClInclude Include="scr\Item.h" />
     <ClInclude Include="scr\World.h" />
     <ClInclude Include="scr\World_4.h" />
   </ItemGroup>

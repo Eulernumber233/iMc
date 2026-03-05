@@ -136,6 +136,66 @@
             "category": "block",
             "is_srgb": false,
             "index": 18
+        },
+        {
+            "name": "inventory",
+            "path": "UI/inventory.png",
+            "category": "ui",
+            "is_srgb": false
+        },
+        {
+            "name": "hotbar_offhand_left",
+            "path": "UI/hotbar_offhand_left.png",
+            "category": "ui",
+            "is_srgb": false
+        },
+        {
+            "name": "hotbar_selection",
+            "path": "UI/hotbar_selection.png",
+            "category": "ui",
+            "is_srgb": false
+        },
+        {
+            "name": "hotbar_offhand_right",
+            "path": "UI/hotbar_offhand_right.png",
+            "category": "ui",
+            "is_srgb": false
+        },
+        {
+            "name": "Birch_Log",
+            "path": "item/Birch_Log.png",
+            "category": "item",
+            "is_srgb": false
+        },
+        {
+            "name": "Cobblestone",
+            "path": "item/Cobblestone.png",
+            "category": "item",
+            "is_srgb": false
+        },
+        {
+            "name": "Oak_Planks",
+            "path": "item/Oak_Planks.png",
+            "category": "item",
+            "is_srgb": false
+        },
+        {
+            "name": "Stone",
+            "path": "item/Stone.png",
+            "category": "item",
+            "is_srgb": false
+        },
+        {
+            "name": "spyglass",
+            "path": "item/spyglass.png",
+            "category": "item",
+            "is_srgb": false
+        },
+        {
+            "name": "Axolotl_Bucket",
+            "path": "item/Axolotl_Bucket.png",
+            "category": "item",
+            "is_srgb": false
         }
     ],
     "cube_textures": [

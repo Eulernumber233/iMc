@@ -3,6 +3,7 @@
 #include <fstream>
 #include <sstream>
 #include "../TextureMgr.h"
+#include "../UI/UIHotbar.h"
 #include <random>
 BlockRenderer::BlockRenderer()
     : VAO(0), VBO(0), m_instanceDataVBO(0), EBO(0) {
@@ -60,7 +61,7 @@ bool BlockRenderer::initialize() {
 
     glBindBuffer(GL_ARRAY_BUFFER, m_instanceDataVBO);
     // 预分配空间（假设最大10000个实例）
-    glBufferData(GL_ARRAY_BUFFER, sizeof(glm::mat4) * 10000, NULL, GL_DYNAMIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(InstanceData) * 10000, NULL, GL_DYNAMIC_DRAW);
 
     // 设置实例属性 (location 5-8)
     // 位置 (vec3)
@@ -232,7 +233,7 @@ bool RenderSystem::initialize() {
     // 配置边框
     BlockOutlineRenderer::OutlineConfig outlineConfig;
     outlineConfig.color = glm::vec3(0.0f, 0.0f, 0.0f);  // 黑色边框
-    outlineConfig.lineWidth = 2.5f;
+    outlineConfig.lineWidth = 4.0f;
     outlineConfig.pulseSpeed = 3.0f;
     outlineConfig.pulseIntensity = 0.15f;
     outlineConfig.enablePulse = true;
@@ -314,7 +315,9 @@ bool RenderSystem::initialize() {
     glGenTextures(1, &m_depthMap);
     glBindTexture(GL_TEXTURE_2D, m_depthMap);
 
-    // 格式：RG32F（R存m1=线性深度，G存m2=线性深度²）
+    // glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    // glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+     // 格式：RG32F（R存m1=线性深度，G存m2=线性深度²）
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RG32F, SHADOW_WIDTH, SHADOW_HEIGHT, 0, GL_RG, GL_FLOAT, NULL);
     // 线性过滤获取区域均值
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -349,6 +352,23 @@ bool RenderSystem::initialize() {
 // 添加新的initUI方法
 void RenderSystem::initUI() {
     m_uiManager.initialize(m_screenWidth, m_screenHeight);
+
+    // 加载UI纹理（如果尚未加载）
+    auto texMgr = TextureMgr::GetInstance();
+    // 物品栏纹理
+    if (texMgr->GetTexture2D("hotbar_selection") == 0) {
+        texMgr->LoadTexture2DManual("hotbar_selection", "UI/hotbar_selection.png", false);
+    }
+    if (texMgr->GetTexture2D("hotbar_offhand_left") == 0) {
+        texMgr->LoadTexture2DManual("hotbar_offhand_left", "UI/hotbar_offhand_left.png", false);
+    }
+    if (texMgr->GetTexture2D("hotbar_offhand_right") == 0) {
+        texMgr->LoadTexture2DManual("hotbar_offhand_right", "UI/hotbar_offhand_right.png", false);
+    }
+    if (texMgr->GetTexture2D("inventory") == 0) {
+        texMgr->LoadTexture2DManual("inventory", "UI/inventory.png", false);
+    }
+    // 物品图标纹理（示例）- 配置文件已加载，无需手动加载
 
     // 创建示例UI组件
     createSampleUI();
@@ -388,12 +408,41 @@ void RenderSystem::createSampleUI() {
     m_uiManager.addComponent(crosshair);
     //m_uiManager.addComponent(crosshair2);
     //m_uiManager.addComponent(inventory);
+
+    // 创建物品栏
+    auto hotbar = std::make_shared<UIHotbar>("hotbar", 10);
+
+    // 设置布局参数
+    UIHotbar::LayoutParams params;
+    params.baseSlotSize = 40.0f;
+    params.borderScaleNormal = 0.95f;
+    params.borderScaleSelected = 0.80f;
+    params.iconScale = 0.58f;
+    params.iconOffsetX = 3.0f;
+    params.iconOffsetY = -4.0f;
+    params.slotSpacing = -13.0f;
+    params.overallScale = 1.0f;
+    hotbar->setLayoutParams(params);
+
+    float slotSize = m_screenWidth * 0.06f; // 槽位大小为屏幕宽度的6%
+    float hotbarWidth = slotSize * 10.0f;   // 10个槽位紧密排列
+    float hotbarHeight = slotSize;          // 槽位为正方形
+    hotbar->setSize(hotbarWidth, hotbarHeight);
+    hotbar->setPosition(m_screenWidth * 0.5f, 30); // 底部居中，距离底部30像素
+    hotbar->anchor = glm::vec2(0.5f, 0.0f); // 水平居中，垂直底部对齐
+    hotbar->zIndex = 50;
+    // 设置一些示例物品
+    hotbar->setSlotItem(0, "Stone");
+    hotbar->setSlotItem(1, "Birch_Log");
+    hotbar->setSlotItem(2, "Cobblestone");
+    hotbar->setSlotItem(3, "Oak_Planks");
+    hotbar->setSlotItem(4, "spyglass");
+    m_uiManager.addComponent(hotbar);
 }
 // 添加UI渲染方法
 void RenderSystem::renderUI() {
-    // 注意：需要在主渲染循环中更新UI时间
-    static float uiTime = 0.0f;
-    uiTime += 0.016f; // 假设60FPS
+    //static float uiTime = 0.0f;
+    //uiTime += 0.016f; // 假设60FPS
 
     // 更新UI
     m_uiManager.update(0.016f);
@@ -459,11 +508,16 @@ bool RenderSystem::createGBuffer() {
     };
     glDrawBuffers(4, attachments);
 
-    // 创建深度缓冲区
-    glGenRenderbuffers(1, &m_rboDepth);
-    glBindRenderbuffer(GL_RENDERBUFFER, m_rboDepth);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT, m_screenWidth, m_screenHeight);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_rboDepth);
+    // 创建深度纹理
+    glGenTextures(1, &m_depthTexture);
+    glBindTexture(GL_TEXTURE_2D, m_depthTexture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, m_screenWidth, m_screenHeight,
+        0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_depthTexture, 0);
 
     // 检查FBO是否完整
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
@@ -506,7 +560,7 @@ bool RenderSystem::createGBuffer() {
 
 void RenderSystem::destroyGBuffer() {
     if (m_gBuffer) glDeleteFramebuffers(1, &m_gBuffer);
-    if (m_rboDepth) glDeleteRenderbuffers(1, &m_rboDepth);
+    if (m_depthTexture) glDeleteTextures(1, &m_depthTexture);
 
     if (m_gPosition) glDeleteTextures(1, &m_gPosition);
     if (m_gNormal) glDeleteTextures(1, &m_gNormal);
@@ -549,7 +603,7 @@ void RenderSystem::render(const ChunkManager& chunkManager,
     std::shared_ptr<Camera> camera,
     float deltaTime
 ) {
-    //move_DirLight(deltaTime); // 禁用光源旋转以保持阴影稳定
+    move_DirLight(deltaTime); // 禁用光源旋转以保持阴影稳定
 
     m_drawCalls = 0;
     m_totalInstances = 0;
@@ -582,6 +636,9 @@ void RenderSystem::render(const ChunkManager& chunkManager,
 void RenderSystem::renderOutlines(const glm::mat4& view, const glm::mat4& projection) {
     // 更新边框渲染器的时间
     m_outlineRenderer.updateTime(m_currentTime);
+
+    // 设置深度纹理用于遮挡检测
+    m_outlineRenderer.setDepthTexture(m_depthTexture);
 
     // 渲染选中方块的边框
     m_outlineRenderer.render(m_selectedBlockPos, view, projection, m_currentTime);
@@ -725,7 +782,7 @@ void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std
     glViewport(0, 0, m_screenWidth, m_screenHeight);
 
     //glBindTexture(GL_TEXTURE_2D, m_depthMap);
-    //glGenerateMipmap(GL_TEXTURE_2D);
+   // glGenerateMipmap(GL_TEXTURE_2D);
 }
 
 
