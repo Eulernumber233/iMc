@@ -135,6 +135,9 @@
     <ClCompile Include="scr\iMc.cpp" />
     <ClCompile Include="scr\mode\Mesh.cpp" />
     <ClCompile Include="scr\mode\Model.cpp" />
+    <ClCompile Include="scr\particle\ECSParticleSystem.cpp" />
+    <ClCompile Include="scr\particle\GPUParticleSystem.cpp" />
+    <ClCompile Include="scr\particle\ParticleManager.cpp" />
     <ClCompile Include="scr\render\BlockOutlineRenderer.cpp" />
     <ClCompile Include="scr\render\RenderSystem.cpp" />
     <ClCompile Include="scr\Shader.cpp" />
@@ -157,6 +160,10 @@
     <ClInclude Include="scr\generate\TerrainGenerator.h" />
     <ClInclude Include="scr\mode\Mesh.h" />
     <ClInclude Include="scr\mode\Model.h" />
+    <ClInclude Include="scr\particle\ECSParticleSystem.h" />
+    <ClInclude Include="scr\particle\GPUParticleSystem.h" />
+    <ClInclude Include="scr\particle\ParticleCommon.h" />
+    <ClInclude Include="scr\particle\ParticleManager.h" />
     <ClInclude Include="scr\render\BlockOutlineRenderer.h" />
     <ClInclude Include="scr\render\RenderSystem.h" />
     <ClInclude Include="scr\Shader.h" />
@@ -184,6 +191,9 @@
     <None Include="shader\outline.vert" />
     <None Include="assert\textures\Minecraft砖块贴图 %282%29.7z" />
     <None Include="assert\textures\textures_config.json" />
+    <None Include="shader\particle.comp" />
+    <None Include="shader\particle.frag" />
+    <None Include="shader\particle.vert" />
     <None Include="shader\shadow_mapping_depth.frag" />
     <None Include="shader\shadow_mapping_depth.vert" />
     <None Include="shader\ssao.frag" />

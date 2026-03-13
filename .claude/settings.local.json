@@ -5,7 +5,12 @@
       "Bash(ls -la \"e:\\\\opengl\\\\iMc\\\\assert\\\\textures\\\\item\"\" 2>/dev/null || echo \"item目录不存在 \")",
       "Bash(ls -la e:opengliMc*.sln)",
       "Bash(dir \"e:\\\\opengl\\\\iMc\\\\assert\\\\mode\")",
-      "Bash(dir \"e:\\\\opengl\\\\iMc\\\\assert\\\\mode\\\\spyglass_in_hand_obj\")"
+      "Bash(dir \"e:\\\\opengl\\\\iMc\\\\assert\\\\mode\\\\spyglass_in_hand_obj\")",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(g++ --version)"
+    ],
+    "additionalDirectories": [
+      "e:\\opengl\\iMc\\scr"
     ]
   }
 }

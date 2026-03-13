@@ -6,236 +6,203 @@
 #include <vector>
 #include <glm/glm.hpp>
 #include "../Shader.h"
-#include "BlockOutlineRenderer.h"  // ����
-#include "../collision/Ray.h"                   // ����
+#include "BlockOutlineRenderer.h"
+#include "../collision/Ray.h"
 #include "../UI/UIManager.h"
 #include "../mode/Model.h"
-// �����涥������
+#include "../particle/ParticleManager.h"
+
 struct FaceVertex {
     glm::vec3 position;
     glm::vec3 normal;
     glm::vec2 texCoord;
 };
 
-// ������Ⱦ��
 class BlockRenderer {
 public:
     BlockRenderer();
     ~BlockRenderer();
-
-    // ��ʼ��
     bool initialize();
-
-    // ��Ⱦ��������
     void render(const std::vector<InstanceData>& instanceMatrices,
         const glm::mat4& view, const glm::mat4& projection);
-
-    // ���ɷ�����Ӱ����
-    void renderDepth(const std::vector<InstanceData>& instanceData
-        , const glm::mat4& lightSpaceMatrix, float near, float far);
-
-    // ��ȡVAO
+    void renderDepth(const std::vector<InstanceData>& instanceData,
+        const glm::mat4& lightSpaceMatrix, float near, float far);
     GLuint getVAO() const { return VAO; }
-
-    // ������������
     void setTextureArray(GLuint texArray) { m_textureArray = texArray; }
 
 private:
-    // ������λ���������
     void createFaceVertices();
 
-    GLuint VAO;            // �����������
-    GLuint VBO;            // ���㻺��������
-    GLuint EBO;			// ��������������
-    GLuint m_instanceDataVBO;    // ʵ�������󻺳���
+    GLuint VAO;
+    GLuint VBO;
+    GLuint EBO;
+    GLuint m_instanceDataVBO;
     GLuint m_textureArray = 0;
-    std::vector<unsigned int> m_indices; // ���������������
+    std::vector<unsigned int> m_indices;
     std::vector<FaceVertex> m_vertices;
 
-
-    // ��ɫ������
     Shader m_shader{ {
-            { GL_VERTEX_SHADER,"shader/g_buffer.vert" },
-            { GL_FRAGMENT_SHADER, "shader/g_buffer.frag" }
-            } };
-
-    // ȫ��ƽ�й�(����)��Ӱ��ͼ������ɫ��
+        { GL_VERTEX_SHADER,   "shader/g_buffer.vert" },
+        { GL_FRAGMENT_SHADER, "shader/g_buffer.frag" }
+    } };
     Shader m_depthShader{ {
-        { GL_VERTEX_SHADER,"shader/shadow_mapping_depth.vert" },
-        { GL_FRAGMENT_SHADER,  "shader/shadow_mapping_depth.frag" }
-        } };
-
+        { GL_VERTEX_SHADER,   "shader/shadow_mapping_depth.vert" },
+        { GL_FRAGMENT_SHADER, "shader/shadow_mapping_depth.frag" }
+    } };
 };
 
-// ��Ⱦϵͳ
 class RenderSystem {
 public:
     RenderSystem(int screenWidth, int screenHeight);
     ~RenderSystem();
 
-    // ��ʼ��
     bool initialize();
-
-    // ��Ⱦһ֡
     void render(const ChunkManager& chunkManager,
         const glm::mat4& view,
         const glm::mat4& projection,
         std::shared_ptr<Camera> camera,
         float deltaTime);
 
-    // ����ѡ�еķ��飨���ڱ߿���Ⱦ��
     void setSelectedBlock(const glm::ivec3& blockPos) {
         m_selectedBlockPos = blockPos;
         m_hasSelectedBlock = true;
     }
-
     void clearSelectedBlock() {
         m_hasSelectedBlock = false;
     }
-
-    // ���ø�������
     void setOutlineConfig(const BlockOutlineRenderer::OutlineConfig& config) {
         m_outlineRenderer.setConfig(config);
     }
-
-    // ���ù��ղ���
     void setLightDirection(const glm::vec3& direction) { m_lightDirection = direction; }
     void setLightColor(const glm::vec3& color) { m_lightColor = color; }
     void setLightIntensity(float intensity) { m_lightIntensity = intensity; }
     void setAmbientColor(const glm::vec3& color) { m_ambientColor = color; }
 
-    // ��ȡ��Ⱦͳ��
     int getDrawCalls() const { return m_drawCalls; }
     int getTotalInstances() const { return m_totalInstances; }
 
-    // UI��ط���
+    // UI
     void initUI();
     UIManager& getUIManager() { return UIManager::getInstance(); }
-    // ������Ļ�ߴ繩UIʹ��
     void setScreenSize(int width, int height);
 
+    // 粒子系统
+    void toggleWeather() { m_particleManager.toggleWeather(); }
+    void emitBlockDebris(const glm::vec3& blockPosition, BlockType blockType, int count = 50) {
+        m_particleManager.emitBlockDebris(blockPosition, blockType, count);
+    }
+    int getParticleCount() const { return m_particleManager.getTotalParticleCount(); }
+
 private:
-    // ��Ļ�ߴ�
+    // 屏幕尺寸
     int m_screenWidth;
     int m_screenHeight;
 
     // G-Buffer
     GLuint m_gBuffer;
     GLuint m_gPosition, m_gNormal, m_gAlbedo, m_gProperties;
-    GLuint m_depthTexture = 0; // 深度纹理，用于边框遮挡
+    GLuint m_depthTexture = 0;               // G-Buffer深度纹理
 
+    // SSAO
     GLuint m_ssaoFBO, m_ssaoBlurFBO;
     GLuint m_ssaoColorBuffer, m_ssaoColorBufferBlur;
-    GLuint m_noiseTexture;// SSAO��������
-    std::vector<glm::vec3> ssaoKernel;// SSAO������
+    GLuint m_noiseTexture;
+    std::vector<glm::vec3> ssaoKernel;
 
-    GLuint m_depthMapFBO; //  dirVarianceMap; VSSM��
-    GLuint m_depthMap; // ȫ��ƽ�й���գ���Ӱ��ͼ
+    // 阴影
+    GLuint m_depthMapFBO;
+    GLuint m_depthMap;                        // 阴影深度图
 
-    glm::vec3 lightPos = { -1, 1.0f, -1.0f }; // ȫ��ƽ�й�(λ���������)
-    glm::vec3 lightDir = glm::normalize(glm::vec3(1.0f, -1.0f, 1.0f)); // ȫ��ƽ�й�
+    // 光照FBO（延迟光照结果）
+    GLuint m_lightingFBO;
+    GLuint m_lightingColorTexture;            // 光照颜色纹理
+
+    // 合成FBO（用于后续正向渲染，包含颜色和深度）
+    GLuint m_compositeFBO;
+    GLuint m_compositeColor;                  // 最终颜色纹理
+    GLuint m_compositeDepth;                   // 最终深度纹理
+
+    // 光源参数
+    glm::vec3 lightPos = { -1, 1.0f, -1.0f };
+    glm::vec3 lightDir = glm::normalize(glm::vec3(1.0f, -1.0f, 1.0f));
 
     void move_DirLight(float deltaTime) {
         static float time_now = 0.0f;
-        const float rotate_speed = 0.2f; // ��ת�ٶ�
-
-        // �ۼ�ʱ�䣬������ת
+        const float rotate_speed = 0.2f;
         time_now += deltaTime;
-        // ���㵱ǰ��ת�Ƕ�
         float angle = rotate_speed * time_now;
-        lightPos.x = -100.0f * sin(angle);  // x/z����ͬ���仯��ʵ�֡�б��Գơ�
-        lightPos.y = 100.0f * cos(angle);  // y���������·��򲨶�
+        lightPos.x = -100.0f * sin(angle);
+        lightPos.y = 100.0f * cos(angle);
         lightPos.z = -100.0f * sin(angle);
-
-        // 2. ��Դ����ʼ��ָ��ԭ�㣨ԭ�� - ��Դλ�ã��ٹ�һ����
-        lightDir = glm::normalize(glm::vec3(0.0f, 0.0f, 0.0f) - lightPos);
+        lightDir = glm::normalize(glm::vec3(0.0f) - lightPos);
     }
 
-
-    // ssao�������ڱ���ɫ��
+    // 着色器
     Shader m_ssaoShader{ {
-        { GL_VERTEX_SHADER,"shader/ssao.vert" },
+        { GL_VERTEX_SHADER,   "shader/ssao.vert" },
         { GL_FRAGMENT_SHADER, "shader/ssao.frag" }
-        } };
-
-    // ssaoģ����ɫ��
+    } };
     Shader m_ssaoBlurShader{ {
-        { GL_VERTEX_SHADER,"shader/ssao_blur.vert" },
+        { GL_VERTEX_SHADER,   "shader/ssao_blur.vert" },
         { GL_FRAGMENT_SHADER, "shader/ssao_blur.frag" }
-        } };
-
-    // �ӳٹ�����ɫ��
+    } };
     Shader m_deferredLightingShader{ {
-            { GL_VERTEX_SHADER,"shader/deferred_lighting.vert" },
-            { GL_FRAGMENT_SHADER, "shader/deferred_lighting.frag" }
-            } };
-
-	// 模型渲染着色器
+        { GL_VERTEX_SHADER,   "shader/deferred_lighting.vert" },
+        { GL_FRAGMENT_SHADER, "shader/deferred_lighting.frag" }
+    } };
     Shader m_modeShader{ {
-            {GL_VERTEX_SHADER, "shader/mode.vert"},
-            {GL_FRAGMENT_SHADER, "shader/mode.frag"}
-        } };
-    
-    // TODO:添加模型管理类
+        { GL_VERTEX_SHADER,   "shader/mode.vert" },
+        { GL_FRAGMENT_SHADER, "shader/mode.frag" }
+    } };
+
+    // 模型
     Model spyglass{ "assert/mode/spyglass_in_hand_obj/spyglass_in_hand.obj" };
 
-
-    // ������Ⱦ��
+    // 渲染器组件
     BlockRenderer m_blockRenderer;
-
-    // �߿���Ⱦ��
+    ParticleManager m_particleManager;
     BlockOutlineRenderer m_outlineRenderer;
-
-    // UI������
     UIManager& m_uiManager = UIManager::getInstance();
 
-    // ѡ�еķ���
+    // 选中方块
     glm::ivec3 m_selectedBlockPos;
     bool m_hasSelectedBlock = false;
     float m_currentTime = 0.0f;
 
-
-    // ȫ���ı���
+    // 全屏四边形
     GLuint m_screenQuadVAO;
     GLuint m_screenQuadVBO;
 
-    // ���ղ���
+    // 光照参数
     glm::vec3 m_lightDirection;
     glm::vec3 m_lightColor;
     float m_lightIntensity;
     glm::vec3 m_ambientColor;
 
-    // ��Ⱦͳ��
+    // 统计
     int m_drawCalls;
     int m_totalInstances;
 
-    // ˽�з���
+    // 私有方法
     bool createGBuffer();
     void destroyGBuffer();
     void createScreenQuad();
     void createSampleUI();
+    bool createLightingFBO();          // 新增：创建光照FBO
+    bool createCompositeFBO();         // 新增：创建合成FBO
+    void destroyCompositeFBO();        // 新增：销毁合成FBO
 
-    // ��Ⱦ
-    // ȫ���ı���
     void RenderQuad();
-    // ���ν׶�
     void geometryPass(const ChunkManager& chunkManager,
         const glm::mat4& view,
         const glm::mat4& projection);
-    // ssao�׶�
     void ssaoPass(const glm::mat4& view, const glm::mat4& projection);
-    // ssaoģ��
     void ssaoBlurPass();
-    // ȫ��ƽ�й���Ӱ��ͼ����
-    void sunShineShadowMap(const ChunkManager& chunkManager, const std::shared_ptr<Camera>camera
-        , float& sunShine_near, float& sunShine_far, glm::mat4& lightSpaceMatrix);
-    // ���ռ���
-    void lightingPass(const std::shared_ptr<Camera>camera
-        , float sunShine_near, float sunShine_far, glm::mat4& lightSpaceMatrix);
-    // ��Ⱦ�߿�
+    void sunShineShadowMap(const ChunkManager& chunkManager, const std::shared_ptr<Camera>camera,
+        float& sunShine_near, float& sunShine_far, glm::mat4& lightSpaceMatrix);
+    void lightingPass(const std::shared_ptr<Camera>camera,
+        float sunShine_near, float sunShine_far, glm::mat4& lightSpaceMatrix);
     void renderOutlines(const glm::mat4& view, const glm::mat4& projection);
-    // ��ȾUI
     void renderUI();
-    // 模型物体渲染
     void renderModel(const std::shared_ptr<Camera>camera);
 };

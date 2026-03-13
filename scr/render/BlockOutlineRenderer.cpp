@@ -126,7 +126,7 @@ void BlockOutlineRenderer::render(const glm::ivec3& blockPos,
 
     // ���ñ߿����
     m_shader.setVec3("uOutlineColor", m_config.color);
-    m_shader.setFloat("uTime", time);
+    //m_shader.setFloat("uTime", time);
     m_shader.setFloat("uPulseSpeed", m_config.pulseSpeed);
     m_shader.setFloat("uPulseIntensity", m_config.pulseIntensity);
     m_shader.setInt("uEnablePulse", m_config.enablePulse ? 1 : 0);

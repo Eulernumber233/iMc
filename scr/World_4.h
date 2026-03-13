@@ -39,6 +39,9 @@ private:
     void initHotbarItems();
     std::shared_ptr<Item> getSelectedItem() const;
 
+    // 渲染系统指针（用于粒子效果控制）
+    RenderSystem* m_renderSystem = nullptr;
+
     // ���봦������
     void processMouse(double xpos, double ypos);
     void processMouseButton(int button, int action);

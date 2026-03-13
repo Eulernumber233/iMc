@@ -60,6 +60,27 @@
     <ClCompile Include="scr\World_4.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="scr\mode\Mesh.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\mode\Model.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\UI\UIHotbar.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\Item.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\particle\ParticleManager.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\particle\GPUParticleSystem.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\particle\ECSParticleSystem.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="scr\chunk\BlockType.h">
@@ -113,6 +134,30 @@
     <ClInclude Include="scr\Data.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="scr\mode\Mesh.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\mode\Model.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\UI\UIHotbar.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\Item.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\particle\ECSParticleSystem.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\particle\ParticleManager.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\particle\ParticleCommon.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\particle\GPUParticleSystem.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="shader\deferred_lighting.vert" />
@@ -136,6 +181,11 @@
     <None Include="shader\ssao_blur.vert" />
     <None Include="shader\shadow_mapping_depth.vert" />
     <None Include="shader\shadow_mapping_depth.frag" />
+    <None Include="shader\mode.frag" />
+    <None Include="shader\mode.vert" />
+    <None Include="shader\particle.vert" />
+    <None Include="shader\particle.frag" />
+    <None Include="shader\particle.comp" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="assert\textures\block\birch_log.png">

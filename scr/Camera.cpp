@@ -42,7 +42,7 @@ Camera::Camera(float posX, float posY, float posZ,
     BasicMovementSpeed = SPEED;
 
     // 投影参数
-    AspectRatio = 16.0f / 9.0f;
+    AspectRatio = 12.0f / 9.0f;
     NearPlane = 0.1f;
     FarPlane = 1000.0f;
     FOV = 45.0f;

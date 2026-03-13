@@ -29,6 +29,7 @@ int World_4::run() {
 
     // ������Ⱦϵͳ
     RenderSystem renderSystem(SCR_WIDTH, SCR_HEIGHT);
+    m_renderSystem = &renderSystem;
     if (!renderSystem.initialize()) {
         std::cerr << "Failed to initialize render system" << std::endl;
         return -1;
@@ -173,6 +174,11 @@ void World_4::processMouseButton(int button, int action) {
 void World_4::processKey(int key, int action) {
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
         glfwSetWindowShouldClose(window, GLFW_TRUE);
+    }
+    if (key == GLFW_KEY_G && action == GLFW_PRESS) {
+        if (m_renderSystem) {
+            m_renderSystem->toggleWeather();
+        }
     }
 }
 

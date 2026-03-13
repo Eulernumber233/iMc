@@ -81,8 +81,9 @@ void main()
     result += specular;
     result *= attenuation;
 
-    FragColor = vec4(result, 1.0); 
+    FragColor = vec4(result, 1.0);
 
-    // 仅显示漫反射贴图
-    FragColor = texture(texture_diffuse1, TexCoords);
+    // 仅显示漫反射贴图（调试用，已注释）
+     FragColor = texture(texture_diffuse1, TexCoords);
+    //FragColor = vec4(1.0f);
 }

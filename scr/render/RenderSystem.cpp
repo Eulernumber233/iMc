@@ -230,6 +230,12 @@ bool RenderSystem::initialize() {
     // 初始化UI系统
     initUI();
 
+    // 初始化粒子管理器
+    if (!m_particleManager.initialize()) {
+        std::cerr << "Failed to initialize ParticleManager!" << std::endl;
+        return false;
+    }
+
 
 
     // 配置边框
@@ -356,7 +362,17 @@ bool RenderSystem::initialize() {
 
 
 
+    // 创建光照FBO
+    if (!createLightingFBO()) {
+        std::cerr << "Failed to create lighting FBO!" << std::endl;
+        return false;
+    }
 
+    // 创建合成FBO
+    if (!createCompositeFBO()) {
+        std::cerr << "Failed to create composite FBO!" << std::endl;
+        return false;
+    }
 
     return true;
 }
@@ -584,6 +600,79 @@ void RenderSystem::destroyGBuffer() {
     m_gBuffer = 0;
 }
 
+bool RenderSystem::createLightingFBO() {
+    glGenFramebuffers(1, &m_lightingFBO);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_lightingFBO);
+
+    glGenTextures(1, &m_lightingColorTexture);
+    glBindTexture(GL_TEXTURE_2D, m_lightingColorTexture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, m_screenWidth, m_screenHeight,
+        0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_lightingColorTexture, 0);
+
+    GLuint attachments[1] = { GL_COLOR_ATTACHMENT0 };
+    glDrawBuffers(1, attachments);
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        std::cerr << "Lighting FBO not complete!" << std::endl;
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        return false;
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    return true;
+}
+
+bool RenderSystem::createCompositeFBO() {
+    glGenFramebuffers(1, &m_compositeFBO);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_compositeFBO);
+
+    // 颜色纹理（与光照纹理格式一致）
+    glGenTextures(1, &m_compositeColor);
+    glBindTexture(GL_TEXTURE_2D, m_compositeColor);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, m_screenWidth, m_screenHeight,
+        0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_compositeColor, 0);
+
+    // 深度纹理（与G-Buffer深度格式一致）
+    glGenTextures(1, &m_compositeDepth);
+    glBindTexture(GL_TEXTURE_2D, m_compositeDepth);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, m_screenWidth, m_screenHeight,
+        0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_compositeDepth, 0);
+
+    GLuint attachments[1] = { GL_COLOR_ATTACHMENT0 };
+    glDrawBuffers(1, attachments);
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        std::cerr << "Composite FBO not complete!" << std::endl;
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        return false;
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    return true;
+}
+
+void RenderSystem::destroyCompositeFBO() {
+    if (m_compositeFBO) glDeleteFramebuffers(1, &m_compositeFBO);
+    if (m_compositeColor) glDeleteTextures(1, &m_compositeColor);
+    if (m_compositeDepth) glDeleteTextures(1, &m_compositeDepth);
+    m_compositeFBO = 0;
+    m_compositeColor = 0;
+    m_compositeDepth = 0;
+}
+
 void RenderSystem::createScreenQuad() {
     float quadVertices[] = {
         -1.0f,  1.0f,  0.0f, 1.0f,
@@ -617,74 +706,92 @@ void RenderSystem::render(const ChunkManager& chunkManager,
     std::shared_ptr<Camera> camera,
     float deltaTime
 ) {
-    move_DirLight(deltaTime); // 禁用光源旋转以保持阴影稳定
+    //glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    //glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    //glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    //renderModel(camera);
+    //return;
 
-    m_drawCalls = 0;
-    m_totalInstances = 0;
+    m_currentTime += deltaTime;
 
-    // 几何Pass：填充G-Buffer
+    // 更新光源位置
+    move_DirLight(deltaTime);
+
+    // 更新粒子系统
+    m_particleManager.update(deltaTime, camera->Position);
+
+    // 几何通道：渲染方块到 G-Buffer
     geometryPass(chunkManager, view, projection);
-
-    // SSAO Pass
+    
+    // SSAO 通道
     ssaoPass(view, projection);
-    // SSAO模糊Pass
     ssaoBlurPass();
-
-    // 全局平行光阴影贴图Pass
-    float sunShine_near = 0, sunShine_far = 0;
+    
+    // 阴影映射
+    float sunShine_near, sunShine_far;
     glm::mat4 lightSpaceMatrix;
     sunShineShadowMap(chunkManager, camera, sunShine_near, sunShine_far, lightSpaceMatrix);
-
-    // 光照Pass：计算光照
+    
+    // 4. 光照通道：计算结果到 lightingFBO
     lightingPass(camera, sunShine_near, sunShine_far, lightSpaceMatrix);
 
-    // 测试模型加载和渲染
-    //renderModel(camera);
+    // 5. 将光照颜色和 G-Buffer 深度复制到合成 FBO
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, m_lightingFBO);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_compositeFBO);
+    glBlitFramebuffer(0, 0, m_screenWidth, m_screenHeight,
+        0, 0, m_screenWidth, m_screenHeight,
+        GL_COLOR_BUFFER_BIT, GL_LINEAR);
 
-    // 渲染选中的方块边框 TODOs
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, m_gBuffer);
+    glBlitFramebuffer(0, 0, m_screenWidth, m_screenHeight,
+        0, 0, m_screenWidth, m_screenHeight,
+        GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+
+    // 6. 绑定合成 FBO，开始正向渲染
+    glBindFramebuffer(GL_FRAMEBUFFER, m_compositeFBO);
+    glViewport(0, 0, m_screenWidth, m_screenHeight);
+
+
+    // 6.1 渲染模型（不透明，写入深度）
+    //renderModel(camera);  // 内部已开启深度测试和深度写入
+
+    // 6.2 渲染粒子（半透明，深度测试开启，深度写入关闭）
+    // 确保粒子系统内部已设置 glDepthMask(GL_FALSE)
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    m_particleManager.render(camera->GetViewMatrix(), camera->GetProjectionMatrix());
+    glDisable(GL_BLEND);
+
+    //// 6.3 渲染边框（根据配置，通常关闭深度测试）
     if (m_hasSelectedBlock) {
         renderOutlines(view, projection);
     }
 
+    //// 6.4 渲染 UI（深度测试关闭）
+    glDisable(GL_DEPTH_TEST);
     renderUI();
+    glEnable(GL_DEPTH_TEST); // 恢复，以备后用
 
+    // 7. 将合成 FBO 的颜色复制到默认帧缓冲
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, m_compositeFBO);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+    glBlitFramebuffer(0, 0, m_screenWidth, m_screenHeight,
+        0, 0, m_screenWidth, m_screenHeight,
+        GL_COLOR_BUFFER_BIT, GL_LINEAR);
 
+    // 解绑
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-// 新增：渲染边框函数
 void RenderSystem::renderOutlines(const glm::mat4& view, const glm::mat4& projection) {
     // 更新边框渲染器的时间
     m_outlineRenderer.updateTime(m_currentTime);
 
     // 设置深度纹理用于遮挡检测
-    m_outlineRenderer.setDepthTexture(m_depthTexture);
+    m_outlineRenderer.setDepthTexture(m_compositeDepth);
 
     // 渲染选中方块的边框
     m_outlineRenderer.render(m_selectedBlockPos, view, projection, m_currentTime);
-}
-
-
-void printMat4(const glm::mat4& mat) {
-    for (int row = 0; row < 4; ++row) {
-        std::cout << "[";
-        for (int col = 0; col < 4; ++col) {
-            std::cout << mat[col][row];
-            if (col < 3) std::cout << ", ";
-        }
-        std::cout << "]\n";
-    }
-}
-void printt_RenderData(const std::unordered_map<BlockFaceType, std::vector<glm::mat4>>& a) {
-    for (auto& b : a) {
-        std::cout << "BlockFaceType: " << static_cast<int>(b.first.type) << ", Face ID: " << static_cast<int>(b.first.face_id) << ", Matrices count: " << b.second.size() << std::endl;
-        int cnt = 0;
-        for (auto& c : b.second) {
-            printMat4(c);
-            std::cout << "----\n";
-            cnt++;
-            if (cnt > 10)break;
-        }
-    }
 }
 
 void RenderSystem::RenderQuad()
@@ -808,17 +915,15 @@ void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std
 
 void RenderSystem::lightingPass(const std::shared_ptr<Camera>camera
     , float sunShine_near, float sunShine_far, glm::mat4& lightSpaceMatrix) {
-    // 清除屏幕
-    glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_lightingFBO);
+    glViewport(0, 0, m_screenWidth, m_screenHeight);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
 
-    // 禁用深度测试，因为我们要渲染全屏四边形
-    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_DEPTH_TEST); // 全屏四边形不需要深度
 
-    // 使用延迟光照着色器
     m_deferredLightingShader.use();
 
-    // 绑定G-Buffer纹理
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, m_gPosition);
     glActiveTexture(GL_TEXTURE1);
@@ -827,48 +932,47 @@ void RenderSystem::lightingPass(const std::shared_ptr<Camera>camera
     glBindTexture(GL_TEXTURE_2D, m_gAlbedo);
     glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_2D, m_gProperties);
-    glActiveTexture(GL_TEXTURE4); // ssao阴影贴图
+    glActiveTexture(GL_TEXTURE4);
     glBindTexture(GL_TEXTURE_2D, m_ssaoColorBufferBlur);
-    glActiveTexture(GL_TEXTURE5); // 平行光阴影贴图
+    glActiveTexture(GL_TEXTURE5);
     glBindTexture(GL_TEXTURE_2D, m_depthMap);
 
-    // 设置光照参数  
     m_deferredLightingShader.setVec3("uViewPos", camera->Position);
     m_deferredLightingShader.setVec3("sunShinePos", lightPos);
     m_deferredLightingShader.setVec3("sunShineDir", lightDir);
     m_deferredLightingShader.setVec3("sunShineAmbient", 0.2f, 0.2f, 0.2f);
     m_deferredLightingShader.setVec3("sunShineDiffuse", 0.8f, 0.8f, 0.8f);
-    m_deferredLightingShader.setFloat("sunShineSize", 5.0f);// 光源大小
+    m_deferredLightingShader.setFloat("sunShineSize", 5.0f);
     m_deferredLightingShader.setInt("SHADOW_WIDTH", SHADOW_WIDTH);
     m_deferredLightingShader.setFloat("sunShineFar", sunShine_far);
     m_deferredLightingShader.setFloat("sunShineNear", sunShine_near);
     m_deferredLightingShader.setMat4("lightSpaceMatrix", lightSpaceMatrix);
 
-    // 渲染屏幕四边形
     RenderQuad();
 
-    // 重新启用深度测试
     glEnable(GL_DEPTH_TEST);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 void RenderSystem::renderModel(const std::shared_ptr<Camera> camera)
 {
     // 测试模型加载和渲染
     glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);          // 确保写入深度
     glEnable(GL_CULL_FACE);
-    //glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
-    //glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
     m_modeShader.use();
     m_modeShader.setMat4("projection", camera->GetProjectionMatrix());
     m_modeShader.setMat4("view", camera->GetViewMatrix());
     m_modeShader.setVec3("viewPos", camera->Position);
 
     glm::mat4 model = glm::mat4(1.0f);
-    model = glm::translate(model, glm::vec3(7.0f, 62.0f, 7.5f));
+    model = glm::translate(model, glm::vec3(0.0f, 70.0f, -3.0f));
     model = glm::scale(model, glm::vec3(1.1f, 1.1f, 1.1f));
     //model = glm::rotate(model, glm::radians((float)glfwGetTime() * 50.0f), glm::vec3(0.0f, 1.0f, 0.0f));
     m_modeShader.setMat4("model", model);
 
     spyglass.Draw(m_modeShader);
-    glDepthFunc(GL_LESS);
 }
