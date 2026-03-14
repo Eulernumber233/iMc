@@ -26,11 +26,21 @@ bool ParticleManager::initialize() {
     return true;
 }
 
-void ParticleManager::update(float deltaTime, const glm::vec3& cameraPosition) {
+void ParticleManager::update(float deltaTime,
+                              const std::shared_ptr<Camera>& camera,
+                              const std::vector<glm::ivec2>& visibleChunkPositions) {
     if (!m_initialized) return;
 
+    // 设置视锥剔除参数
+    if (camera) {
+        m_gpuParticleSystem.setFrustumCullingParams(camera);
+    }
+
+    // 设置可见区块信息（用于优化粒子生成）
+    m_gpuParticleSystem.setVisibleChunksInfo(camera->Position, visibleChunkPositions);
+
     // 更新GPU粒子系统
-    m_gpuParticleSystem.update(deltaTime, cameraPosition);
+    m_gpuParticleSystem.update(deltaTime, camera->Position);
 
     // 更新ECS粒子系统
     //m_ecsParticleSystem.update(deltaTime);
@@ -74,19 +84,20 @@ ParticleConfig ParticleManager::getWeatherConfig(ParticleType weatherType) const
     case ParticleType::WeatherRain:
         config.type = ParticleType::WeatherRain;
         config.behaviorFlags = ParticleBehaviorFlags::GRAVITY | ParticleBehaviorFlags::WIND;
-        config.spawnAreaMin = glm::vec3(-50.0f, 30.0f, -50.0f);
-        config.spawnAreaMax = glm::vec3(50.0f, 50.0f, 50.0f);
-        config.velocityMin = glm::vec3(-0.1f, -5.0f, -0.1f);
-        config.velocityMax = glm::vec3(0.1f, -3.0f, 0.1f);
-        config.colorStart = glm::vec4(0.5f, 0.6f, 0.9f, 0.7f);
-        config.colorEnd = glm::vec4(0.5f, 0.6f, 0.9f, 0.3f);
-        config.sizeStart = 0.5f;
-        config.sizeEnd = 0.03f;
-        config.lifetimeMin = 3.0f;
-        config.lifetimeMax = 6.0f;
-        config.spawnRate = 800.0f;
-        config.maxParticles = 80000;
-        config.gravity = glm::vec3(0.0f, -9.8f, 0.0f);
+        // 这些区域参数现在主要用于初始化和回退，实际生成位置由视锥剔除控制
+        config.spawnAreaMin = glm::vec3(-100.0f, 40.0f, -100.0f);
+        config.spawnAreaMax = glm::vec3(100.0f, 70.0f, 100.0f);
+        config.velocityMin = glm::vec3(-0.2f, -8.0f, -0.2f);
+        config.velocityMax = glm::vec3(0.2f, -6.0f, 0.2f);
+        config.colorStart = glm::vec4(0.5f, 0.6f, 0.9f, 0.8f);
+        config.colorEnd = glm::vec4(0.5f, 0.6f, 0.9f, 0.4f);
+        config.sizeStart = 0.06f;
+        config.sizeEnd = 0.04f;
+        config.lifetimeMin = 2.0f;
+        config.lifetimeMax = 4.0f;
+        config.spawnRate = 1000.0f;
+        config.maxParticles = 100000;
+        config.gravity = glm::vec3(0.0f, -15.0f, 0.0f); // 更快的下落速度
         config.windForce = m_globalWind;
         config.damping = 1.0f; // 无阻尼
         config.randomSeed = 54321;

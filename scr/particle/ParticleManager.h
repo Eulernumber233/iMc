@@ -14,7 +14,8 @@ public:
     bool initialize();
 
     // 更新所有粒子系统
-    void update(float deltaTime, const glm::vec3& cameraPosition);
+    void update(float deltaTime, const std::shared_ptr<Camera>& camera,
+                const std::vector<glm::ivec2>& visibleChunkPositions = {});
 
     // 渲染所有粒子
     void render(const glm::mat4& view, const glm::mat4& projection);

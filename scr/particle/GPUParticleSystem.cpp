@@ -1,5 +1,6 @@
 #include "GPUParticleSystem.h"
 #include <iostream>
+#include <array>
 
 GPUParticleSystem::GPUParticleSystem()
     : m_randomGen(12345)
@@ -9,6 +10,8 @@ GPUParticleSystem::GPUParticleSystem()
     m_particleVAO = 0;
     m_atomicCounter = 0;
     m_quadVBO = 0;
+    m_camera = nullptr;
+    m_chunksSSBO = 0;
 }
 
 GPUParticleSystem::~GPUParticleSystem() {
@@ -16,18 +19,16 @@ GPUParticleSystem::~GPUParticleSystem() {
     if (m_particleVAO) glDeleteVertexArrays(1, &m_particleVAO);
     if (m_atomicCounter) glDeleteBuffers(1, &m_atomicCounter);
     if (m_quadVBO) glDeleteBuffers(1, &m_quadVBO);
+    if (m_chunksSSBO) glDeleteBuffers(1, &m_chunksSSBO);
 }
 
 bool GPUParticleSystem::initialize() {
     if (m_initialized) return true;
 
-    // 创建四边形顶点数据（用于渲染每个粒子）
     float quadVertices[] = {
-        // 位置     // 纹理坐标
         -0.5f,  0.5f, 0.0f, 1.0f,
         -0.5f, -0.5f, 0.0f, 0.0f,
          0.5f, -0.5f, 1.0f, 0.0f,
-
         -0.5f,  0.5f, 0.0f, 1.0f,
          0.5f, -0.5f, 1.0f, 0.0f,
          0.5f,  0.5f, 1.0f, 1.0f
@@ -43,9 +44,7 @@ bool GPUParticleSystem::initialize() {
 }
 
 bool GPUParticleSystem::createParticleBuffers() {
-    // 创建双缓冲粒子缓冲区
     glGenBuffers(2, m_particleBuffer);
-
     int totalParticles = m_config.maxParticles > 0 ? m_config.maxParticles : ParticleConstants::MAX_GPU_PARTICLES;
 
     for (int i = 0; i < 2; ++i) {
@@ -55,35 +54,25 @@ bool GPUParticleSystem::createParticleBuffers() {
             nullptr, GL_DYNAMIC_DRAW);
     }
 
-    // 创建原子计数器
     glGenBuffers(1, &m_atomicCounter);
     glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, m_atomicCounter);
     glBufferData(GL_ATOMIC_COUNTER_BUFFER, sizeof(GLuint), nullptr, GL_DYNAMIC_DRAW);
     GLuint zero = 0;
     glBufferSubData(GL_ATOMIC_COUNTER_BUFFER, 0, sizeof(GLuint), &zero);
 
-    // --- 创建主 VAO，同时包含四边形顶点和粒子实例数据 ---
     glGenVertexArrays(1, &m_particleVAO);
     glBindVertexArray(m_particleVAO);
 
-    // 1. 设置四边形顶点属性（非实例化）
     glBindBuffer(GL_ARRAY_BUFFER, m_quadVBO);
-    // 位置 (location = 0)
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
-    // 纹理坐标 (location = 1)
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
-    // 顶点属性不需要 divisor（默认 0）
 
-    // 2. 设置粒子实例属性（实例化）
-    // 先临时绑定缓冲区 0，之后在渲染时会根据当前缓冲区重新设置指针
     glBindBuffer(GL_ARRAY_BUFFER, m_particleBuffer[0]);
-    // 粒子位置 (location = 2)
     glEnableVertexAttribArray(2);
     glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(GPUParticleData), (void*)0);
-    glVertexAttribDivisor(2, 1);   // 实例化
-    // 粒子速度/大小 (location = 3)
+    glVertexAttribDivisor(2, 1);
     glEnableVertexAttribArray(3);
     glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, sizeof(GPUParticleData), (void*)offsetof(GPUParticleData, velocity));
     glVertexAttribDivisor(3, 1);
@@ -102,7 +91,6 @@ bool GPUParticleSystem::createWeatherEffect(const ParticleConfig& config) {
     m_config = config;
     m_randomGen.seed(config.randomSeed);
 
-    // 如果最大粒子数变化，重新创建缓冲区
     if (m_config.maxParticles > 0) {
         if (m_particleBuffer[0]) glDeleteBuffers(2, m_particleBuffer);
         if (m_atomicCounter) glDeleteBuffers(1, &m_atomicCounter);
@@ -120,14 +108,8 @@ void GPUParticleSystem::initializeParticles() {
 
     for (int i = 0; i < totalParticles; ++i) {
         GPUParticleData p;
-        p.position = glm::vec4(
-            RandomVec3(m_config.spawnAreaMin, m_config.spawnAreaMax, m_randomGen),
-            RandomFloat(m_config.lifetimeMin, m_config.lifetimeMax, m_randomGen)
-        );
-        p.velocity = glm::vec4(
-            RandomVec3(m_config.velocityMin, m_config.velocityMax, m_randomGen),
-            RandomFloat(m_config.sizeEnd, m_config.sizeStart, m_randomGen)
-        );
+        p.position = glm::vec4(0.0f, 0.0f, 0.0f, -1.0f); // 死亡状态
+        p.velocity = glm::vec4(0.0f);
         particles[i] = p;
     }
 
@@ -135,7 +117,7 @@ void GPUParticleSystem::initializeParticles() {
     glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, totalParticles * sizeof(GPUParticleData), particles.data());
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
-    m_activeParticles = totalParticles;
+    m_activeParticles = 0;
 }
 
 void GPUParticleSystem::update(float deltaTime, const glm::vec3& cameraPosition) {
@@ -143,20 +125,35 @@ void GPUParticleSystem::update(float deltaTime, const glm::vec3& cameraPosition)
 
     m_timeAccumulator += deltaTime;
 
+    // 上传可见区块列表到 SSBO
+    if (m_hasVisibleChunksInfo && !m_visibleChunkPositions.empty()) {
+        if (m_chunksSSBO == 0) {
+            glGenBuffers(1, &m_chunksSSBO);
+        }
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_chunksSSBO);
+        glBufferData(GL_SHADER_STORAGE_BUFFER,
+            m_visibleChunkPositions.size() * sizeof(glm::ivec2),
+            m_visibleChunkPositions.data(),
+            GL_DYNAMIC_DRAW);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, m_chunksSSBO);
+        m_chunksCount = static_cast<int>(m_visibleChunkPositions.size());
+    }
+    else {
+        m_chunksCount = 0;
+    }
+
     m_computeShader.use();
 
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, m_particleBuffer[m_currentBuffer]);      // 输入
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_particleBuffer[1 - m_currentBuffer]);  // 输出
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, m_particleBuffer[m_currentBuffer]);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_particleBuffer[1 - m_currentBuffer]);
     glBindBufferBase(GL_ATOMIC_COUNTER_BUFFER, 2, m_atomicCounter);
 
-    // 设置 uniforms（省略，与原代码相同）
+    // 设置 uniforms
     m_computeShader.setFloat("deltaTime", deltaTime);
     m_computeShader.setFloat("totalTime", m_timeAccumulator);
     m_computeShader.setVec3("gravity", m_config.gravity);
     m_computeShader.setVec3("windForce", m_config.windForce);
     m_computeShader.setVec3("cameraPosition", cameraPosition);
-    m_computeShader.setVec3("spawnAreaMin", m_config.spawnAreaMin);
-    m_computeShader.setVec3("spawnAreaMax", m_config.spawnAreaMax);
     m_computeShader.setVec3("velocityMin", m_config.velocityMin);
     m_computeShader.setVec3("velocityMax", m_config.velocityMax);
     m_computeShader.setFloat("lifetimeMin", m_config.lifetimeMin);
@@ -165,6 +162,24 @@ void GPUParticleSystem::update(float deltaTime, const glm::vec3& cameraPosition)
     m_computeShader.setFloat("sizeMax", m_config.sizeEnd);
     m_computeShader.setFloat("damping", m_config.damping);
 
+    // 视锥剔除参数
+    if (m_frustumCullingEnabled && m_camera) {
+        m_computeShader.setVec3("cameraFront", m_camera->Front);
+        m_computeShader.setBool("enableFrustumCulling", true);
+        m_computeShader.setFloat("rainHeightMin", m_rainHeightMin);
+        m_computeShader.setFloat("rainHeightMax", m_rainHeightMax);
+        for (int i = 0; i < 6; ++i) {
+            std::string planeName = "frustumPlanes[" + std::to_string(i) + "]";
+            m_computeShader.setVec4(planeName, m_frustumPlanes[i]);
+        }
+    }
+    else {
+        m_computeShader.setBool("enableFrustumCulling", false);
+    }
+
+    m_computeShader.setInt("chunksCount", m_chunksCount);
+
+    // 重置原子计数器
     GLuint zero = 0;
     glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, m_atomicCounter);
     glBufferSubData(GL_ATOMIC_COUNTER_BUFFER, 0, sizeof(GLuint), &zero);
@@ -173,10 +188,9 @@ void GPUParticleSystem::update(float deltaTime, const glm::vec3& cameraPosition)
     glDispatchCompute((totalParticles + 255) / 256, 1, 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_ATOMIC_COUNTER_BARRIER_BIT);
 
-    // 交换缓冲区
     m_currentBuffer = 1 - m_currentBuffer;
 
-    // 读取原子计数器
+    // 读取活跃粒子数
     glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, m_atomicCounter);
     GLuint* counter = (GLuint*)glMapBuffer(GL_ATOMIC_COUNTER_BUFFER, GL_READ_ONLY);
     if (counter) {
@@ -193,7 +207,7 @@ void GPUParticleSystem::render(const glm::mat4& view, const glm::mat4& projectio
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glEnable(GL_DEPTH_TEST);
     glDepthMask(GL_FALSE);
-
+    //glDisable(GL_CULL_FACE);
     m_renderShader.use();
     m_renderShader.setMat4("view", view);
     m_renderShader.setMat4("projection", projection);
@@ -213,24 +227,16 @@ void GPUParticleSystem::render(const glm::mat4& view, const glm::mat4& projectio
         m_renderShader.setInt("textureLayer", m_config.textureLayer);
     }
 
-    // 绑定主 VAO（包含四边形顶点和实例属性）
     glBindVertexArray(m_particleVAO);
-
-    // 更新实例属性指向当前粒子缓冲区（因为双缓冲切换了）
     glBindBuffer(GL_ARRAY_BUFFER, m_particleBuffer[m_currentBuffer]);
-
-    // 重新设置实例属性指针（仅 location 2 和 3）
-    // 注意：顶点属性 (location 0,1) 保持不变，它们始终指向 m_quadVBO
     glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(GPUParticleData), (void*)0);
     glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, sizeof(GPUParticleData), (void*)offsetof(GPUParticleData, velocity));
 
-    // 绘制实例（6 个顶点构成四边形，共 m_activeParticles 个实例）
     glDrawArraysInstanced(GL_TRIANGLES, 0, 6, m_activeParticles);
 
-    // 清理
     glBindVertexArray(0);
     glDisable(GL_BLEND);
-    glDepthMask(GL_TRUE); // 恢复深度写入
+    glDepthMask(GL_TRUE);
 }
 
 void GPUParticleSystem::setGlobalForces(const glm::vec3& gravity, const glm::vec3& wind) {
@@ -243,4 +249,24 @@ void GPUParticleSystem::reset() {
     m_currentBuffer = 0;
     m_activeParticles = 0;
     initializeParticles();
+}
+
+void GPUParticleSystem::setFrustumCullingParams(const std::shared_ptr<Camera>& camera,
+    float rainHeightMin, float rainHeightMax) {
+    m_camera = camera;
+    m_rainHeightMin = rainHeightMin;
+    m_rainHeightMax = rainHeightMax;
+    if (camera) {
+        m_frustumPlanes = camera->GetFrustumPlanes();
+        m_frustumCullingEnabled = true;
+    }
+    else {
+        m_frustumCullingEnabled = false;
+    }
+}
+
+void GPUParticleSystem::setVisibleChunksInfo(const glm::vec3& cameraPosition,
+    const std::vector<glm::ivec2>& visibleChunkPositions) {
+    m_visibleChunkPositions = visibleChunkPositions;
+    m_hasVisibleChunksInfo = !visibleChunkPositions.empty();
 }

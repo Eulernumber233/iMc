@@ -37,7 +37,8 @@ public:
     Chunk* getChunk(const glm::ivec2& chunkPos);
     Chunk* getChunk(const int x, const int z);
     Chunk* getChunkAtWorld(const glm::vec3& worldPos);
-
+	const std::vector<Chunk*>& getVisibleChunks()const { return m_visibleChunks; }
+    std::vector<glm::ivec2> getVisibleChunkPositions()const;
     // …Ë÷√‰÷»æ∞Îæ∂
     void setRenderRadius(int radius);
 

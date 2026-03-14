@@ -718,7 +718,10 @@ void RenderSystem::render(const ChunkManager& chunkManager,
     move_DirLight(deltaTime);
 
     // 更新粒子系统
-    m_particleManager.update(deltaTime, camera->Position);
+    // 获取可见区块位置信息
+    std::vector<glm::ivec2> visibleChunkPositions = chunkManager.getVisibleChunkPositions();
+
+    m_particleManager.update(deltaTime, camera, visibleChunkPositions);
 
     // 几何通道：渲染方块到 G-Buffer
     geometryPass(chunkManager, view, projection);
@@ -741,12 +744,10 @@ void RenderSystem::render(const ChunkManager& chunkManager,
     glBlitFramebuffer(0, 0, m_screenWidth, m_screenHeight,
         0, 0, m_screenWidth, m_screenHeight,
         GL_COLOR_BUFFER_BIT, GL_LINEAR);
-
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_gBuffer);
     glBlitFramebuffer(0, 0, m_screenWidth, m_screenHeight,
         0, 0, m_screenWidth, m_screenHeight,
         GL_DEPTH_BUFFER_BIT, GL_NEAREST);
-
     // 6. 绑定合成 FBO，开始正向渲染
     glBindFramebuffer(GL_FRAMEBUFFER, m_compositeFBO);
     glViewport(0, 0, m_screenWidth, m_screenHeight);

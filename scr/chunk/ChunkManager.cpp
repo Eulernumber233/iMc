@@ -74,6 +74,15 @@ Chunk* ChunkManager::getChunkAtWorld(const glm::vec3& worldPos) {
     return getChunk(chunkPos);
 }
 
+std::vector<glm::ivec2> ChunkManager::getVisibleChunkPositions()const
+{
+    std::vector<glm::ivec2>ret;
+    for(auto chunk : m_visibleChunks){
+        ret.push_back(chunk->getPosition());
+	}
+    return ret;
+}
+
 void ChunkManager::setRenderRadius(int radius) {
     if (radius > 0 && radius != m_renderRadius) {
         m_renderRadius = radius;

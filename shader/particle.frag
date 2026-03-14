@@ -26,5 +26,5 @@ void main() {
     //if (color.a < 0.01) discard;
 
     FragColor = color;
-    FragColor = vec4(1.0,1.0,0.0,1.0);//test
+    FragColor = vec4(1.0,1.0,1.0,0.1);//test
 }
