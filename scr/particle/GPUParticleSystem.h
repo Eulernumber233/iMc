@@ -5,6 +5,8 @@
 #include <vector>
 #include "../Camera.h"
 
+
+
 class GPUParticleSystem {
 public:
     GPUParticleSystem();
@@ -47,6 +49,10 @@ private:
     GLuint m_atomicCounter = 0;
     GLuint m_quadVBO = 0;
     GLuint m_textureArray = 0;
+
+    // 存储每个可见区块的累计配额（前缀和）
+    std::vector<GLuint> m_chunkCumulativeQuota;
+    GLuint m_chunkQuotaSSBO = 0;       // 用于传递累计配额的SSBO
 
     std::mt19937 m_randomGen;
     float m_timeAccumulator = 0.0f;

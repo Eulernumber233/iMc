@@ -108,8 +108,9 @@ void GPUParticleSystem::initializeParticles() {
 
     for (int i = 0; i < totalParticles; ++i) {
         GPUParticleData p;
-        p.position = glm::vec4(0.0f, 0.0f, 0.0f, -1.0f); // 死亡状态
+        p.position = glm::vec4(0.0f, 0.0f, 0.0f, -1.0f); // 死亡
         p.velocity = glm::vec4(0.0f);
+        p.homeChunk = glm::ivec2(-1, -1); // 无效
         particles[i] = p;
     }
 
@@ -125,8 +126,44 @@ void GPUParticleSystem::update(float deltaTime, const glm::vec3& cameraPosition)
 
     m_timeAccumulator += deltaTime;
 
-    // 上传可见区块列表到 SSBO
+    // --- 更新视锥平面（每帧）---
+    if (m_frustumCullingEnabled && m_camera) {
+        m_frustumPlanes = m_camera->GetFrustumPlanes();
+    }
+
+    // --- 计算并上传配额 ---
     if (m_hasVisibleChunksInfo && !m_visibleChunkPositions.empty()) {
+        int chunkCount = static_cast<int>(m_visibleChunkPositions.size());
+        int totalParticles = m_config.maxParticles;
+
+        // 计算每个区块的配额（这里使用均匀分配，可根据需要改为距离权重）
+        std::vector<GLuint> quotas(chunkCount);
+        int baseQuota = totalParticles / chunkCount;
+        int remainder = totalParticles % chunkCount;
+        for (int i = 0; i < chunkCount; ++i) {
+            quotas[i] = baseQuota + (i < remainder ? 1 : 0);
+        }
+
+        // 计算累计配额（前缀和）
+        m_chunkCumulativeQuota.resize(chunkCount);
+        GLuint sum = 0;
+        for (int i = 0; i < chunkCount; ++i) {
+            sum += quotas[i];
+            m_chunkCumulativeQuota[i] = sum;
+        }
+
+        // 上传累计配额到 SSBO (binding = 4)
+        if (m_chunkQuotaSSBO == 0) {
+            glGenBuffers(1, &m_chunkQuotaSSBO);
+        }
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_chunkQuotaSSBO);
+        glBufferData(GL_SHADER_STORAGE_BUFFER,
+            m_chunkCumulativeQuota.size() * sizeof(GLuint),
+            m_chunkCumulativeQuota.data(),
+            GL_DYNAMIC_DRAW);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, m_chunkQuotaSSBO);
+
+        // 上传可见区块坐标到 SSBO (binding = 3)
         if (m_chunksSSBO == 0) {
             glGenBuffers(1, &m_chunksSSBO);
         }
@@ -144,6 +181,7 @@ void GPUParticleSystem::update(float deltaTime, const glm::vec3& cameraPosition)
 
     m_computeShader.use();
 
+    // 绑定粒子缓冲区（双缓冲）
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, m_particleBuffer[m_currentBuffer]);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_particleBuffer[1 - m_currentBuffer]);
     glBindBufferBase(GL_ATOMIC_COUNTER_BUFFER, 2, m_atomicCounter);
@@ -161,30 +199,25 @@ void GPUParticleSystem::update(float deltaTime, const glm::vec3& cameraPosition)
     m_computeShader.setFloat("sizeMin", m_config.sizeStart);
     m_computeShader.setFloat("sizeMax", m_config.sizeEnd);
     m_computeShader.setFloat("damping", m_config.damping);
+    m_computeShader.setInt("chunksCount", m_chunksCount);
+    m_computeShader.setBool("enableFrustumCulling", m_frustumCullingEnabled);
+    m_computeShader.setFloat("rainHeightMin", m_rainHeightMin);
+    m_computeShader.setFloat("rainHeightMax", m_rainHeightMax);
+    m_computeShader.setFloat("frustumExpandDistance", 50.0f); // 可配置
 
-    // 视锥剔除参数
     if (m_frustumCullingEnabled && m_camera) {
-        m_computeShader.setVec3("cameraFront", m_camera->Front);
-        m_computeShader.setBool("enableFrustumCulling", true);
-        m_computeShader.setFloat("rainHeightMin", m_rainHeightMin);
-        m_computeShader.setFloat("rainHeightMax", m_rainHeightMax);
         for (int i = 0; i < 6; ++i) {
             std::string planeName = "frustumPlanes[" + std::to_string(i) + "]";
             m_computeShader.setVec4(planeName, m_frustumPlanes[i]);
         }
     }
-    else {
-        m_computeShader.setBool("enableFrustumCulling", false);
-    }
-
-    m_computeShader.setInt("chunksCount", m_chunksCount);
 
     // 重置原子计数器
     GLuint zero = 0;
     glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, m_atomicCounter);
     glBufferSubData(GL_ATOMIC_COUNTER_BUFFER, 0, sizeof(GLuint), &zero);
 
-    int totalParticles = m_config.maxParticles > 0 ? m_config.maxParticles : ParticleConstants::MAX_GPU_PARTICLES;
+    int totalParticles = m_config.maxParticles;
     glDispatchCompute((totalParticles + 255) / 256, 1, 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_ATOMIC_COUNTER_BARRIER_BIT);
 

@@ -65,11 +65,13 @@ struct ParticleConfig {
     unsigned int randomSeed = 12345;
 };
 
-// GPU粒子数据（SSBO布局）
+// 扩展粒子数据结构，增加 homeChunk
 struct GPUParticleData {
-    glm::vec4 position;      // xyz: 位置, w: 生命周期
-    glm::vec4 velocity;      // xyz: 速度, w: 大小
-    // 注意：颜色可以通过uniform或单独的SSBO传递
+    glm::vec4 position;   // w: lifetime
+    glm::vec4 velocity;   // w: size
+    glm::ivec2 homeChunk; // 所属区块坐标
+    // 保证结构体大小为 48 字节（与着色器对齐）
+    float _padding[2];
 };
 
 // ECS粒子组件

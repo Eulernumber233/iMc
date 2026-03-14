@@ -3,8 +3,10 @@
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 struct Particle {
-    vec4 position; // xyz: position, w: lifetime
-    vec4 velocity; // xyz: velocity, w: size
+    vec4 position;   // xyz: position, w: lifetime
+    vec4 velocity;   // xyz: velocity, w: size
+    ivec2 homeChunk; // 所属区块坐标（x,z），(-1,-1) 表示无效
+    // 隐式填充，结构体大小 48 字节（std430 对齐）
 };
 
 layout(std430, binding = 0) buffer ParticlesIn {
@@ -18,7 +20,11 @@ layout(std430, binding = 1) buffer ParticlesOut {
 layout(binding = 2, offset = 0) uniform atomic_uint activeCounter;
 
 layout(std430, binding = 3) buffer VisibleChunks {
-    ivec2 chunks[];
+    ivec2 chunks[];                 // 当前可见区块坐标列表
+};
+
+layout(std430, binding = 4) buffer ChunkQuota {
+    uint cumulativeQuota[];         // 累计配额（前缀和）
 };
 
 uniform float deltaTime;
@@ -38,6 +44,7 @@ uniform float rainHeightMin;
 uniform float rainHeightMax;
 uniform vec4 frustumPlanes[6];
 uniform int chunksCount;
+uniform float frustumExpandDistance; // 扩展距离（例如 50.0）
 
 // 随机函数
 uint hash(uint x) {
@@ -51,49 +58,75 @@ float random(uint seed) {
     return float(hash(seed)) / 4294967295.0;
 }
 
-// 检查点是否在视锥内
-bool isPointInFrustum(vec3 point) {
+// 扩展视锥检查
+bool isPointInExpandedFrustum(vec3 point, float expand) {
     for (int i = 0; i < 6; ++i) {
-        float dist = dot(frustumPlanes[i], vec4(point, 1.0));
+        float dist = dot(frustumPlanes[i], vec4(point, 1.0)) + expand;
         if (dist < 0.0) return false;
     }
     return true;
 }
 
-// 尝试在可见区块中生成一个位于视锥内的粒子位置（最多尝试次数）
-bool trySpawnInVisibleChunks(uint seed, out vec3 position, out vec3 velocity, out float life, out float size) {
+// 查找区块坐标在可见列表中的索引（线性查找，chunksCount 通常较小）
+int findChunkIndex(ivec2 coord) {
+    for (int i = 0; i < chunksCount; ++i) {
+        if (chunks[i] == coord) return i;
+    }
+    return -1;
+}
+
+// 核心重生函数：尝试在合适区块生成新粒子，并更新 homeChunk
+// 输入：粒子索引 idx，当前所属区块 homeChunk（可能无效）
+// 输出：新位置、速度、寿命、大小，以及更新后的 homeChunk
+bool respawnParticle(uint idx, inout ivec2 homeChunk,
+                     out vec3 position, out vec3 velocity,
+                     out float life, out float size) {
     if (chunksCount == 0) return false;
 
-    const int MAX_ATTEMPTS = 10;
+    int chunkIdx = -1;
+    // 若 homeChunk 有效，优先查找它是否仍在可见列表中
+    if (homeChunk.x != -1 && homeChunk.y != -1) {
+        chunkIdx = findChunkIndex(homeChunk);
+    }
+
+    // 如果原区块不可见或无效，则根据配额重新分配区块
+    if (chunkIdx == -1) {
+        for (int i = 0; i < chunksCount; ++i) {
+            if (idx < cumulativeQuota[i]) {
+                chunkIdx = i;
+                break;
+            }
+        }
+        // 更新 homeChunk 为新区块坐标
+        homeChunk = chunks[chunkIdx];
+    }
+
+    // 现在 chunkIdx 和 homeChunk 有效，在选定区块内尝试生成位置
+    uint baseSeed = hash(uint(totalTime * 1000.0) + idx);
+    ivec2 chunk = homeChunk; // 直接用 homeChunk
+
+    const int MAX_ATTEMPTS = 20;
     for (int attempt = 0; attempt < MAX_ATTEMPTS; ++attempt) {
-        // 随机选择一个可见区块
-        uint chunkIdx = uint(random(seed + attempt * 10 + 0) * float(chunksCount)) % chunksCount;
-        ivec2 chunk = chunks[chunkIdx];
+        uint seed = baseSeed + attempt * 10;
 
-        // 在区块内随机生成坐标
-        float x = float(chunk.x) * 16.0 + random(seed + attempt * 10 + 1) * 16.0;
-        float z = float(chunk.y) * 16.0 + random(seed + attempt * 10 + 2) * 16.0;
-        float y = mix(rainHeightMin, rainHeightMax, random(seed + attempt * 10 + 3));
-
+        float x = float(chunk.x) * 16.0 + random(seed) * 16.0;
+        float z = float(chunk.y) * 16.0 + random(seed + 1) * 16.0;
+        float y = mix(rainHeightMin, rainHeightMax, random(seed + 2));
         vec3 newPos = vec3(x, y, z);
 
-        // 如果启用了视锥剔除，必须确保新位置在视锥内
-        if (enableFrustumCulling && !isPointInFrustum(newPos)) {
-            continue; // 尝试下一个位置
+        if (enableFrustumCulling) {
+            if (!isPointInExpandedFrustum(newPos, frustumExpandDistance)) continue;
         }
 
-        // 生成随机速度、寿命、大小
         velocity = velocityMin + (velocityMax - velocityMin) * vec3(
-            random(seed + attempt * 10 + 4),
-            random(seed + attempt * 10 + 5),
-            random(seed + attempt * 10 + 6)
+            random(seed + 3), random(seed + 4), random(seed + 5)
         );
-        life = lifetimeMin + (lifetimeMax - lifetimeMin) * random(seed + attempt * 10 + 7);
-        size = sizeMin + (sizeMax - sizeMin) * random(seed + attempt * 10 + 8);
+        life = lifetimeMin + (lifetimeMax - lifetimeMin) * random(seed + 6);
+        size = sizeMin + (sizeMax - sizeMin) * random(seed + 7);
         position = newPos;
         return true;
     }
-    return false; // 所有尝试均失败，保持死亡
+    return false; // 所有尝试失败
 }
 
 void main() {
@@ -103,20 +136,15 @@ void main() {
     Particle p = particlesIn[idx];
     float life = p.position.w;
 
-    // 如果粒子死亡（life <= 0），尝试直接重生
+    // 如果粒子死亡，尝试重生
     if (life <= 0.0) {
-        if (chunksCount > 0) {
-            uint seed = hash(uint(totalTime * 1000.0) + idx);
-            vec3 newPos, newVel;
-            float newLife, newSize;
-            if (trySpawnInVisibleChunks(seed, newPos, newVel, newLife, newSize)) {
-                p.position = vec4(newPos, newLife);
-                p.velocity = vec4(newVel, newSize);
-            } else {
-                p.position.w = -1.0; // 保持死亡
-            }
+        vec3 newPos, newVel;
+        float newLife, newSize;
+        if (respawnParticle(idx, p.homeChunk, newPos, newVel, newLife, newSize)) {
+            p.position = vec4(newPos, newLife);
+            p.velocity = vec4(newVel, newSize);
         } else {
-            p.position.w = -1.0;
+            p.position.w = -1.0; // 保持死亡
         }
     } else {
         // 存活粒子：物理更新
@@ -124,40 +152,31 @@ void main() {
         p.velocity.xyz *= damping;
         p.position.xyz += p.velocity.xyz * deltaTime;
 
-        // 每帧进行视锥剔除检查
+        // 判断是否需要重生（飞出视锥或低于雨高范围）
         bool shouldRespawn = false;
         if (enableFrustumCulling) {
-            if (!isPointInFrustum(p.position.xyz)) {
+            if (!isPointInExpandedFrustum(p.position.xyz, frustumExpandDistance)) {
                 shouldRespawn = true;
             }
-            // 可选：低于雨高范围一定距离也触发重生
             if (p.position.y < rainHeightMin - 10.0) {
                 shouldRespawn = true;
             }
         }
 
         if (shouldRespawn) {
-            // 不在视锥内：立即尝试重生到视锥内的可见区块
-            if (chunksCount > 0) {
-                uint seed = hash(uint(totalTime * 1000.0) + idx + 123456); // 不同种子
-                vec3 newPos, newVel;
-                float newLife, newSize;
-                if (trySpawnInVisibleChunks(seed, newPos, newVel, newLife, newSize)) {
-                    p.position = vec4(newPos, newLife);
-                    p.velocity = vec4(newVel, newSize);
-                } else {
-                    // 重生失败则标记死亡（下一帧再试）
-                    p.position.w = -1.0;
-                }
+            vec3 newPos, newVel;
+            float newLife, newSize;
+            if (respawnParticle(idx, p.homeChunk, newPos, newVel, newLife, newSize)) {
+                p.position = vec4(newPos, newLife);
+                p.velocity = vec4(newVel, newSize);
             } else {
-                p.position.w = -1.0; // 无区块信息，只能死亡
+                p.position.w = -1.0; // 重生失败则死亡
             }
         }
     }
 
     particlesOut[idx] = p;
 
-    // 统计活跃粒子（只有寿命>0且位置有效的才计数）
     if (p.position.w > 0.0) {
         atomicCounterIncrement(activeCounter);
     }
