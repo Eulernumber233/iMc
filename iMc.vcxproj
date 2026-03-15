@@ -138,6 +138,7 @@
     <ClCompile Include="scr\particle\ECSParticleSystem.cpp" />
     <ClCompile Include="scr\particle\GPUParticleSystem.cpp" />
     <ClCompile Include="scr\particle\ParticleManager.cpp" />
+    <ClCompile Include="scr\Player.cpp" />
     <ClCompile Include="scr\render\BlockOutlineRenderer.cpp" />
     <ClCompile Include="scr\render\RenderSystem.cpp" />
     <ClCompile Include="scr\Shader.cpp" />
@@ -146,7 +147,7 @@
     <ClCompile Include="scr\UI\UIManager.cpp" />
     <ClCompile Include="scr\UI\UIHotbar.cpp" />
     <ClCompile Include="scr\Item.cpp" />
-    <ClCompile Include="scr\World_4.cpp" />
+    <ClCompile Include="scr\World.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="scr\Camera.h" />
@@ -164,6 +165,7 @@
     <ClInclude Include="scr\particle\GPUParticleSystem.h" />
     <ClInclude Include="scr\particle\ParticleCommon.h" />
     <ClInclude Include="scr\particle\ParticleManager.h" />
+    <ClInclude Include="scr\Player.h" />
     <ClInclude Include="scr\render\BlockOutlineRenderer.h" />
     <ClInclude Include="scr\render\RenderSystem.h" />
     <ClInclude Include="scr\Shader.h" />
@@ -173,7 +175,6 @@
     <ClInclude Include="scr\UI\UIHotbar.h" />
     <ClInclude Include="scr\Item.h" />
     <ClInclude Include="scr\World.h" />
-    <ClInclude Include="scr\World_4.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include=".gitattributes" />

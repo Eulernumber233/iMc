@@ -31,7 +31,6 @@ uniform float deltaTime;
 uniform float totalTime;
 uniform vec3 gravity;
 uniform vec3 windForce;
-uniform vec3 cameraPosition;
 uniform vec3 velocityMin;
 uniform vec3 velocityMax;
 uniform float lifetimeMin;
@@ -148,9 +147,9 @@ void main() {
         }
     } else {
         // 存活粒子：物理更新
-        p.velocity.xyz += (gravity + windForce) * deltaTime;
-        p.velocity.xyz *= damping;
-        p.position.xyz += p.velocity.xyz * deltaTime;
+        //p.velocity.xyz += (gravity + windForce) * deltaTime;
+        //p.velocity.xyz *= damping;
+        //p.position.xyz += p.velocity.xyz * deltaTime;
 
         // 判断是否需要重生（飞出视锥或低于雨高范围）
         bool shouldRespawn = false;

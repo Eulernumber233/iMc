@@ -57,7 +57,7 @@
     <ClCompile Include="scr\TextureMgr.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
-    <ClCompile Include="scr\World_4.cpp">
+    <ClCompile Include="scr\World.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="scr\mode\Mesh.cpp">
@@ -123,9 +123,6 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="scr\World.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
-    <ClInclude Include="scr\World_4.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="scr\core.h">

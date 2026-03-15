@@ -46,13 +46,20 @@ void main() {
     // 在观察空间构建面向相机的面片
     // 将粒子中心位置转换到观察空间
     vec4 particleViewPos = view * vec4(aParticlePos.xyz, 1.0);
-    
+
+    // 对于屏幕对齐的广告牌，在观察空间中使用观察空间的基向量
+    // 观察空间中：X轴向右(1,0,0)，Y轴向上(0,1,0)，Z轴向屏幕内(0,0,-1)
     vec3 right = vec3(1.0, 0.0, 0.0);   // 观察空间右向量
     vec3 up = vec3(0.0, 1.0, 0.0);      // 观察空间上向量
-    
-    // 观察空间中的顶点位置
-    vec3 vertexViewPos = particleViewPos.xyz + (right * aPos.x * size) + (up * aPos.y * size);
 
+    // 观察空间中的顶点位置
+    vec3 vertexViewPos = particleViewPos.xyz + (right * aPos.x * size)+ (up * aPos.y * size);
+    
+    // test 
+    //vec3 worldpos = aParticlePos.xyz + (right * aPos.x * size)*5.0f + (up * aPos.y * size)*5.0f;
+    //vertexViewPos = (view * vec4(worldpos, 1.0)).xyz;
+
+    //vertexViewPos = particleViewPos.xyz;
     // 转换到裁剪空间
     gl_Position = projection * vec4(vertexViewPos, 1.0);
 

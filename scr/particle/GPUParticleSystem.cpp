@@ -191,7 +191,6 @@ void GPUParticleSystem::update(float deltaTime, const glm::vec3& cameraPosition)
     m_computeShader.setFloat("totalTime", m_timeAccumulator);
     m_computeShader.setVec3("gravity", m_config.gravity);
     m_computeShader.setVec3("windForce", m_config.windForce);
-    m_computeShader.setVec3("cameraPosition", cameraPosition);
     m_computeShader.setVec3("velocityMin", m_config.velocityMin);
     m_computeShader.setVec3("velocityMax", m_config.velocityMax);
     m_computeShader.setFloat("lifetimeMin", m_config.lifetimeMin);
