@@ -2,6 +2,8 @@
 #include "Camera.h"
 #include "Item.h"
 #include "UI/UIHotbar.h"
+#include "collision/AABB.h"
+#include "collision/PhysicsConstants.h"
 #include "Data.h"
 #include <memory>
 #include <vector>
@@ -11,7 +13,11 @@
 class ChunkManager;
 class RenderSystem;
 
-// 玩家类 - 集成摄像机、物品栏和输入管理
+// 前向声明
+class ChunkManager;
+class RenderSystem;
+
+// 玩家类 - 集成摄像机、物品栏、输入管理和物理系统
 class Player {
 public:
     // 构造函数
@@ -20,8 +26,11 @@ public:
     // 初始化
     void initialize();
 
-    // 更新玩家状态
+    // 更新玩家状态（包括物理更新）
     void update(float deltaTime, ChunkManager& chunkManager, RenderSystem& renderSystem);
+
+    // 物理更新（单独调用，用于精细控制）
+    void updatePhysics(float deltaTime, ChunkManager& chunkManager);
 
     // 输入处理
     void processMouseMovement(float xoffset, float yoffset);
@@ -31,7 +40,19 @@ public:
 
     // 摄像机访问
     std::shared_ptr<Camera> getCamera() const { return m_camera; }
-    glm::vec3 getPosition() const { return m_camera->Position; }
+
+    // 玩家物理属性访问
+    glm::vec3 getPosition() const { return m_position; }  // 玩家碰撞箱中心
+    glm::vec3 getVelocity() const { return m_velocity; }
+    glm::vec3 getAcceleration() const { return m_acceleration; }
+    bool isOnGround() const { return m_onGround; }
+    bool isCrouching() const { return m_isCrouching; }
+
+    // 设置玩家位置（用于传送等）
+    void setPosition(const glm::vec3& position);
+
+    // 获取玩家AABB碰撞箱
+    AABB getAABB() const;
 
     // 物品栏管理
     void initHotbarItems();
@@ -53,6 +74,12 @@ public:
     // 获取UI热栏
     std::shared_ptr<UIHotbar> getHotbar() const { return m_hotbar; }
 
+    // 物理控制
+    void jump();
+    void setCrouching(bool crouching);
+    void applyForce(const glm::vec3& force);
+    void setVelocity(const glm::vec3& velocity);
+
     // 回调函数设置
     void setOnBlockSelectedCallback(std::function<void(const glm::ivec3&)> callback) {
         m_onBlockSelectedCallback = callback;
@@ -67,6 +94,37 @@ private:
     std::shared_ptr<Camera> m_camera;
     GLFWwindow* m_window;
 
+    // 玩家物理属性
+    glm::vec3 m_position;      // 玩家碰撞箱中心（世界坐标）
+    glm::vec3 m_velocity;      // 当前速度
+    glm::vec3 m_acceleration;  // 当前加速度
+    bool m_onGround = false;   // 是否站在地面上
+    bool m_isCrouching = false; // 是否处于蹲伏状态
+
+    // 摄像机偏移（相对于玩家中心）
+    glm::vec3 m_cameraOffsetStanding = glm::vec3(0.0f, 0.0f, 0.0f);
+    glm::vec3 m_cameraOffsetCrouching = glm::vec3(0.0f, 0.0f, 0.0f);
+
+    // 碰撞箱尺寸（宽×高×深）
+    struct {
+        float width = PhysicsConstants::PLAYER_WIDTH;          // X轴
+        float height = PhysicsConstants::PLAYER_HEIGHT_STANDING; // Y轴（当前高度，初始为站立高度）
+        float depth = PhysicsConstants::PLAYER_DEPTH;          // Z轴
+        float standingHeight = PhysicsConstants::PLAYER_HEIGHT_STANDING; // 站立高度
+        float crouchingHeight = PhysicsConstants::PLAYER_HEIGHT_CROUCHING; // 蹲伏高度
+    } m_collisionBox;
+
+    // 物理参数
+    float m_mass = PhysicsConstants::PLAYER_MASS;              // 质量（kg）
+    float m_gravity = PhysicsConstants::GRAVITY;               // 重力加速度
+    float m_jumpForce = PhysicsConstants::PLAYER_JUMP_FORCE;   // 跳跃力
+    float m_walkSpeed = PhysicsConstants::PLAYER_WALK_SPEED;   // 行走速度
+    float m_runSpeed = PhysicsConstants::PLAYER_RUN_SPEED;     // 奔跑速度
+    float m_crouchSpeed = PhysicsConstants::PLAYER_CROUCH_SPEED; // 蹲伏速度
+    float m_airControl = PhysicsConstants::PLAYER_AIR_CONTROL; // 空中控制系数
+    float m_frictionGround = PhysicsConstants::FRICTION_GROUND; // 地面摩擦力
+    float m_frictionAir = PhysicsConstants::FRICTION_AIR;      // 空气阻力
+
     // 物品栏
     std::vector<std::shared_ptr<Item>> m_hotbarItems;
     std::shared_ptr<UIHotbar> m_hotbar;
@@ -77,6 +135,17 @@ private:
     bool m_firstMouse = true;
     float m_lastX = 0.0f;
     float m_lastY = 0.0f;
+
+    // 移动输入
+    struct {
+        bool forward = false;
+        bool backward = false;
+        bool left = false;
+        bool right = false;
+        bool jump = false;
+        bool sprint = false;
+        bool crouch = false;
+    } m_moveInput;
 
     // 方块选择
     struct {
@@ -106,6 +175,21 @@ private:
     void updateBlockSelection(ChunkManager& chunkManager, RenderSystem& renderSystem);
     void handleMovementInput(float deltaTime);
     void updateSpeedMultiplier(float deltaTime);
+
+    // 物理相关方法
+    void updateCameraPosition();
+    void applyMovement(float deltaTime);
+    void applyGravity(float deltaTime);
+    void applyFriction(float deltaTime);
+    void clampVelocity();
+
+    // 碰撞检测
+    CollisionResult checkCollisionWithBlocks(ChunkManager& chunkManager) const;
+    void resolveCollision(const CollisionResult& collision);
+    void resolveMultipleCollisions(std::vector<CollisionResult>& collisions);
+
+    // 方块交互处理
+    void handleBlockInteraction(ChunkManager& chunkManager);
 
     // 初始化默认物品
     void initDefaultItems();

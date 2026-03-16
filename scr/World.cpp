@@ -8,7 +8,7 @@ World::World(GLFWwindow* window_, unsigned int seed)
 {
     // 创建摄像机
     auto camera = std::make_shared<Camera>();
-    camera->Position = glm::vec3(0.0f, 70.0f, 0.0f);
+    camera->Position = glm::vec3(0.0f, 62.0f, 0.0f);
 
     // 创建玩家对象
     m_player = std::make_shared<Player>(camera, m_window);
@@ -53,8 +53,7 @@ int World::run() {
 
     // 初始化区块管理器
     m_chunkManager = std::make_shared<ChunkManager>(m_seed);
-    auto camera = m_player->getCamera();
-    m_chunkManager->initialize(4, camera->Position); // 渲染半径4
+    m_chunkManager->initialize(4, m_player->getCamera()->Position); // 渲染半径4
     m_chunkManager->printStats();
 
     // 初始化玩家
@@ -72,15 +71,21 @@ int World::run() {
     // 主循环
     while (!glfwWindowShouldClose(m_window)) {
         float currentFrame = static_cast<float>(glfwGetTime());
-        static float lastFrame = 0.0f;
+        static float lastFrame = currentFrame; // 初始化为当前时间，避免第一帧deltaTime过大
         float deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
+
+        // 限制deltaTime，避免卡顿导致物理计算错误
+        if (deltaTime > 0.1f) {
+            deltaTime = 0.1f; // 最大100ms
+        }
 
         // 显示FPS
         showFPS();
 
         // 更新玩家状态（包括移动、交互等）
         m_player->update(deltaTime, *m_chunkManager, renderSystem);
+        auto camera = m_player->getCamera();
 
         // 更新区块管理器（根据玩家位置更新可见区块）
         m_chunkManager->update(camera);

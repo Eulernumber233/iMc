@@ -130,6 +130,7 @@
     <ClCompile Include="scr\chunk\Chunk.cpp" />
     <ClCompile Include="scr\chunk\ChunkManager.cpp" />
     <ClCompile Include="scr\collision\Ray.cpp" />
+    <ClCompile Include="scr\collision\AABB.cpp" />
     <ClCompile Include="scr\generate\Noise.cpp" />
     <ClCompile Include="scr\generate\TerrainGenerator.cpp" />
     <ClCompile Include="scr\iMc.cpp" />
@@ -155,6 +156,8 @@
     <ClInclude Include="scr\chunk\Chunk.h" />
     <ClInclude Include="scr\chunk\ChunkManager.h" />
     <ClInclude Include="scr\collision\Ray.h" />
+    <ClInclude Include="scr\collision\AABB.h" />
+    <ClInclude Include="scr\collision\PhysicsConstants.h" />
     <ClInclude Include="scr\core.h" />
     <ClInclude Include="scr\Data.h" />
     <ClInclude Include="scr\generate\Noise.h" />

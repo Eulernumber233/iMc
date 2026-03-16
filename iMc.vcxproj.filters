@@ -27,6 +27,9 @@
     <ClCompile Include="scr\collision\Ray.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="scr\collision\AABB.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="scr\generate\Noise.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
@@ -93,6 +96,12 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="scr\collision\Ray.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\collision\AABB.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\collision\PhysicsConstants.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="scr\generate\Noise.h">
