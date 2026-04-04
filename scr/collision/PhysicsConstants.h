@@ -39,15 +39,18 @@ namespace PhysicsConstants {
     // 控制参数
     constexpr float DOUBLE_TAP_THRESHOLD = 0.3f;   // 前进键双击检测阈值（秒）
 
-    // 碰撞箱尺寸 (m)
-    constexpr float PLAYER_WIDTH = 0.4f;           // 玩家宽度 X
-    constexpr float PLAYER_HEIGHT_STANDING = 0.7f; // 玩家站立高度 Y
-    constexpr float PLAYER_HEIGHT_CROUCHING = 0.35f; // 玩家蹲伏高度 Y
-    constexpr float PLAYER_DEPTH = 0.4f;           // 玩家深度 Z
+    // 碰撞箱尺寸 (m) - MC风格
+    // MC原版: 0.6 × 1.8 × 0.6，蹲伏 0.6 × 1.5 × 0.6
+    constexpr float PLAYER_WIDTH = 0.6f;           // 玩家宽度 X
+    constexpr float PLAYER_HEIGHT_STANDING = 1.8f; // 玩家站立高度 Y
+    constexpr float PLAYER_HEIGHT_CROUCHING = 1.5f; // 玩家蹲伏高度 Y
+    constexpr float PLAYER_DEPTH = 0.6f;           // 玩家深度 Z
 
     // 摄像机偏移 (m) - 相对于碰撞箱中心
-    constexpr float CAMERA_OFFSET_Y_STANDING = 0.9f;  // 站立时摄像机在碰撞箱上方的偏移
-    constexpr float CAMERA_OFFSET_Y_CROUCHING = 0.55f; // 蹲伏时
+    // 站立: 摄像机在脚底上方1.62m = 碰撞箱中心(0.9m) + 偏移(0.72m)
+    // 蹲伏: 摄像机在脚底上方1.27m = 碰撞箱中心(0.75m) + 偏移(0.52m)
+    constexpr float CAMERA_OFFSET_Y_STANDING = 0.22f;
+    constexpr float CAMERA_OFFSET_Y_CROUCHING = -0.10f;
 
     // 物理迭代参数
     constexpr int MAX_PHYSICS_ITERATIONS = 4;      // 最大碰撞解算迭代次数

@@ -98,6 +98,13 @@ public:
     // 获取UI热栏
     std::shared_ptr<UIHotbar> getHotbar() const { return m_hotbar; }
 
+    // 移动模式
+    enum class MoveMode { Normal, Spectator };
+    MoveMode getMoveMode() const { return m_moveMode; }
+    float getSpectatorSpeedMultiplier() const { return m_spectatorSpeedMul; }
+    void setSpectatorBaseSpeed(float s) { m_spectatorBaseSpeed = s; }
+    float getSpectatorBaseSpeed() const { return m_spectatorBaseSpeed; }
+
     // 物理控制
     void jump();
     void setCrouching(bool crouching);
@@ -192,9 +199,21 @@ private:
     // 速度控制
     // 三速系统相关变量
     bool m_isRunning = false;
-    bool m_forwardWasReleased = false; // W键是否经历过一次释放（用于双击检测）
+    bool m_forwardWasReleased = false;
     float m_lastForwardPressTime = 0.0f;
-    float m_doubleTapThreshold = PhysicsConstants::DOUBLE_TAP_THRESHOLD; // 双击检测阈值（秒）
+    float m_doubleTapThreshold = PhysicsConstants::DOUBLE_TAP_THRESHOLD;
+
+    // 移动模式
+    MoveMode m_moveMode = MoveMode::Normal;
+
+    // 观察者模式参数
+    float m_spectatorBaseSpeed = 10.0f;   // 基础速度 (m/s)
+    float m_spectatorSpeedMul = 1.0f;     // 速度倍率（Q/E线性增减，可为负）
+    float m_spectatorMulStep = 0.5f;      // 每次Q/E调整的步长
+    struct {
+        bool up = false;    // 空格
+        bool down = false;  // Ctrl
+    } m_spectatorInput;
 
     // 回调函数
     std::function<void(const glm::ivec3&)> m_onBlockSelectedCallback;
@@ -207,6 +226,7 @@ private:
     // 物理相关方法
     void updateCameraPosition();
     void clampVelocity();
+    void updateSpectator(float deltaTime);
 
     // 碰撞检测 - 分轴移动+碰撞解算
     void getAllCollisions(ChunkManager& chunkManager, std::vector<CollisionResult>& collisions) const;

@@ -233,8 +233,6 @@ void Player::moveAxis(int axis, float displacement, ChunkManager& chunkManager) 
                         m_velocity[axis] = 0.0f;
                         // MC风格：撞墙停止跑步
                         if (m_isRunning) {
-                            std::cout << "[SPRINT OFF] wall collision axis=" << axis
-                                      << " block=(" << bx << "," << by << "," << bz << ")" << std::endl;
                             m_isRunning = false;
                         }
                     }
@@ -402,6 +400,34 @@ void Player::updatePhysics(float deltaTime, ChunkManager& chunkManager) {
     updateCameraPosition();
 }
 
+// ==================== 观察者模式更新 ====================
+
+void Player::updateSpectator(float deltaTime) {
+    // 计算移动方向（六方向矢量相加）
+    glm::vec3 moveDir(0.0f);
+    if (m_moveInput.forward)  moveDir += m_camera->Front;
+    if (m_moveInput.backward) moveDir -= m_camera->Front;
+    if (m_moveInput.left)     moveDir -= m_camera->Right;
+    if (m_moveInput.right)    moveDir += m_camera->Right;
+    if (m_spectatorInput.up)   moveDir += glm::vec3(0.0f, 1.0f, 0.0f);
+    if (m_spectatorInput.down) moveDir -= glm::vec3(0.0f, 1.0f, 0.0f);
+
+    // 归一化方向（保持速度恒定）
+    if (glm::length(moveDir) > 0.001f) {
+        moveDir = glm::normalize(moveDir);
+    }
+
+    // 速度 = 基础速度 × 倍率 × 方向
+    float speed = m_spectatorBaseSpeed * m_spectatorSpeedMul;
+    m_velocity = moveDir * speed;
+
+    // 直接移动位置（无碰撞）
+    m_position += m_velocity * deltaTime;
+
+    // 更新摄像机
+    updateCameraPosition();
+}
+
 // ==================== 主更新循环 ====================
 
 void Player::update(float deltaTime, ChunkManager& chunkManager, RenderSystem& renderSystem) {
@@ -412,13 +438,19 @@ void Player::update(float deltaTime, ChunkManager& chunkManager, RenderSystem& r
         placeOnGround(chunkManager);
     }
 
-    // 处理移动输入（更新m_moveInput状态）
+    if (m_moveMode == MoveMode::Spectator) {
+        updateSpectator(deltaTime);
+        // 观察者模式仍然更新方块选择和交互
+        updateBlockSelection(chunkManager, renderSystem);
+        handleBlockInteraction(chunkManager);
+        return;
+    }
+
+    // ---- 普通模式 ----
     handleMovementInput(deltaTime);
 
     // 跑动状态自动退出：松开前进键或下蹲时停止跑动
     if (m_isRunning && (!m_moveInput.forward || m_isCrouching)) {
-        std::cout << "[SPRINT OFF] update: forward=" << m_moveInput.forward
-                  << " crouch=" << m_isCrouching << std::endl;
         m_isRunning = false;
     }
 
@@ -467,20 +499,34 @@ void Player::processMouseButton(int button, int action) {
 }
 
 void Player::processKey(int key, int action) {
-    // 移动输入
+    // TAB切换移动模式
+    if (key == GLFW_KEY_TAB && action == GLFW_PRESS) {
+        if (m_moveMode == MoveMode::Normal) {
+            m_moveMode = MoveMode::Spectator;
+            m_velocity = glm::vec3(0.0f);
+            m_spectatorSpeedMul = 1.0f;
+        } else {
+            m_moveMode = MoveMode::Normal;
+            m_velocity = glm::vec3(0.0f);
+            m_onGround = false;
+            m_isRunning = false;
+            if (m_isCrouching) setCrouching(false);
+        }
+        // 清除所有输入状态
+        m_moveInput = {};
+        m_spectatorInput = {};
+        return;
+    }
+
+    // WASD 方向键（两种模式通用）
     if (key == GLFW_KEY_W) {
         m_moveInput.forward = (action != GLFW_RELEASE);
-
-        // 双击W进入奔跑
-        if (action == GLFW_PRESS) {
+        // 普通模式：双击W进入奔跑
+        if (m_moveMode == MoveMode::Normal && action == GLFW_PRESS) {
             float now = static_cast<float>(glfwGetTime());
-            float dt = now - m_lastForwardPressTime;
-            std::cout << "[W PRESS] dt=" << dt << " released=" << m_forwardWasReleased
-                      << " threshold=" << m_doubleTapThreshold << std::endl;
             if (m_forwardWasReleased && m_lastForwardPressTime > 0.0f
-                && dt < m_doubleTapThreshold) {
+                && (now - m_lastForwardPressTime) < m_doubleTapThreshold) {
                 m_isRunning = true;
-                std::cout << "[SPRINT ON]" << std::endl;
             }
             m_lastForwardPressTime = now;
             m_forwardWasReleased = false;
@@ -489,27 +535,33 @@ void Player::processKey(int key, int action) {
             m_forwardWasReleased = true;
         }
     }
-
     if (key == GLFW_KEY_S) m_moveInput.backward = (action != GLFW_RELEASE);
     if (key == GLFW_KEY_A) m_moveInput.left = (action != GLFW_RELEASE);
     if (key == GLFW_KEY_D) m_moveInput.right = (action != GLFW_RELEASE);
-    if (key == GLFW_KEY_SPACE) m_moveInput.jump = (action == GLFW_PRESS);
 
-    // Shift键用于下蹲/潜行
-    if (key == GLFW_KEY_LEFT_SHIFT) {
-        m_moveInput.crouch = (action != GLFW_RELEASE);
-        setCrouching(m_moveInput.crouch);
+    // 模式相关按键
+    if (m_moveMode == MoveMode::Normal) {
+        if (key == GLFW_KEY_SPACE) m_moveInput.jump = (action == GLFW_PRESS);
+        if (key == GLFW_KEY_LEFT_CONTROL) {
+            m_moveInput.crouch = (action != GLFW_RELEASE);
+            setCrouching(m_moveInput.crouch);
+        }
+    } else {
+        // 观察者模式
+        if (key == GLFW_KEY_SPACE) m_spectatorInput.up = (action != GLFW_RELEASE);
+        if (key == GLFW_KEY_LEFT_CONTROL) m_spectatorInput.down = (action != GLFW_RELEASE);
+        if (action == GLFW_PRESS) {
+            if (key == GLFW_KEY_Q) m_spectatorSpeedMul -= m_spectatorMulStep;
+            if (key == GLFW_KEY_E) m_spectatorSpeedMul += m_spectatorMulStep;
+        }
     }
 
-    // Q/E键功能已移除，改为三速系统
-
-    // 数字键选择物品栏
+    // 数字键选择物品栏（两种模式通用）
     if (action == GLFW_PRESS) {
         if (key >= GLFW_KEY_1 && key <= GLFW_KEY_9) {
-            int slot = key - GLFW_KEY_1;
-            setSelectedSlot(slot);
+            setSelectedSlot(key - GLFW_KEY_1);
         } else if (key == GLFW_KEY_0) {
-            setSelectedSlot(9); // 0键选择第10个槽位
+            setSelectedSlot(9);
         }
     }
 }
