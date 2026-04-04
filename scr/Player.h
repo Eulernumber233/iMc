@@ -192,6 +192,7 @@ private:
     // 速度控制
     // 三速系统相关变量
     bool m_isRunning = false;
+    bool m_forwardWasReleased = false; // W键是否经历过一次释放（用于双击检测）
     float m_lastForwardPressTime = 0.0f;
     float m_doubleTapThreshold = PhysicsConstants::DOUBLE_TAP_THRESHOLD; // 双击检测阈值（秒）
 

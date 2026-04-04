@@ -231,6 +231,12 @@ void Player::moveAxis(int axis, float displacement, ChunkManager& chunkManager) 
                         }
                     } else {
                         m_velocity[axis] = 0.0f;
+                        // MC风格：撞墙停止跑步
+                        if (m_isRunning) {
+                            std::cout << "[SPRINT OFF] wall collision axis=" << axis
+                                      << " block=(" << bx << "," << by << "," << bz << ")" << std::endl;
+                            m_isRunning = false;
+                        }
                     }
                 }
                 next_block:;
@@ -247,10 +253,12 @@ void Player::updateCameraPosition() {
 }
 
 void Player::clampVelocity() {
+    // 水平速度上限：取常量和跑步速度*1.2中的较大值，避免调参时被意外钳制
+    float maxH = std::max(PhysicsConstants::MAX_HORIZONTAL_SPEED, m_runSpeed * 1.2f);
     glm::vec3 hVel(m_velocity.x, 0.0f, m_velocity.z);
     float hSpeed = glm::length(hVel);
-    if (hSpeed > PhysicsConstants::MAX_HORIZONTAL_SPEED) {
-        float scale = PhysicsConstants::MAX_HORIZONTAL_SPEED / hSpeed;
+    if (hSpeed > maxH) {
+        float scale = maxH / hSpeed;
         m_velocity.x *= scale;
         m_velocity.z *= scale;
     }
@@ -267,15 +275,17 @@ void Player::updatePhysics(float deltaTime, ChunkManager& chunkManager) {
 
     // ---- 1. 处理跳跃 ----
     if (m_moveInput.jump) {
-        if (m_onGround) {
+        if (m_isCrouching) {
+            // 下蹲时不能跳跃，直接吞掉请求
+            m_moveInput.jump = false;
+        } else if (m_onGround) {
             jump();
             m_moveInput.jump = false;
-        }
-        // 如果不在地面上，保留jump请求，下帧着地时再跳
-        // 但不能无限保留，用一个简单的超时：如果速度向下很大说明在空中坠落，清除请求
-        else if (m_velocity.y < -2.0f) {
+        } else if (m_velocity.y < -2.0f) {
+            // 空中坠落中，清除跳跃请求
             m_moveInput.jump = false;
         }
+        // 其他情况保留请求，着地后自动触发
     }
 
     // ---- 2. 水平移动：读取输入，计算目标速度，加速/减速 ----
@@ -302,11 +312,10 @@ void Player::updatePhysics(float deltaTime, ChunkManager& chunkManager) {
     bool hasInput = (hasForward || hasBackward || hasLeft || hasRight);
 
     // 选择目标速度
+    // 空中时保持起跳前的速度模式（跑步跳跃=跑步速度，行走跳跃=行走速度）
     float targetSpeed = 0.0f;
     if (hasInput) {
-        if (!m_onGround) {
-            targetSpeed = m_airSpeed;
-        } else if (m_isCrouching) {
+        if (m_isCrouching) {
             targetSpeed = m_crouchSpeed;
         } else if (m_isRunning) {
             targetSpeed = m_runSpeed;
@@ -406,8 +415,10 @@ void Player::update(float deltaTime, ChunkManager& chunkManager, RenderSystem& r
     // 处理移动输入（更新m_moveInput状态）
     handleMovementInput(deltaTime);
 
-    // 跑动状态自动退出：如果跑动时松开前进键，停止跑动
-    if (m_isRunning && !m_moveInput.forward) {
+    // 跑动状态自动退出：松开前进键或下蹲时停止跑动
+    if (m_isRunning && (!m_moveInput.forward || m_isCrouching)) {
+        std::cout << "[SPRINT OFF] update: forward=" << m_moveInput.forward
+                  << " crouch=" << m_isCrouching << std::endl;
         m_isRunning = false;
     }
 
@@ -460,16 +471,22 @@ void Player::processKey(int key, int action) {
     if (key == GLFW_KEY_W) {
         m_moveInput.forward = (action != GLFW_RELEASE);
 
-        // 前进键双击检测
+        // 双击W进入奔跑
         if (action == GLFW_PRESS) {
-            float currentTime = static_cast<float>(glfwGetTime());
-            float timeSinceLastPress = currentTime - m_lastForwardPressTime;
-
-            if (timeSinceLastPress < m_doubleTapThreshold) {
+            float now = static_cast<float>(glfwGetTime());
+            float dt = now - m_lastForwardPressTime;
+            std::cout << "[W PRESS] dt=" << dt << " released=" << m_forwardWasReleased
+                      << " threshold=" << m_doubleTapThreshold << std::endl;
+            if (m_forwardWasReleased && m_lastForwardPressTime > 0.0f
+                && dt < m_doubleTapThreshold) {
                 m_isRunning = true;
+                std::cout << "[SPRINT ON]" << std::endl;
             }
-
-            m_lastForwardPressTime = currentTime;
+            m_lastForwardPressTime = now;
+            m_forwardWasReleased = false;
+        }
+        if (action == GLFW_RELEASE) {
+            m_forwardWasReleased = true;
         }
     }
 
@@ -478,12 +495,8 @@ void Player::processKey(int key, int action) {
     if (key == GLFW_KEY_D) m_moveInput.right = (action != GLFW_RELEASE);
     if (key == GLFW_KEY_SPACE) m_moveInput.jump = (action == GLFW_PRESS);
 
-    // Shift键不再用于冲刺，改为其他功能或保留
+    // Shift键用于下蹲/潜行
     if (key == GLFW_KEY_LEFT_SHIFT) {
-        // 可以保留用于其他功能，如潜行或物品使用
-    }
-
-    if (key == GLFW_KEY_LEFT_CONTROL) {
         m_moveInput.crouch = (action != GLFW_RELEASE);
         setCrouching(m_moveInput.crouch);
     }

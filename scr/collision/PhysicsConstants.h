@@ -5,7 +5,7 @@
 // 玩家碰撞箱：0.4×0.4×0.7 米
 // 速度单位：m/s，加速度单位：m/s²
 namespace PhysicsConstants {
-    // 重力加速度 (m/s²) - Minecraft风格，略高于现实
+    // 重力加速度 (m/s²)
     constexpr float GRAVITY = 20.0f;
 
     // 空气密度 (kg/m³)
@@ -21,10 +21,10 @@ namespace PhysicsConstants {
 
     // ============ 玩家移动参数（开放调整） ============
     // 三速系统目标速度 (m/s)
-    constexpr float PLAYER_WALK_SPEED = 4.3f;     // 行走速度 - Minecraft默认约4.3 m/s
-    constexpr float PLAYER_RUN_SPEED = 5.6f;      // 跑步速度 - 需要前进键双击
+    constexpr float PLAYER_WALK_SPEED = 6.3f;     // 行走速度
+    constexpr float PLAYER_RUN_SPEED = 10.6f;      // 跑步速度 - 需要前进键双击
     constexpr float PLAYER_CROUCH_SPEED = 1.3f;   // 蹲伏速度
-    constexpr float PLAYER_AIR_SPEED = 4.3f;      // 空中水平移动控制速度（同行走）
+    constexpr float PLAYER_AIR_SPEED = 6.3f;      // 空中水平移动控制速度（同行走）
 
     // 加速/减速参数 (m/s²) - 控制惯性手感
     constexpr float GROUND_ACCEL = 50.0f;          // 地面加速度 - ~0.1秒达到行走速度
@@ -47,7 +47,7 @@ namespace PhysicsConstants {
 
     // 摄像机偏移 (m) - 相对于碰撞箱中心
     constexpr float CAMERA_OFFSET_Y_STANDING = 0.9f;  // 站立时摄像机在碰撞箱上方的偏移
-    constexpr float CAMERA_OFFSET_Y_CROUCHING = 0.0f; // 蹲伏时
+    constexpr float CAMERA_OFFSET_Y_CROUCHING = 0.55f; // 蹲伏时
 
     // 物理迭代参数
     constexpr int MAX_PHYSICS_ITERATIONS = 4;      // 最大碰撞解算迭代次数
