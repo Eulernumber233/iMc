@@ -1,10 +1,12 @@
-#pragma once
+﻿#pragma once
 
 // 物理常量定义
+// 世界尺度：1区块 = 16×16×64 米，1方块 = 1m³
+// 玩家碰撞箱：0.4×0.4×0.7 米
+// 速度单位：m/s，加速度单位：m/s²
 namespace PhysicsConstants {
-    // 重力加速度 (m/s²) - 调整为适合游戏的数值
-    // 真实世界：9.81，Minecraft：约19.6，我们取中间值
-    constexpr float GRAVITY = 15.0f;
+    // 重力加速度 (m/s²) - Minecraft风格，略高于现实
+    constexpr float GRAVITY = 20.0f;
 
     // 空气密度 (kg/m³)
     constexpr float AIR_DENSITY = 1.225f;
@@ -12,43 +14,57 @@ namespace PhysicsConstants {
     // 水的密度 (kg/m³)
     constexpr float WATER_DENSITY = 1000.0f;
 
-    // 最大速度限制
-    constexpr float MAX_HORIZONTAL_SPEED = 10.0f;  // 降低水平最大速度
-    constexpr float MAX_VERTICAL_SPEED = 25.0f;    // 最大垂直速度（上升和下降）
-    constexpr float MAX_FALL_SPEED = 20.0f;        // 专门的最大下落速度
+    // 最大速度限制 (m/s)
+    constexpr float MAX_HORIZONTAL_SPEED = 8.0f;   // 水平最大速度（略高于跑步速度）
+    constexpr float MAX_VERTICAL_SPEED = 30.0f;    // 最大垂直速度（上升）
+    constexpr float MAX_FALL_SPEED = 40.0f;        // 最大下落速度
 
-    // 摩擦加速度 (m/s²) - 作为加速度应用
-    constexpr float FRICTION_GROUND = 25.0f;   // 地面摩擦力加速度
-    constexpr float FRICTION_AIR = 5.0f;       // 空气阻力加速度
-    constexpr float FRICTION_WATER = 40.0f;    // 水中阻力加速度
+    // ============ 玩家移动参数（开放调整） ============
+    // 三速系统目标速度 (m/s)
+    constexpr float PLAYER_WALK_SPEED = 4.3f;     // 行走速度 - Minecraft默认约4.3 m/s
+    constexpr float PLAYER_RUN_SPEED = 5.6f;      // 跑步速度 - 需要前进键双击
+    constexpr float PLAYER_CROUCH_SPEED = 1.3f;   // 蹲伏速度
+    constexpr float PLAYER_AIR_SPEED = 4.3f;      // 空中水平移动控制速度（同行走）
 
-    // 恢复系数（弹性）
-    constexpr float RESTITUTION_STONE = 0.1f;   // 石头：几乎无弹性
-    constexpr float RESTITUTION_WOOD = 0.3f;    // 木头：轻微弹性
-    constexpr float RESTITUTION_SLIME = 0.8f;   // 黏液块：高弹性
+    // 加速/减速参数 (m/s²) - 控制惯性手感
+    constexpr float GROUND_ACCEL = 50.0f;          // 地面加速度 - ~0.1秒达到行走速度
+    constexpr float GROUND_DECEL = 50.0f;          // 地面减速度 - ~0.1秒停下
+    constexpr float AIR_ACCEL = 10.0f;             // 空中加速度（较弱的空中控制）
+    constexpr float AIR_DECEL = 5.0f;              // 空中减速度
 
-    // 玩家物理参数 - 调整为适合游戏世界的数值
-    constexpr float PLAYER_MASS = 70.0f;        // 质量 (kg)
-    constexpr float PLAYER_JUMP_FORCE = 6.5f;   // 降低跳跃力，匹配调整后的重力
-    constexpr float PLAYER_WALK_SPEED = 4.5f;   // 行走速度 (m/s) - 正常步行速度
-    constexpr float PLAYER_RUN_SPEED = 6.5f;    // 奔跑速度 (m/s) - 慢跑速度
-    constexpr float PLAYER_CROUCH_SPEED = 2.0f; // 蹲伏速度 (m/s)
-    constexpr float PLAYER_AIR_CONTROL = 0.15f; // 降低空中控制系数
+    // 跳跃参数
+    constexpr float PLAYER_MASS = 70.0f;           // 质量 (kg)
+    constexpr float PLAYER_JUMP_VELOCITY = 7.5f;   // 跳跃初速度 (m/s) - 约跳1.4m高
 
-    // 碰撞箱尺寸
-    constexpr float PLAYER_WIDTH = 0.4f;        // 玩家宽度 (m)
-    constexpr float PLAYER_HEIGHT_STANDING = 0.7f; // 玩家站立高度 (m) - 调整为0.7米以匹配描述
-    constexpr float PLAYER_HEIGHT_CROUCHING = 0.35f; // 玩家蹲伏高度 (m) - 站立高度的一半
-    constexpr float PLAYER_DEPTH = 0.4f;        // 玩家深度 (m)
+    // 控制参数
+    constexpr float DOUBLE_TAP_THRESHOLD = 0.3f;   // 前进键双击检测阈值（秒）
 
-    // 摄像机偏移
-    constexpr float CAMERA_OFFSET_Y_STANDING = 0.1f;  // 站立时摄像机在碰撞箱上方的偏移
-    constexpr float CAMERA_OFFSET_Y_CROUCHING = -0.2f; // 蹲伏时摄像机在碰撞箱内部的偏移
+    // 碰撞箱尺寸 (m)
+    constexpr float PLAYER_WIDTH = 0.4f;           // 玩家宽度 X
+    constexpr float PLAYER_HEIGHT_STANDING = 0.7f; // 玩家站立高度 Y
+    constexpr float PLAYER_HEIGHT_CROUCHING = 0.35f; // 玩家蹲伏高度 Y
+    constexpr float PLAYER_DEPTH = 0.4f;           // 玩家深度 Z
+
+    // 摄像机偏移 (m) - 相对于碰撞箱中心
+    constexpr float CAMERA_OFFSET_Y_STANDING = 0.9f;  // 站立时摄像机在碰撞箱上方的偏移
+    constexpr float CAMERA_OFFSET_Y_CROUCHING = 0.0f; // 蹲伏时
 
     // 物理迭代参数
-    constexpr int MAX_PHYSICS_ITERATIONS = 3;   // 最大物理迭代次数
-    constexpr float PHYSICS_BIAS = 0.001f;      // 物理偏置，避免振荡
-    constexpr float PENETRATION_SLOP = 0.01f;   // 穿透容差
+    constexpr int MAX_PHYSICS_ITERATIONS = 4;      // 最大碰撞解算迭代次数
+    constexpr float PHYSICS_BIAS = 0.001f;         // 物理偏置，避免振荡
+    constexpr float PENETRATION_SLOP = 0.005f;     // 穿透容差
+
+    // 恢复系数（弹性）
+    constexpr float RESTITUTION_STONE = 0.1f;
+    constexpr float RESTITUTION_WOOD = 0.3f;
+    constexpr float RESTITUTION_SLIME = 0.8f;
+
+    // 旧接口兼容（已废弃，勿直接使用）
+    constexpr float PLAYER_JUMP_FORCE = PLAYER_JUMP_VELOCITY;
+    constexpr float PLAYER_AIR_CONTROL = 1.0f;
+    constexpr float FRICTION_GROUND = 0.0f;
+    constexpr float FRICTION_AIR = 0.0f;
+    constexpr float FRICTION_WATER = 15.0f;
 }
 
 // 物理工具函数

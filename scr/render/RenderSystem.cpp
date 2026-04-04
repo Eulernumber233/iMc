@@ -894,6 +894,8 @@ void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std
     // 渲染场景到深度贴图
     glViewport(0, 0, SHADOW_WIDTH, SHADOW_HEIGHT);
     glBindFramebuffer(GL_FRAMEBUFFER, m_depthMapFBO);
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(5.0f, 0.0f);
     glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
     glCullFace(GL_BACK); // 使用背面剔除减少阴影痤疮
 
@@ -905,6 +907,7 @@ void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std
     }
 
     glCullFace(GL_BACK); // 恢复默认的背面剔除
+    glDisable(GL_POLYGON_OFFSET_FILL);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, m_screenWidth, m_screenHeight);
 

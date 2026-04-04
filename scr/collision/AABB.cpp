@@ -32,18 +32,64 @@ CollisionResult calculateAABBCollision(const AABB& moving, const AABB& stationar
     // 使用一个小的偏置避免在角落处振荡
     const float bias = 0.001f;
 
+    // 检查是否是角落碰撞（两个轴的穿透深度都很小）
+    const float cornerThreshold = 0.05f; // 5厘米
+
     if (penetration.x < penetration.y && penetration.x < penetration.z) {
         // X轴穿透最小
         result.penetration = penetration.x + bias;
         result.normal = glm::vec3((delta.x > 0) ? 1.0f : -1.0f, 0.0f, 0.0f);
+
+        // 检查是否是角落碰撞
+        if (penetration.y < cornerThreshold && penetration.z < cornerThreshold) {
+            // 角落碰撞：同时处理Y轴和Z轴
+            // 使用组合法线
+            glm::vec3 cornerNormal(0.0f);
+            if (penetration.y < penetration.z) {
+                cornerNormal.y = (delta.y > 0) ? 1.0f : -1.0f;
+                cornerNormal.z = (delta.z > 0) ? 0.3f : -0.3f;
+            } else {
+                cornerNormal.y = (delta.y > 0) ? 0.3f : -0.3f;
+                cornerNormal.z = (delta.z > 0) ? 1.0f : -1.0f;
+            }
+            result.normal = glm::normalize(cornerNormal);
+        }
     } else if (penetration.y < penetration.z) {
         // Y轴穿透最小
         result.penetration = penetration.y + bias;
         result.normal = glm::vec3(0.0f, (delta.y > 0) ? 1.0f : -1.0f, 0.0f);
+
+        // 检查是否是角落碰撞
+        if (penetration.x < cornerThreshold && penetration.z < cornerThreshold) {
+            // 角落碰撞：同时处理X轴和Z轴
+            glm::vec3 cornerNormal(0.0f);
+            if (penetration.x < penetration.z) {
+                cornerNormal.x = (delta.x > 0) ? 1.0f : -1.0f;
+                cornerNormal.z = (delta.z > 0) ? 0.3f : -0.3f;
+            } else {
+                cornerNormal.x = (delta.x > 0) ? 0.3f : -0.3f;
+                cornerNormal.z = (delta.z > 0) ? 1.0f : -1.0f;
+            }
+            result.normal = glm::normalize(cornerNormal);
+        }
     } else {
         // Z轴穿透最小
         result.penetration = penetration.z + bias;
         result.normal = glm::vec3(0.0f, 0.0f, (delta.z > 0) ? 1.0f : -1.0f);
+
+        // 检查是否是角落碰撞
+        if (penetration.x < cornerThreshold && penetration.y < cornerThreshold) {
+            // 角落碰撞：同时处理X轴和Y轴
+            glm::vec3 cornerNormal(0.0f);
+            if (penetration.x < penetration.y) {
+                cornerNormal.x = (delta.x > 0) ? 1.0f : -1.0f;
+                cornerNormal.y = (delta.y > 0) ? 0.3f : -0.3f;
+            } else {
+                cornerNormal.x = (delta.x > 0) ? 0.3f : -0.3f;
+                cornerNormal.y = (delta.y > 0) ? 1.0f : -1.0f;
+            }
+            result.normal = glm::normalize(cornerNormal);
+        }
     }
 
     // 计算接触点（近似为移动AABB在碰撞方向上的表面点）
@@ -82,10 +128,11 @@ CollisionResult calculateBlockCollision(const AABB& entityAABB, const glm::ivec3
 
 // 分离轴定理的另一种实现（更精确）
 bool AABB::intersects(const AABB& other) const {
-    // 快速拒绝测试
-    if (max.x < other.min.x || min.x > other.max.x) return false;
-    if (max.y < other.min.y || min.y > other.max.y) return false;
-    if (max.z < other.min.z || min.z > other.max.z) return false;
+    // 快速拒绝测试，添加小的容差（epsilon）以检测接触
+    const float epsilon = 0.001f;
+    if (max.x < other.min.x - epsilon || min.x > other.max.x + epsilon) return false;
+    if (max.y < other.min.y - epsilon || min.y > other.max.y + epsilon) return false;
+    if (max.z < other.min.z - epsilon || min.z > other.max.z + epsilon) return false;
     return true;
 }
 

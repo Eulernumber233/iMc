@@ -1,7 +1,9 @@
-#include "Player.h"
+﻿#include "Player.h"
 #include "chunk/ChunkManager.h"
 #include "render/RenderSystem.h"
 #include "UI/UIManager.h"
+#include "collision/PhysicsConstants.h"
+#include "collision/AABB.h"
 #include <GLFW/glfw3.h>
 #include <iostream>
 #include <algorithm>
@@ -10,6 +12,10 @@
 
 Player::Player(std::shared_ptr<Camera> camera, GLFWwindow* window)
     : m_camera(camera), m_window(window) {
+    // 初始化三速系统变量
+    m_isRunning = false;
+    m_lastForwardPressTime = 0.0f;
+    m_doubleTapThreshold = PhysicsConstants::DOUBLE_TAP_THRESHOLD;
     // 初始化默认值
     m_lastX = SCR_WIDTH / 2.0f;
     m_lastY = SCR_HEIGHT / 2.0f;
@@ -74,45 +80,37 @@ AABB Player::getAABB() const {
     return AABB::fromCenterHalfSize(m_position, halfSize);
 }
 
+void Player::placeOnGround(ChunkManager& chunkManager) {
+    // 获取玩家AABB
+    AABB playerAABB = getAABB();
+
+    // 从玩家脚底向下搜索地面
+    float searchDistance = 10.0f; // 最大搜索距离
+    glm::vec3 playerBottom = playerAABB.min;
+
+    for (float y = playerBottom.y; y > playerBottom.y - searchDistance; y -= 0.1f) {
+        // 检查玩家脚底位置的方块
+        glm::ivec3 blockPos = worldToBlockCoord(glm::vec3(m_position.x, y, m_position.z));
+        BlockType blockType = chunkManager.getBlockAt(blockPos);
+
+        if (blockType != BLOCK_AIR) {
+            // 找到地面，将玩家放置在地面上方
+            float groundY = blockPos.y + 1.0f; // 方块顶部Y坐标
+            // 玩家中心Y坐标 = 地面Y坐标 + 玩家碰撞箱高度的一半
+            m_position.y = groundY + m_collisionBox.height/2.0f;
+            m_onGround = true;
+            updateCameraPosition();
+            return;
+        }
+    }
+}
+
 // ==================== 物理控制 ====================
 
 void Player::jump() {
-    // 允许在贴墙时跳跃（墙跳）
-    // 条件：在地面或者速度很小（贴墙状态）
-    bool canJump = false;
-
     if (m_onGround && !m_isCrouching) {
-        canJump = true;
-    } else if (!m_onGround && glm::abs(m_velocity.y) < 0.1f) {
-        // 贴墙状态：垂直速度很小，可能贴着墙
-        // 检查是否贴着墙（水平速度很小）
-        glm::vec3 horizontalVel(m_velocity.x, 0.0f, m_velocity.z);
-        if (glm::length(horizontalVel) < 0.5f) {
-            canJump = true;
-        }
-    }
-
-    if (canJump) {
-        m_velocity.y = m_jumpForce;
+        m_velocity.y = m_jumpVelocity;
         m_onGround = false;
-
-        // 如果贴墙跳跃，给一个小的水平推力避免卡墙
-        if (!m_onGround) {
-            // 检查移动输入，给一个小的水平推力
-            glm::vec3 wallJumpPush(0.0f);
-            if (m_moveInput.forward) wallJumpPush += m_camera->Front;
-            if (m_moveInput.backward) wallJumpPush -= m_camera->Front;
-            if (m_moveInput.left) wallJumpPush -= m_camera->Right;
-            if (m_moveInput.right) wallJumpPush += m_camera->Right;
-
-            // 归一化并应用水平推力
-            if (glm::length(wallJumpPush) > 0.0f) {
-                wallJumpPush.y = 0.0f;
-                wallJumpPush = glm::normalize(wallJumpPush);
-                m_velocity.x += wallJumpPush.x * 2.0f; // 小的水平推力
-                m_velocity.z += wallJumpPush.z * 2.0f;
-            }
-        }
     }
 }
 
@@ -141,27 +139,21 @@ void Player::setVelocity(const glm::vec3& velocity) {
 
 // ==================== 碰撞检测核心算法 ====================
 
-CollisionResult Player::checkCollisionWithBlocks(ChunkManager& chunkManager) const {
+void Player::getAllCollisions(ChunkManager& chunkManager, std::vector<CollisionResult>& collisions) const {
     AABB playerAABB = getAABB();
 
-    // 获取玩家AABB覆盖的方块范围（扩展1个方块以处理边缘情况）
     glm::ivec3 minBlock, maxBlock;
     expandBlockRange(playerAABB, minBlock, maxBlock, 1);
 
-    CollisionResult finalResult;
-    std::vector<CollisionResult> collisions;
+    collisions.clear();
 
-    // 遍历所有可能碰撞的方块
     for (int x = minBlock.x; x <= maxBlock.x; x++) {
         for (int y = minBlock.y; y <= maxBlock.y; y++) {
             for (int z = minBlock.z; z <= maxBlock.z; z++) {
                 glm::ivec3 blockPos(x, y, z);
                 BlockType blockType = chunkManager.getBlockAt(blockPos);
-
-                // 跳过空气方块
                 if (blockType == BLOCK_AIR) continue;
 
-                // 计算碰撞
                 CollisionResult collision = calculateBlockCollision(playerAABB, blockPos);
                 if (collision.collided) {
                     collisions.push_back(collision);
@@ -169,87 +161,81 @@ CollisionResult Player::checkCollisionWithBlocks(ChunkManager& chunkManager) con
             }
         }
     }
+}
 
-    // 处理多个碰撞
-    if (!collisions.empty()) {
-        // 如果有多个碰撞，找到最重要的碰撞
-        // 优先处理垂直碰撞（Y轴），然后是水平碰撞
-        CollisionResult* verticalCollision = nullptr;
-        CollisionResult* horizontalCollision = nullptr;
+// 分轴移动：沿单个轴移动并解算碰撞
+// axis: 0=X, 1=Y, 2=Z
+void Player::moveAxis(int axis, float displacement, ChunkManager& chunkManager) {
+    if (glm::abs(displacement) < 1e-7f) return;
 
-        for (auto& collision : collisions) {
-            if (collision.isFromTop() || collision.isFromBottom()) {
-                // 垂直碰撞
-                if (!verticalCollision || collision.penetration > verticalCollision->penetration) {
-                    verticalCollision = &collision;
+    // 应用位移
+    m_position[axis] += displacement;
+
+    // 检测碰撞
+    glm::ivec3 minBlock, maxBlock;
+    AABB expandAABB = getAABB();
+    expandBlockRange(expandAABB, minBlock, maxBlock, 1);
+
+    for (int bx = minBlock.x; bx <= maxBlock.x; bx++) {
+        for (int by = minBlock.y; by <= maxBlock.y; by++) {
+            for (int bz = minBlock.z; bz <= maxBlock.z; bz++) {
+                glm::ivec3 blockPos(bx, by, bz);
+                BlockType blockType = chunkManager.getBlockAt(blockPos);
+                if (blockType == BLOCK_AIR) continue;
+
+                AABB blockAABB = getBlockAABB(blockPos);
+                // 重新获取当前玩家AABB（位置可能已被之前的block修正）
+                AABB curAABB = getAABB();
+
+                // 严格相交检测：所有三个轴都必须有真正的重叠（不含epsilon容差）
+                // 这样刚好贴着地面的方块不会在水平轴上误判为碰撞
+                glm::vec3 curCenter = curAABB.getCenter();
+                glm::vec3 blockCenter = blockAABB.getCenter();
+                glm::vec3 curHalf = curAABB.getHalfSize();
+                glm::vec3 blockHalf = blockAABB.getHalfSize();
+
+                // 计算三个轴上的重叠
+                float overlapX = (curHalf.x + blockHalf.x) - glm::abs(curCenter.x - blockCenter.x);
+                float overlapY = (curHalf.y + blockHalf.y) - glm::abs(curCenter.y - blockCenter.y);
+                float overlapZ = (curHalf.z + blockHalf.z) - glm::abs(curCenter.z - blockCenter.z);
+
+                // 所有轴必须有足够的重叠才算真正碰撞
+                // 非当前轴要求至少有 PENETRATION_SLOP 的重叠，避免仅仅"贴着"就误判
+                const float minOverlap = PhysicsConstants::PENETRATION_SLOP; // 0.005m
+                for (int a = 0; a < 3; a++) {
+                    float ov = (a == 0) ? overlapX : (a == 1) ? overlapY : overlapZ;
+                    if (a == axis) {
+                        // 当前移动轴：只要有重叠就算碰撞
+                        if (ov <= 0.0f) goto next_block;
+                    } else {
+                        // 其他轴：需要至少 minOverlap 的重叠
+                        if (ov <= minOverlap) goto next_block;
+                    }
                 }
-            } else {
-                // 水平碰撞
-                if (!horizontalCollision || collision.penetration > horizontalCollision->penetration) {
-                    horizontalCollision = &collision;
+
+                {
+                    // 当前轴上的重叠即为穿透深度
+                    float overlap = (axis == 0) ? overlapX : (axis == 1) ? overlapY : overlapZ;
+
+                    // 推出方向：沿当前轴，远离方块中心
+                    float pushDir = (curCenter[axis] > blockCenter[axis]) ? 1.0f : -1.0f;
+                    m_position[axis] += pushDir * (overlap + PhysicsConstants::PHYSICS_BIAS);
+
+                    // 清零该轴速度
+                    if (axis == 1) {
+                        if (displacement < 0.0f) {
+                            m_onGround = true;
+                            m_velocity.y = 0.0f;
+                        } else {
+                            m_velocity.y = 0.0f;
+                        }
+                    } else {
+                        m_velocity[axis] = 0.0f;
+                    }
                 }
+                next_block:;
             }
         }
-
-        // 优先返回垂直碰撞
-        if (verticalCollision) {
-            finalResult = *verticalCollision;
-        } else if (horizontalCollision) {
-            finalResult = *horizontalCollision;
-        } else {
-            // 返回第一个碰撞
-            finalResult = collisions[0];
-        }
-    }
-
-    return finalResult;
-}
-
-// ==================== 碰撞响应处理 ====================
-
-void Player::resolveCollision(const CollisionResult& collision) {
-    if (!collision.collided) return;
-
-    // 位置修正：将玩家推出穿透深度
-    m_position += collision.normal * collision.penetration;
-
-    // 速度反射：根据碰撞法线反射速度
-    // 如果速度方向与法线方向相反（朝向碰撞面），清零该方向速度
-    float velocityDotNormal = glm::dot(m_velocity, collision.normal);
-    if (velocityDotNormal < 0) {
-        // 将速度投影到碰撞平面上
-        m_velocity -= collision.normal * velocityDotNormal;
-
-        // 添加能量损失（阻尼）
-        float damping = 0.8f;
-        m_velocity *= damping;
-    }
-
-    // 特殊处理：如果是从上方碰撞（站在方块上）
-    if (collision.isFromTop()) {
-        m_velocity.y = std::min(m_velocity.y, 0.0f); // 确保不向下穿透
-        m_onGround = true;
-    }
-
-    // 特殊处理：如果是从下方碰撞（头顶撞到方块）
-    if (collision.isFromBottom()) {
-        m_velocity.y = std::max(m_velocity.y, 0.0f); // 确保不向上穿透
-    }
-
-    // 更新摄像机位置
-    updateCameraPosition();
-}
-
-void Player::resolveMultipleCollisions(std::vector<CollisionResult>& collisions) {
-    // 按穿透深度排序（从大到小）
-    std::sort(collisions.begin(), collisions.end(),
-        [](const CollisionResult& a, const CollisionResult& b) {
-            return a.penetration > b.penetration;
-        });
-
-    // 依次处理所有碰撞
-    for (const auto& collision : collisions) {
-        resolveCollision(collision);
     }
 }
 
@@ -260,239 +246,170 @@ void Player::updateCameraPosition() {
     m_camera->Position = m_position + cameraOffset;
 }
 
-void Player::applyMovement(float deltaTime) {
-    if (!m_onGround) {
-        // 空中控制（受限）
-        m_airControl = 0.2f;
-    } else {
-        m_airControl = 1.0f;
-    }
-
-    // 计算移动方向（基于摄像机方向）
-    glm::vec3 moveDirection(0.0f);
-
-    // 检查是否有移动输入
-    bool hasForwardInput = m_moveInput.forward;
-    bool hasBackwardInput = m_moveInput.backward;
-    bool hasLeftInput = m_moveInput.left;
-    bool hasRightInput = m_moveInput.right;
-
-    // 计算输入方向
-    if (hasForwardInput) moveDirection += m_camera->Front;
-    if (hasBackwardInput) moveDirection -= m_camera->Front;
-    if (hasLeftInput) moveDirection -= m_camera->Right;
-    if (hasRightInput) moveDirection += m_camera->Right;
-
-    // 归一化水平移动方向
-    if (glm::length(moveDirection) > 0.0f) {
-        moveDirection = glm::normalize(moveDirection);
-        // 确保只在水平面移动
-        moveDirection.y = 0.0f;
-        moveDirection = glm::normalize(moveDirection);
-    }
-
-    // 计算目标速度
-    float targetSpeed = m_walkSpeed;
-    if (m_moveInput.sprint) targetSpeed = m_runSpeed;
-    if (m_isCrouching) targetSpeed = m_crouchSpeed;
-
-    // 应用速度倍数
-    targetSpeed *= m_speedMultiplier;
-
-    // 获取当前水平速度
-    glm::vec3 horizontalVel(m_velocity.x, 0.0f, m_velocity.z);
-    float currentHorizontalSpeed = glm::length(horizontalVel);
-
-    // 检查是否有任何移动输入
-    bool hasAnyMovementInput = hasForwardInput || hasBackwardInput || hasLeftInput || hasRightInput;
-
-    if (hasAnyMovementInput) {
-        // 有移动输入：计算目标速度
-        glm::vec3 targetVelocity = moveDirection * targetSpeed;
-
-        // 检查是否按下了反方向键
-        // 如果当前有速度且输入方向与速度方向相反，立即停止并反向加速
-        if (currentHorizontalSpeed > 0.1f) {
-            glm::vec3 currentDir = glm::normalize(horizontalVel);
-            float dotProduct = glm::dot(moveDirection, currentDir);
-
-            // 如果方向相反（夹角大于90度），立即停止当前速度
-            if (dotProduct < -0.5f) {
-                // 立即停止当前速度，开始反向加速
-                m_velocity.x = 0.0f;
-                m_velocity.z = 0.0f;
-                currentHorizontalSpeed = 0.0f;
-            }
-        }
-
-        // 计算速度差并应用加速度
-        glm::vec3 velocityDiff = targetVelocity - glm::vec3(m_velocity.x, 0.0f, m_velocity.z);
-
-        // 使用加速度系数：8.0表示大约0.125秒内达到目标速度（快速响应）
-        float accelerationFactor = 8.0f;
-        glm::vec3 acceleration = velocityDiff * accelerationFactor * m_airControl;
-
-        m_acceleration.x += acceleration.x;
-        m_acceleration.z += acceleration.z;
-    } else {
-        // 没有移动输入：应用快速减速
-        if (currentHorizontalSpeed > 0.0f) {
-            // 快速减速：在0.1秒内停止
-            float decelerationFactor = 10.0f; // 10倍重力加速度的减速
-            glm::vec3 decelerationDir = -glm::normalize(horizontalVel);
-            glm::vec3 deceleration = decelerationDir * decelerationFactor;
-
-            // 确保减速不会导致反向速度
-            float decelMagnitude = glm::length(deceleration) * deltaTime;
-            if (decelMagnitude >= currentHorizontalSpeed) {
-                // 如果减速会超过当前速度，直接停止
-                m_velocity.x = 0.0f;
-                m_velocity.z = 0.0f;
-            } else {
-                m_acceleration.x += deceleration.x;
-                m_acceleration.z += deceleration.z;
-            }
-        }
-    }
-
-    // 处理跳跃输入
-    if (m_moveInput.jump) {
-        jump();
-        m_moveInput.jump = false; // 单次触发
-    }
-}
-
-void Player::applyGravity(float deltaTime) {
-    // 总是应用重力，但在地面上时可能会有碰撞响应
-    // 这样可以确保玩家从高处落下时能正确下落
-    m_acceleration.y -= m_gravity;
-
-    // 如果在地面上且垂直速度向下很小，抵消重力避免下沉
-    if (m_onGround && m_velocity.y > -0.1f && m_velocity.y < 0.1f) {
-        // 在地面上，抵消重力避免下沉
-        m_acceleration.y += m_gravity;
-    }
-}
-
-void Player::applyFriction(float deltaTime) {
-    // 摩擦力作为加速度应用，而不是直接修改速度
-    // 这样可以保持物理一致性
-    float frictionAccel = m_onGround ? m_frictionGround : m_frictionAir;
-
-    // 应用摩擦力到水平速度（与速度方向相反）
-    glm::vec3 horizontalVel(m_velocity.x, 0.0f, m_velocity.z);
-    float horizontalSpeed = glm::length(horizontalVel);
-
-    if (horizontalSpeed > 0.0f) {
-        // 摩擦力方向与速度方向相反
-        glm::vec3 frictionDir = -glm::normalize(horizontalVel);
-        glm::vec3 frictionAcceleration = frictionDir * frictionAccel;
-
-        // 应用摩擦力加速度
-        m_acceleration.x += frictionAcceleration.x;
-        m_acceleration.z += frictionAcceleration.z;
-    }
-}
-
 void Player::clampVelocity() {
-    // 限制最大水平速度
-    glm::vec3 horizontalVel(m_velocity.x, 0.0f, m_velocity.z);
-    float horizontalSpeed = glm::length(horizontalVel);
-
-    if (horizontalSpeed > PhysicsConstants::MAX_HORIZONTAL_SPEED) {
-        float scale = PhysicsConstants::MAX_HORIZONTAL_SPEED / horizontalSpeed;
+    glm::vec3 hVel(m_velocity.x, 0.0f, m_velocity.z);
+    float hSpeed = glm::length(hVel);
+    if (hSpeed > PhysicsConstants::MAX_HORIZONTAL_SPEED) {
+        float scale = PhysicsConstants::MAX_HORIZONTAL_SPEED / hSpeed;
         m_velocity.x *= scale;
         m_velocity.z *= scale;
     }
-
-    // 限制最大下落速度（防止下落过快）
     if (m_velocity.y < -PhysicsConstants::MAX_FALL_SPEED) {
         m_velocity.y = -PhysicsConstants::MAX_FALL_SPEED;
     }
-
-    // 限制最大上升速度
     if (m_velocity.y > PhysicsConstants::MAX_VERTICAL_SPEED) {
         m_velocity.y = PhysicsConstants::MAX_VERTICAL_SPEED;
     }
 }
 
 void Player::updatePhysics(float deltaTime, ChunkManager& chunkManager) {
-    // 限制deltaTime，避免物理计算错误
-    if (deltaTime > 0.1f) {
-        deltaTime = 0.1f;
-    }
+    if (deltaTime > 0.05f) deltaTime = 0.05f;
 
-    // 调试：记录更新前的状态
-    static int frameCount = 0;
-    frameCount++;
-    if (frameCount <= 3) {
-        std::cout << "Frame " << frameCount << ": deltaTime=" << deltaTime
-                  << ", pos=(" << m_position.x << "," << m_position.y << "," << m_position.z
-                  << "), vel=(" << m_velocity.x << "," << m_velocity.y << "," << m_velocity.z
-                  << "), acc=(" << m_acceleration.x << "," << m_acceleration.y << "," << m_acceleration.z
-                  << "), onGround=" << m_onGround << std::endl;
-    }
-
-    // 在每次物理更新开始时，假设玩家不在空中
-    // 只有在碰撞检测中确认站在地面上时才会设置为true
-    m_onGround = false;
-
-    // 重置加速度
-    m_acceleration = glm::vec3(0.0f);
-
-    // 应用移动输入
-    applyMovement(deltaTime);
-
-    // 应用重力
-    applyGravity(deltaTime);
-
-    // 计算新速度：v = v0 + a * dt
-    m_velocity += m_acceleration * deltaTime;
-
-    // 应用摩擦力
-    applyFriction(deltaTime);
-
-    // 限制速度
-    clampVelocity();
-
-    // 计算期望位置
-    glm::vec3 desiredPosition = m_position + m_velocity * deltaTime;
-
-    // 保存旧位置
-    glm::vec3 oldPosition = m_position;
-
-    // 先尝试移动到期望位置
-    m_position = desiredPosition;
-
-    // 检测碰撞
-    CollisionResult collision = checkCollisionWithBlocks(chunkManager);
-
-    // 处理碰撞
-    if (collision.collided) {
-        resolveCollision(collision);
-
-        // 如果碰撞后仍然有速度朝向碰撞面，尝试再次解决
-        // 这可以处理多个连续碰撞的情况
-        int maxIterations = 3;
-        for (int i = 0; i < maxIterations; i++) {
-            collision = checkCollisionWithBlocks(chunkManager);
-            if (!collision.collided) break;
-            resolveCollision(collision);
+    // ---- 1. 处理跳跃 ----
+    if (m_moveInput.jump) {
+        if (m_onGround) {
+            jump();
+            m_moveInput.jump = false;
+        }
+        // 如果不在地面上，保留jump请求，下帧着地时再跳
+        // 但不能无限保留，用一个简单的超时：如果速度向下很大说明在空中坠落，清除请求
+        else if (m_velocity.y < -2.0f) {
+            m_moveInput.jump = false;
         }
     }
 
-    // 更新摄像机位置
+    // ---- 2. 水平移动：读取输入，计算目标速度，加速/减速 ----
+    bool hasForward = m_moveInput.forward;
+    bool hasBackward = m_moveInput.backward;
+    bool hasLeft = m_moveInput.left;
+    bool hasRight = m_moveInput.right;
+
+    // 反方向抵消
+    if (hasForward && hasBackward) { hasForward = false; hasBackward = false; }
+    if (hasLeft && hasRight) { hasLeft = false; hasRight = false; }
+
+    // 计算世界空间水平移动方向
+    glm::vec3 moveDir(0.0f);
+    if (hasForward)  moveDir += m_camera->Front;
+    if (hasBackward) moveDir -= m_camera->Front;
+    if (hasLeft)     moveDir -= m_camera->Right;
+    if (hasRight)    moveDir += m_camera->Right;
+    moveDir.y = 0.0f;
+    if (glm::length(moveDir) > 0.001f) {
+        moveDir = glm::normalize(moveDir);
+    }
+
+    bool hasInput = (hasForward || hasBackward || hasLeft || hasRight);
+
+    // 选择目标速度
+    float targetSpeed = 0.0f;
+    if (hasInput) {
+        if (!m_onGround) {
+            targetSpeed = m_airSpeed;
+        } else if (m_isCrouching) {
+            targetSpeed = m_crouchSpeed;
+        } else if (m_isRunning) {
+            targetSpeed = m_runSpeed;
+            if (hasBackward) {
+                m_isRunning = false;
+                targetSpeed = m_walkSpeed;
+            }
+        } else {
+            targetSpeed = m_walkSpeed;
+        }
+    }
+
+    // 当前水平速度
+    glm::vec3 hVel(m_velocity.x, 0.0f, m_velocity.z);
+    float hSpeed = glm::length(hVel);
+
+    float accel = m_onGround ? m_groundAccel : m_airAccel;
+    float decel = m_onGround ? m_groundDecel : m_airDecel;
+
+    if (hasInput) {
+        // 反方向检测：方向相反时立即清零
+        if (hSpeed > 0.1f) {
+            glm::vec3 hDir = hVel / hSpeed;
+            if (glm::dot(moveDir, hDir) < -0.5f) {
+                m_velocity.x = 0.0f;
+                m_velocity.z = 0.0f;
+                hSpeed = 0.0f;
+            }
+        }
+
+        // 向目标速度加速
+        glm::vec3 targetVel = moveDir * targetSpeed;
+        glm::vec3 diff = targetVel - glm::vec3(m_velocity.x, 0.0f, m_velocity.z);
+        float diffLen = glm::length(diff);
+        if (diffLen > 0.001f) {
+            float step = accel * deltaTime;
+            if (step > diffLen) step = diffLen;
+            glm::vec3 accelVec = (diff / diffLen) * step;
+            m_velocity.x += accelVec.x;
+            m_velocity.z += accelVec.z;
+        }
+    } else {
+        // 无输入：减速至停止
+        if (hSpeed > 0.001f) {
+            float step = decel * deltaTime;
+            if (step >= hSpeed) {
+                m_velocity.x = 0.0f;
+                m_velocity.z = 0.0f;
+            } else {
+                float scale = (hSpeed - step) / hSpeed;
+                m_velocity.x *= scale;
+                m_velocity.z *= scale;
+            }
+        } else {
+            m_velocity.x = 0.0f;
+            m_velocity.z = 0.0f;
+        }
+    }
+
+    // ---- 3. 重力 ----
+    // 始终施加重力。在地面上碰撞检测会将 m_velocity.y 清零并设置 m_onGround。
+    // 每帧都施加重力可以确保：
+    //   - 走到悬崖边时立刻开始下落
+    //   - 站在地面上时，微小的向下速度确保碰撞检测持续触发着地判定
+    m_velocity.y -= m_gravity * deltaTime;
+
+    // ---- 4. 速度限制 ----
+    clampVelocity();
+
+    // ---- 5. 分轴移动 + 碰撞解算 ----
+    // 重置地面状态，碰撞检测会重新设置
+    m_onGround = false;
+
+    float dx = m_velocity.x * deltaTime;
+    float dy = m_velocity.y * deltaTime;
+    float dz = m_velocity.z * deltaTime;
+
+    // Y轴优先（重力/着地），然后水平轴
+    moveAxis(1, dy, chunkManager);
+    moveAxis(0, dx, chunkManager);
+    moveAxis(2, dz, chunkManager);
+
+    // ---- 6. 更新摄像机 ----
     updateCameraPosition();
 }
 
 // ==================== 主更新循环 ====================
 
 void Player::update(float deltaTime, ChunkManager& chunkManager, RenderSystem& renderSystem) {
+    // 第一次更新时，确保玩家在地面上
+    static bool firstUpdate = true;
+    if (firstUpdate) {
+        firstUpdate = false;
+        placeOnGround(chunkManager);
+    }
+
     // 处理移动输入（更新m_moveInput状态）
     handleMovementInput(deltaTime);
 
-    // 更新速度倍数
-    updateSpeedMultiplier(deltaTime);
+    // 跑动状态自动退出：如果跑动时松开前进键，停止跑动
+    if (m_isRunning && !m_moveInput.forward) {
+        m_isRunning = false;
+    }
 
     // 更新物理状态
     updatePhysics(deltaTime, chunkManager);
@@ -540,29 +457,38 @@ void Player::processMouseButton(int button, int action) {
 
 void Player::processKey(int key, int action) {
     // 移动输入
-    if (key == GLFW_KEY_W) m_moveInput.forward = (action != GLFW_RELEASE);
+    if (key == GLFW_KEY_W) {
+        m_moveInput.forward = (action != GLFW_RELEASE);
+
+        // 前进键双击检测
+        if (action == GLFW_PRESS) {
+            float currentTime = static_cast<float>(glfwGetTime());
+            float timeSinceLastPress = currentTime - m_lastForwardPressTime;
+
+            if (timeSinceLastPress < m_doubleTapThreshold) {
+                m_isRunning = true;
+            }
+
+            m_lastForwardPressTime = currentTime;
+        }
+    }
+
     if (key == GLFW_KEY_S) m_moveInput.backward = (action != GLFW_RELEASE);
     if (key == GLFW_KEY_A) m_moveInput.left = (action != GLFW_RELEASE);
     if (key == GLFW_KEY_D) m_moveInput.right = (action != GLFW_RELEASE);
     if (key == GLFW_KEY_SPACE) m_moveInput.jump = (action == GLFW_PRESS);
-    if (key == GLFW_KEY_LEFT_SHIFT) m_moveInput.sprint = (action != GLFW_RELEASE);
+
+    // Shift键不再用于冲刺，改为其他功能或保留
+    if (key == GLFW_KEY_LEFT_SHIFT) {
+        // 可以保留用于其他功能，如潜行或物品使用
+    }
+
     if (key == GLFW_KEY_LEFT_CONTROL) {
         m_moveInput.crouch = (action != GLFW_RELEASE);
         setCrouching(m_moveInput.crouch);
     }
 
-    // 玩家特定的按键处理
-    if (key == GLFW_KEY_Q && action == GLFW_PRESS) {
-        // 增加速度
-        m_speedMultiplier += 0.33f;
-        if (m_speedMultiplier > 10.0f) m_speedMultiplier = 10.0f;
-    }
-
-    if (key == GLFW_KEY_E && action == GLFW_PRESS) {
-        // 减少速度
-        m_speedMultiplier -= 0.33f;
-        if (m_speedMultiplier < 0.1f) m_speedMultiplier = 0.1f;
-    }
+    // Q/E键功能已移除，改为三速系统
 
     // 数字键选择物品栏
     if (action == GLFW_PRESS) {
@@ -583,7 +509,7 @@ void Player::processMouseScroll(double xoffset, double yoffset) {
 
 void Player::handleMovementInput(float deltaTime) {
     // 这个方法现在只更新m_moveInput状态
-    // 实际的移动计算在applyMovement()中完成
+    // 实际的移动计算在updatePhysics()中完成
 }
 
 // ==================== 方块交互 ====================
@@ -680,34 +606,7 @@ void Player::setSelectedSlot(int slot) {
     }
 }
 
-void Player::setSpeedMultiplier(float multiplier) {
-    m_speedMultiplier = multiplier;
-    if (m_speedMultiplier < 0.1f) m_speedMultiplier = 0.1f;
-    if (m_speedMultiplier > 10.0f) m_speedMultiplier = 10.0f;
-}
-
-void Player::updateSpeedMultiplier(float deltaTime) {
-    // 保持与World基类兼容的速度控制逻辑
-    static float change_speed_delta_time = 0.0f;
-
-    if (glfwGetKey(m_window, GLFW_KEY_Q) == GLFW_PRESS) {
-        change_speed_delta_time += deltaTime;
-        if (change_speed_delta_time > 0.033f) {
-            m_speedMultiplier += 0.33f;
-            if (m_speedMultiplier > 10.0f) m_speedMultiplier = 10.0f;
-            change_speed_delta_time = 0.0f;
-        }
-    }
-
-    if (glfwGetKey(m_window, GLFW_KEY_E) == GLFW_PRESS) {
-        change_speed_delta_time += deltaTime;
-        if (change_speed_delta_time > 0.033f) {
-            m_speedMultiplier -= 0.33f;
-            if (m_speedMultiplier < 0.1f) m_speedMultiplier = 0.1f;
-            change_speed_delta_time = 0.0f;
-        }
-    }
-}
+// 速度倍数功能已移除，改为三速系统
 
 // ==================== 方块选择更新 ====================
 

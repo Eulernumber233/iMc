@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "Camera.h"
 #include "Item.h"
 #include "UI/UIHotbar.h"
@@ -51,6 +51,9 @@ public:
     // 设置玩家位置（用于传送等）
     void setPosition(const glm::vec3& position);
 
+    // 将玩家放置在地面上
+    void placeOnGround(ChunkManager& chunkManager);
+
     // 获取玩家AABB碰撞箱
     AABB getAABB() const;
 
@@ -67,9 +70,30 @@ public:
     // 获取交互距离
     float getInteractionDistance() const { return m_interactionDistance; }
 
-    // 设置/获取速度倍数
-    void setSpeedMultiplier(float multiplier);
-    float getSpeedMultiplier() const { return m_speedMultiplier; }
+    // 三速系统参数设置（开放参数，方便调整）
+    void setAirSpeed(float speed) { m_airSpeed = speed; }
+    void setWalkSpeed(float speed) { m_walkSpeed = speed; }
+    void setRunSpeed(float speed) { m_runSpeed = speed; }
+    void setCrouchSpeed(float speed) { m_crouchSpeed = speed; }
+    void setDoubleTapThreshold(float threshold) { m_doubleTapThreshold = threshold; }
+    void setGroundAccel(float accel) { m_groundAccel = accel; }
+    void setGroundDecel(float decel) { m_groundDecel = decel; }
+    void setAirAccel(float accel) { m_airAccel = accel; }
+    void setAirDecel(float decel) { m_airDecel = decel; }
+    void setGravity(float g) { m_gravity = g; }
+    void setJumpVelocity(float v) { m_jumpVelocity = v; }
+
+    // 获取当前速度参数
+    float getAirSpeed() const { return m_airSpeed; }
+    float getWalkSpeed() const { return m_walkSpeed; }
+    float getRunSpeed() const { return m_runSpeed; }
+    float getCrouchSpeed() const { return m_crouchSpeed; }
+    float getDoubleTapThreshold() const { return m_doubleTapThreshold; }
+    float getGroundAccel() const { return m_groundAccel; }
+    float getGroundDecel() const { return m_groundDecel; }
+    float getAirAccel() const { return m_airAccel; }
+    float getAirDecel() const { return m_airDecel; }
+    bool isRunning() const { return m_isRunning; }
 
     // 获取UI热栏
     std::shared_ptr<UIHotbar> getHotbar() const { return m_hotbar; }
@@ -114,16 +138,18 @@ private:
         float crouchingHeight = PhysicsConstants::PLAYER_HEIGHT_CROUCHING; // 蹲伏高度
     } m_collisionBox;
 
-    // 物理参数
-    float m_mass = PhysicsConstants::PLAYER_MASS;              // 质量（kg）
-    float m_gravity = PhysicsConstants::GRAVITY;               // 重力加速度
-    float m_jumpForce = PhysicsConstants::PLAYER_JUMP_FORCE;   // 跳跃力
-    float m_walkSpeed = PhysicsConstants::PLAYER_WALK_SPEED;   // 行走速度
-    float m_runSpeed = PhysicsConstants::PLAYER_RUN_SPEED;     // 奔跑速度
-    float m_crouchSpeed = PhysicsConstants::PLAYER_CROUCH_SPEED; // 蹲伏速度
-    float m_airControl = PhysicsConstants::PLAYER_AIR_CONTROL; // 空中控制系数
-    float m_frictionGround = PhysicsConstants::FRICTION_GROUND; // 地面摩擦力
-    float m_frictionAir = PhysicsConstants::FRICTION_AIR;      // 空气阻力
+    // 物理参数（开放参数，可通过setter调整）
+    float m_mass = PhysicsConstants::PLAYER_MASS;
+    float m_gravity = PhysicsConstants::GRAVITY;
+    float m_jumpVelocity = PhysicsConstants::PLAYER_JUMP_VELOCITY; // 跳跃初速度 (m/s)
+    float m_airSpeed = PhysicsConstants::PLAYER_AIR_SPEED;         // 空中水平目标速度 (m/s)
+    float m_walkSpeed = PhysicsConstants::PLAYER_WALK_SPEED;       // 行走目标速度 (m/s)
+    float m_runSpeed = PhysicsConstants::PLAYER_RUN_SPEED;         // 跑步目标速度 (m/s)
+    float m_crouchSpeed = PhysicsConstants::PLAYER_CROUCH_SPEED;   // 蹲伏目标速度 (m/s)
+    float m_groundAccel = PhysicsConstants::GROUND_ACCEL;          // 地面加速度 (m/s²)
+    float m_groundDecel = PhysicsConstants::GROUND_DECEL;          // 地面减速度 (m/s²)
+    float m_airAccel = PhysicsConstants::AIR_ACCEL;                // 空中加速度 (m/s²)
+    float m_airDecel = PhysicsConstants::AIR_DECEL;                // 空中减速度 (m/s²)
 
     // 物品栏
     std::vector<std::shared_ptr<Item>> m_hotbarItems;
@@ -164,8 +190,10 @@ private:
     const float ACTION_COOLDOWN = 0.25f;
 
     // 速度控制
-    float m_speedMultiplier = 1.0f;
-    float m_speedChangeTimer = 0.0f;
+    // 三速系统相关变量
+    bool m_isRunning = false;
+    float m_lastForwardPressTime = 0.0f;
+    float m_doubleTapThreshold = PhysicsConstants::DOUBLE_TAP_THRESHOLD; // 双击检测阈值（秒）
 
     // 回调函数
     std::function<void(const glm::ivec3&)> m_onBlockSelectedCallback;
@@ -174,19 +202,14 @@ private:
     // 私有方法
     void updateBlockSelection(ChunkManager& chunkManager, RenderSystem& renderSystem);
     void handleMovementInput(float deltaTime);
-    void updateSpeedMultiplier(float deltaTime);
 
     // 物理相关方法
     void updateCameraPosition();
-    void applyMovement(float deltaTime);
-    void applyGravity(float deltaTime);
-    void applyFriction(float deltaTime);
     void clampVelocity();
 
-    // 碰撞检测
-    CollisionResult checkCollisionWithBlocks(ChunkManager& chunkManager) const;
-    void resolveCollision(const CollisionResult& collision);
-    void resolveMultipleCollisions(std::vector<CollisionResult>& collisions);
+    // 碰撞检测 - 分轴移动+碰撞解算
+    void getAllCollisions(ChunkManager& chunkManager, std::vector<CollisionResult>& collisions) const;
+    void moveAxis(int axis, float displacement, ChunkManager& chunkManager);
 
     // 方块交互处理
     void handleBlockInteraction(ChunkManager& chunkManager);
