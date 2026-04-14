@@ -136,6 +136,7 @@
     <ClCompile Include="scr\iMc.cpp" />
     <ClCompile Include="scr\mode\Mesh.cpp" />
     <ClCompile Include="scr\mode\Model.cpp" />
+    <ClCompile Include="scr\mode\PlayerModel.cpp" />
     <ClCompile Include="scr\particle\ECSParticleSystem.cpp" />
     <ClCompile Include="scr\particle\GPUParticleSystem.cpp" />
     <ClCompile Include="scr\particle\ParticleManager.cpp" />
@@ -164,6 +165,7 @@
     <ClInclude Include="scr\generate\TerrainGenerator.h" />
     <ClInclude Include="scr\mode\Mesh.h" />
     <ClInclude Include="scr\mode\Model.h" />
+    <ClInclude Include="scr\mode\PlayerModel.h" />
     <ClInclude Include="scr\particle\ECSParticleSystem.h" />
     <ClInclude Include="scr\particle\GPUParticleSystem.h" />
     <ClInclude Include="scr\particle\ParticleCommon.h" />

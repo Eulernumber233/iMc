@@ -9,7 +9,7 @@ struct VertexMode {
     glm::vec2 TexCoords;
     glm::vec3 tangent;
     glm::vec3 bitangent;
-    int count = 0;// ÓÃÓÚÆ½¾ù¼ÆËã
+    int count = 0;// ï¿½ï¿½ï¿½ï¿½Æ½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 };
 struct TexCoords {
     unsigned int id;
@@ -18,7 +18,7 @@ struct TexCoords {
 };
 class Mesh {
 public:
-    /*  Íø¸ñÊý¾Ý  */
+    /*  ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½  */
     std::vector<VertexMode> vertices;
     std::vector<unsigned int> indices;
     std::vector<TexCoords> textures;
@@ -26,10 +26,10 @@ public:
     Mesh(std::vector<VertexMode> vertices, std::vector<unsigned int> indices, std::vector<TexCoords> textures);
     void Draw(Shader& shader);
 private:
-    /*  äÖÈ¾Êý¾Ý  */
+    /*  ï¿½ï¿½È¾ï¿½ï¿½ï¿½ï¿½  */
     unsigned int VAO, VBO, EBO;
 
     void setupMesh();
-    // ¼ÆËãÇÐÏßºÍ¸±ÇÐÏß
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ßºÍ¸ï¿½ï¿½ï¿½ï¿½ï¿½
     void calculateTangents();
 };

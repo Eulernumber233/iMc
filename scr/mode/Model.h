@@ -12,7 +12,7 @@ public:
     {
         loadModel(path);
     }
-    void Draw(Shader shader);
+    void Draw(Shader& shader);
 private:
     // ���м��ع�������ȫ�ִ���
     std::vector<TexCoords> textures_loaded;

@@ -10,6 +10,7 @@
 #include "../collision/Ray.h"
 #include "../UI/UIManager.h"
 #include "../mode/Model.h"
+#include "../mode/PlayerModel.h"
 #include "../particle/ParticleManager.h"
 
 struct FaceVertex {
@@ -157,6 +158,7 @@ private:
 
     // 模型
     Model spyglass{ "assert/mode/spyglass_in_hand_obj/spyglass_in_hand.obj" };
+    PlayerModel m_playerModel;
 
     // 渲染器组件
     BlockRenderer m_blockRenderer;
@@ -204,5 +206,8 @@ private:
         float sunShine_near, float sunShine_far, glm::mat4& lightSpaceMatrix);
     void renderOutlines(const glm::mat4& view, const glm::mat4& projection);
     void renderUI();
-    void renderModel(const std::shared_ptr<Camera>camera);
+    void renderModel(const std::shared_ptr<Camera>camera,
+        const glm::mat4& view, const glm::mat4& projection);
+    void renderModel_test(const std::shared_ptr<Camera> camera,
+        const glm::mat4& view, const glm::mat4& projection);
 };

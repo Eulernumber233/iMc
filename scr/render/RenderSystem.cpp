@@ -236,7 +236,11 @@ bool RenderSystem::initialize() {
         return false;
     }
 
-
+    // 初始化玩家模型
+    if (!m_playerModel.initialize("assert/mode/player/wide/steve.png")) {
+        std::cerr << "Failed to initialize PlayerModel!" << std::endl;
+        // 非致命错误，继续运行
+    }
 
     // 配置边框
     BlockOutlineRenderer::OutlineConfig outlineConfig;
@@ -269,14 +273,11 @@ bool RenderSystem::initialize() {
 
     m_modeShader.use();
 
-    m_modeShader.setVec3("light.position", lightPos);
+    m_modeShader.setVec3("light.direction", lightDir);
     m_modeShader.setVec3("light.ambient", 0.4f, 0.4f, 0.4f);
     m_modeShader.setVec3("light.diffuse", 0.9f, 0.9f, 0.9f);
     m_modeShader.setVec3("light.specular", 1.0f, 1.0f, 1.0f);
     m_modeShader.setFloat("shininess", 256.0f);
-    m_modeShader.setFloat("light.constant", 1.0f);
-    m_modeShader.setFloat("light.linear", 0.09f);
-    m_modeShader.setFloat("light.quadratic", 0.032f);
 
     // Sample kernel
     std::uniform_real_distribution<GLfloat> randomFloats(0.0, 1.0);
@@ -641,16 +642,9 @@ bool RenderSystem::createCompositeFBO() {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_compositeColor, 0);
 
-    // 深度纹理（与G-Buffer深度格式一致）
-    glGenTextures(1, &m_compositeDepth);
-    glBindTexture(GL_TEXTURE_2D, m_compositeDepth);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, m_screenWidth, m_screenHeight,
-        0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_compositeDepth, 0);
+    // 共享 G-Buffer 的深度纹理，避免 blit 深度的兼容性问题
+    // m_depthTexture 在 createGBuffer() 中已创建，这里直接附加到 compositeFBO
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_depthTexture, 0);
 
     GLuint attachments[1] = { GL_COLOR_ATTACHMENT0 };
     glDrawBuffers(1, attachments);
@@ -667,7 +661,7 @@ bool RenderSystem::createCompositeFBO() {
 void RenderSystem::destroyCompositeFBO() {
     if (m_compositeFBO) glDeleteFramebuffers(1, &m_compositeFBO);
     if (m_compositeColor) glDeleteTextures(1, &m_compositeColor);
-    if (m_compositeDepth) glDeleteTextures(1, &m_compositeDepth);
+    // 注意：不删除深度纹理，它是 G-Buffer 的 m_depthTexture，由 destroyGBuffer() 管理
     m_compositeFBO = 0;
     m_compositeColor = 0;
     m_compositeDepth = 0;
@@ -706,11 +700,11 @@ void RenderSystem::render(const ChunkManager& chunkManager,
     std::shared_ptr<Camera> camera,
     float deltaTime
 ) {
-    //glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    //glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-    //glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    //renderModel(camera);
-    //return;
+      //glBindFramebuffer(GL_FRAMEBUFFER, 0);
+      //glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+      //glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+      //renderModel(camera);
+      //return;
 
     m_currentTime += deltaTime;
 
@@ -738,23 +732,27 @@ void RenderSystem::render(const ChunkManager& chunkManager,
     // 4. 光照通道：计算结果到 lightingFBO
     lightingPass(camera, sunShine_near, sunShine_far, lightSpaceMatrix);
 
-    // 5. 将光照颜色和 G-Buffer 深度复制到合成 FBO
+    // 5. 将光照颜色复制到合成 FBO
+    //    深度无需 blit：compositeFBO 直接共享 G-Buffer 的深度纹理
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_lightingFBO);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_compositeFBO);
     glBlitFramebuffer(0, 0, m_screenWidth, m_screenHeight,
         0, 0, m_screenWidth, m_screenHeight,
         GL_COLOR_BUFFER_BIT, GL_LINEAR);
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, m_gBuffer);
-    glBlitFramebuffer(0, 0, m_screenWidth, m_screenHeight,
-        0, 0, m_screenWidth, m_screenHeight,
-        GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+
     // 6. 绑定合成 FBO，开始正向渲染
+    //    此时深度缓冲已包含 G-Buffer 中的场景深度（共享纹理）
     glBindFramebuffer(GL_FRAMEBUFFER, m_compositeFBO);
     glViewport(0, 0, m_screenWidth, m_screenHeight);
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
 
 
     // 6.1 渲染模型（不透明，写入深度）
-    //renderModel(camera);  // 内部已开启深度测试和深度写入
+    // 必须传入与 G-Buffer 一致的 view/projection，否则模型与场景投影不匹配
+    // （Camera::GetProjectionMatrix() 的 AspectRatio 可能与窗口实际比例不同）
+    renderModel(camera, view, projection);  // 内部已开启深度测试和深度写入
+    renderModel_test(camera, view, projection);
 
     // 6.2 渲染粒子（半透明，深度测试开启，深度写入关闭）
     // 确保粒子系统内部已设置 glDepthMask(GL_FALSE)
@@ -789,7 +787,7 @@ void RenderSystem::renderOutlines(const glm::mat4& view, const glm::mat4& projec
     m_outlineRenderer.updateTime(m_currentTime);
 
     // 设置深度纹理用于遮挡检测
-    m_outlineRenderer.setDepthTexture(m_compositeDepth);
+    m_outlineRenderer.setDepthTexture(m_depthTexture);
 
     // 渲染选中方块的边框
     m_outlineRenderer.render(m_selectedBlockPos, view, projection, m_currentTime);
@@ -958,25 +956,58 @@ void RenderSystem::lightingPass(const std::shared_ptr<Camera>camera
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-void RenderSystem::renderModel(const std::shared_ptr<Camera> camera)
+void RenderSystem::renderModel(const std::shared_ptr<Camera> camera,
+    const glm::mat4& view, const glm::mat4& projection)
 {
-    // 测试模型加载和渲染
+    // 渲染模型（正向渲染到合成FBO，保留已有的颜色和深度）
     glEnable(GL_DEPTH_TEST);
     glDepthMask(GL_TRUE);          // 确保写入深度
     glEnable(GL_CULL_FACE);
-    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    // 清除延迟渲染残留的纹理绑定，避免模型着色器采样到G-Buffer纹理
+    for (int i = 0; i < 6; i++) {
+        glActiveTexture(GL_TEXTURE0 + i);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+    glActiveTexture(GL_TEXTURE0);
 
     m_modeShader.use();
-    m_modeShader.setMat4("projection", camera->GetProjectionMatrix());
-    m_modeShader.setMat4("view", camera->GetViewMatrix());
+    m_modeShader.setMat4("projection", projection);
+    m_modeShader.setMat4("view", view);
     m_modeShader.setVec3("viewPos", camera->Position);
+    m_modeShader.setVec3("light.direction", lightDir);
+
+    // 绘制 Steve 人物模型
+    m_playerModel.draw(m_modeShader, glm::vec3(0.0f, 43.5f, -3.0f), 0.0f);
+}
+
+void RenderSystem::renderModel_test(const std::shared_ptr<Camera> camera,
+    const glm::mat4& view, const glm::mat4& projection)
+{
+    // 渲染模型（正向渲染到合成FBO，保留已有的颜色和深度）
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);          // 确保写入深度
+    glEnable(GL_CULL_FACE);
+
+    // 清除延迟渲染残留的纹理绑定，避免模型着色器采样到G-Buffer纹理
+    for (int i = 0; i < 6; i++) {
+        glActiveTexture(GL_TEXTURE0 + i);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+    glActiveTexture(GL_TEXTURE0);
+
+    m_modeShader.use();
+    m_modeShader.setMat4("projection", projection);
+    m_modeShader.setMat4("view", view);
+    m_modeShader.setVec3("viewPos", camera->Position);
+    m_modeShader.setVec3("light.direction", lightDir);
 
     glm::mat4 model = glm::mat4(1.0f);
-    model = glm::translate(model, glm::vec3(0.0f, 70.0f, -3.0f));
+    model = glm::translate(model, glm::vec3(2.0f, 43.5f, -3.0f));
     model = glm::scale(model, glm::vec3(1.1f, 1.1f, 1.1f));
     //model = glm::rotate(model, glm::radians((float)glfwGetTime() * 50.0f), glm::vec3(0.0f, 1.0f, 0.0f));
     m_modeShader.setMat4("model", model);
 
     spyglass.Draw(m_modeShader);
+
 }
