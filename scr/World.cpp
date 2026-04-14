@@ -96,7 +96,7 @@ int World::run() {
             (float)SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, 1000.0f);
 
         // 渲染帧
-        renderSystem.render(*m_chunkManager, view, projection, camera, deltaTime);
+        renderSystem.render(*m_chunkManager, view, projection, camera, deltaTime, m_player.get());
 
         glfwSwapBuffers(m_window);
         glfwPollEvents();
@@ -126,6 +126,11 @@ void World::processKey(int key, int action) {
     if (key == GLFW_KEY_G && action == GLFW_PRESS) {
         if (m_renderSystem) {
             m_renderSystem->toggleWeather();
+        }
+    }
+    if (key == GLFW_KEY_F3 && action == GLFW_PRESS) {
+        if (m_player) {
+            m_player->toggleThirdPerson();
         }
     }
 

@@ -1,6 +1,7 @@
 #pragma once
 #include "../core.h"
 #include "../Shader.h"
+#include "PlayerAnimator.h"
 #include <vector>
 #include <string>
 
@@ -28,10 +29,15 @@ public:
     // 加载皮肤纹理并创建几何体
     bool initialize(const std::string& skinPath);
 
-    // 绘制整个模型（静态站立姿势）
+    // 绘制整个模型（静态站立姿势，保留用于兼容）
     // worldPos: 模型脚底中心的世界坐标
     // yaw: 模型朝向（绕Y轴旋转，弧度）
     void draw(Shader& shader, const glm::vec3& worldPos, float yaw = 0.0f);
+
+    // 按照 PlayerPose 绘制（动画姿态）
+    // worldPos: 模型脚底中心的世界坐标
+    // pose: 来自 PlayerAnimator 的姿态
+    void drawPosed(Shader& shader, const glm::vec3& worldPos, const PlayerPose& pose);
 
     // 获取皮肤纹理 ID
     GLuint getTextureID() const { return m_skinTexture; }

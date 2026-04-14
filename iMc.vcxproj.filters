@@ -72,6 +72,9 @@
     <ClCompile Include="scr\mode\PlayerModel.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="scr\mode\PlayerAnimator.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="scr\UI\UIHotbar.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
@@ -150,6 +153,9 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="scr\mode\PlayerModel.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\mode\PlayerAnimator.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="scr\UI\UIHotbar.h">

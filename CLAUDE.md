@@ -16,6 +16,8 @@ iMc is a Minecraft-inspired voxel rendering engine built with modern OpenGL (3.3
 - **Linked libs**: `glew32[d].lib`, `glfw3.lib`, `opengl32.lib`, `assimp-vc143-mt[d].lib`, `unit.lib`, `json_vc71_libmt[d].lib`
 - **DLLs**: Pre-build step copies DLLs from `bin/debug/` or `bin/release/` to the output directory
 - **Build**: Open `iMc.sln` in VS2022, select x64 Debug/Release, build and run
+- **Line endings**: All source files must use **CRLF** (Windows) line endings. When creating new `.h`/`.cpp` files, convert them to CRLF (e.g. `unix2dos file.cpp`) before building. LF-only files can cause MSVC to misparse them, resulting in spurious errors like "identifier undeclared" or "not a member of struct" for symbols that are clearly present in the source.
+- **File encoding**: Prefer UTF-8 with BOM for files containing Chinese characters (comments), to match the existing files and avoid MSVC treating them as GBK. Pure-ASCII files can be UTF-8 without BOM.
 
 ## Architecture
 

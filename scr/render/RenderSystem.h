@@ -10,8 +10,9 @@
 #include "../collision/Ray.h"
 #include "../UI/UIManager.h"
 #include "../mode/Model.h"
-#include "../mode/PlayerModel.h"
 #include "../particle/ParticleManager.h"
+
+class Player;
 
 struct FaceVertex {
     glm::vec3 position;
@@ -62,7 +63,8 @@ public:
         const glm::mat4& view,
         const glm::mat4& projection,
         std::shared_ptr<Camera> camera,
-        float deltaTime);
+        float deltaTime,
+        Player* player = nullptr);
 
     void setSelectedBlock(const glm::ivec3& blockPos) {
         m_selectedBlockPos = blockPos;
@@ -158,7 +160,6 @@ private:
 
     // 模型
     Model spyglass{ "assert/mode/spyglass_in_hand_obj/spyglass_in_hand.obj" };
-    PlayerModel m_playerModel;
 
     // 渲染器组件
     BlockRenderer m_blockRenderer;
@@ -207,7 +208,7 @@ private:
     void renderOutlines(const glm::mat4& view, const glm::mat4& projection);
     void renderUI();
     void renderModel(const std::shared_ptr<Camera>camera,
-        const glm::mat4& view, const glm::mat4& projection);
+        const glm::mat4& view, const glm::mat4& projection, Player* player);
     void renderModel_test(const std::shared_ptr<Camera> camera,
         const glm::mat4& view, const glm::mat4& projection);
 };

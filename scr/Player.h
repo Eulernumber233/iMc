@@ -5,13 +5,11 @@
 #include "collision/AABB.h"
 #include "collision/PhysicsConstants.h"
 #include "Data.h"
+#include "mode/PlayerModel.h"
+#include "mode/PlayerAnimator.h"
 #include <memory>
 #include <vector>
 #include <functional>
-
-// 前向声明
-class ChunkManager;
-class RenderSystem;
 
 // 前向声明
 class ChunkManager;
@@ -40,6 +38,22 @@ public:
 
     // 摄像机访问
     std::shared_ptr<Camera> getCamera() const { return m_camera; }
+
+    // 模型访问（由 RenderSystem 调用进行绘制）
+    // 返回 nullptr 表示尚未初始化或加载失败
+    PlayerModel* getModel() { return m_model.get(); }
+    const PlayerPose& getPose() const { return m_animator.getPose(); }
+    PlayerAnimator& getAnimator() { return m_animator; }
+
+    // 模型脚底中心的世界坐标（供 RenderSystem 绘制时使用）
+    glm::vec3 getModelFootPosition() const;
+
+    // 第一/第三人称切换（F3）
+    bool isThirdPerson() const { return m_thirdPerson; }
+    void toggleThirdPerson() { m_thirdPerson = !m_thirdPerson; updateCameraPosition(); }
+
+    // 是否应渲染自身模型（第一人称下一般不渲染）
+    bool shouldRenderOwnModel() const { return m_thirdPerson; }
 
     // 玩家物理属性访问
     glm::vec3 getPosition() const { return m_position; }  // 玩家碰撞箱中心
@@ -124,6 +138,12 @@ private:
     // 摄像机
     std::shared_ptr<Camera> m_camera;
     GLFWwindow* m_window;
+
+    // 模型与动画器
+    std::unique_ptr<PlayerModel> m_model;
+    PlayerAnimator m_animator;
+    bool m_thirdPerson = false;
+    float m_thirdPersonDistance = 4.0f; // 第三人称相机距离玩家的距离（方块）
 
     // 玩家物理属性
     glm::vec3 m_position;      // 玩家碰撞箱中心（世界坐标）

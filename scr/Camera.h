@@ -51,6 +51,8 @@ public:
     float FarPlane;
     float FOV;
 
+    // 是否禁用视锥剔除（第二人称等相机朝向与 Yaw/Pitch 不一致的场景下禁用）
+    bool FrustumCullingEnabled = true;
 public:
     // 构造函数
     Camera(glm::vec3 position = glm::vec3(0.0f, 70.0f, 0.0f),

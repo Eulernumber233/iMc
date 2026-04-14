@@ -61,12 +61,11 @@ bool PlayerModel::initialize(const std::string& skinPath) {
     // origin 是部件底部中心在模型坐标的位置（Y=0 在脚底）
 
     // 头 (Head): 8x8x8, UV 起点 (0, 0)
-    // 位于身体顶部，Y=24 是头顶，Y=16 是脖子
-    // origin 放在头部底面中心 = (0, 24, 0)，pivot = (0, 0, 0) 相对于origin
+    // Y: 24(脖子)~32(头顶)。origin 放在头顶，向下生长到 24
     createBoxPart(HEAD,
         glm::vec3(8, 8, 8),       // size: 8宽 8高 8深
         glm::vec2(0, 0),          // UV origin
-        glm::vec3(0, 24, 0),      // origin (头顶)
+        glm::vec3(0, 32, 0),      // origin (头顶)
         glm::vec3(0, -4, 0));     // pivot (头部中心)
 
     // 身体 (Body): 8x12x4, UV 起点 (16, 16)
@@ -78,19 +77,20 @@ bool PlayerModel::initialize(const std::string& skinPath) {
         glm::vec3(0, 0, 0));
 
     // 右臂 (Right Arm): 4x12x4, UV 起点 (40, 16)
-    // 在身体右侧，X偏移 = -(4+4)/2 = -6（身体半宽4 + 臂半宽2）
+    // 肩膀 X 轴心 = -6 (身体半宽4 + 手臂半宽2，紧贴不重叠)
+    // 静止时手臂几何占 Y:[12,24]，与身体齐平；pivot y=22 仅用于动画摆动
     createBoxPart(RIGHT_ARM,
         glm::vec3(4, 12, 4),
         glm::vec2(40, 16),
-        glm::vec3(-6, 24, 0),     // origin (肩膀顶部)
-        glm::vec3(0, 0, 0));      // pivot (肩膀)
+        glm::vec3(-6, 24, 0),     // origin (肩膀顶部，与身体顶齐平)
+        glm::vec3(0, -2, 0));     // pivot (肩膀 y=22，相对 origin 下移 2)
 
     // 左臂 (Left Arm): 4x12x4, UV 起点 (32, 48)
     createBoxPart(LEFT_ARM,
         glm::vec3(4, 12, 4),
         glm::vec2(32, 48),
         glm::vec3(6, 24, 0),
-        glm::vec3(0, 0, 0));
+        glm::vec3(0, -2, 0));
 
     // 右腿 (Right Leg): 4x12x4, UV 起点 (0, 16)
     createBoxPart(RIGHT_LEG,
@@ -188,14 +188,17 @@ void PlayerModel::createBoxPart(Part part, glm::vec3 size,
         (u0 + D + W) / TEX_W,   (v0 + D) / TEX_H);
 
     // Bottom face (-Y): UV区域 (u0+D+W, v0, u0+D+2W, v0+D)
+    // MC 皮肤约定：底面 UV 存储时垂直翻转，故 v0 对应前边、v0+D 对应后边
+    // 保持与其他面一致的顶点顺序（左下后、右下后、右下前、左下前），
+    // 仅对 UV v 方向反向映射来实现翻转
     addFace(vertices, indices,
         glm::vec3(x0, y0, z0),   // 左下后
         glm::vec3(x1, y0, z0),   // 右下后
         glm::vec3(x1, y0, z1),   // 右下前
         glm::vec3(x0, y0, z1),   // 左下前
         glm::vec3(0, -1, 0),
-        (u0 + D + W) / TEX_W,       v0 / TEX_H,
-        (u0 + D + 2 * W) / TEX_W,   (v0 + D) / TEX_H);
+        (u0 + D + W) / TEX_W,       (v0 + D) / TEX_H,
+        (u0 + D + 2 * W) / TEX_W,   v0 / TEX_H);
 
     // 存储部件信息
     m_parts[part].origin = origin * PIXEL_SCALE;
@@ -300,10 +303,76 @@ void PlayerModel::draw(Shader& shader, const glm::vec3& worldPos, float yaw) {
         // 3. 移动到部件的 origin 位置
         model = glm::translate(model, m_parts[i].origin);
 
-        // 4. 后续可以在这里添加部件局部旋转（动画）
-        // model = glm::translate(model, m_parts[i].pivot);
-        // model = glm::rotate(model, angle, axis);
-        // model = glm::translate(model, -m_parts[i].pivot);
+        shader.setMat4("model", model);
+
+        glBindVertexArray(m_parts[i].VAO);
+        glDrawElements(GL_TRIANGLES, m_parts[i].indexCount, GL_UNSIGNED_INT, 0);
+    }
+    glBindVertexArray(0);
+}
+
+void PlayerModel::drawPosed(Shader& shader, const glm::vec3& worldPos, const PlayerPose& pose) {
+    // 绑定皮肤纹理
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_skinTexture);
+    shader.setInt("texture_diffuse1", 0);
+
+    // 根变换：世界位置 -> 身体整体偏移 -> 身体朝向（yaw） -> 身体前倾（pitch）
+    // 身体前倾以胯部（y = 12 像素 = 0.75 模型单位）作为枢轴，避免绕脚底翻转
+    glm::mat4 root = glm::mat4(1.0f);
+    root = glm::translate(root, worldPos + pose.rootOffset);
+    root = glm::rotate(root, pose.bodyYaw, glm::vec3(0, 1, 0));
+
+    const glm::vec3 hipPivot = glm::vec3(0.0f, 12.0f / 16.0f, 0.0f);
+    glm::mat4 bodyTilt = glm::mat4(1.0f);
+    if (pose.bodyPitch != 0.0f) {
+        bodyTilt = glm::translate(bodyTilt, hipPivot);
+        bodyTilt = glm::rotate(bodyTilt, pose.bodyPitch, glm::vec3(1, 0, 0));
+        bodyTilt = glm::translate(bodyTilt, -hipPivot);
+    }
+
+    for (int i = 0; i < PART_COUNT; i++) {
+        if (m_parts[i].VAO == 0) continue;
+
+        // 每个部件先应用身体根变换（位置+yaw+身体前倾）
+        glm::mat4 model = root * bodyTilt;
+
+        // 移到部件 origin
+        model = glm::translate(model, m_parts[i].origin);
+
+        // 部件级局部旋转（绕 pivot）
+        // pivot 以部件 origin 为原点的偏移
+        glm::vec3 pv = m_parts[i].pivot;
+
+        auto applyJointRotation = [&](float pitch, float roll, float yaw) {
+            if (pitch == 0.0f && roll == 0.0f && yaw == 0.0f) return;
+            model = glm::translate(model, pv);
+            if (yaw != 0.0f)   model = glm::rotate(model, yaw,   glm::vec3(0, 1, 0));
+            if (pitch != 0.0f) model = glm::rotate(model, pitch, glm::vec3(1, 0, 0));
+            if (roll != 0.0f)  model = glm::rotate(model, roll,  glm::vec3(0, 0, 1));
+            model = glm::translate(model, -pv);
+        };
+
+        switch (i) {
+        case HEAD:
+            applyJointRotation(pose.headPitch, 0.0f, pose.headYaw);
+            break;
+        case RIGHT_ARM:
+            applyJointRotation(pose.rightArmPitch, pose.rightArmRoll, 0.0f);
+            break;
+        case LEFT_ARM:
+            applyJointRotation(pose.leftArmPitch, pose.leftArmRoll, 0.0f);
+            break;
+        case RIGHT_LEG:
+            applyJointRotation(pose.rightLegPitch, 0.0f, 0.0f);
+            break;
+        case LEFT_LEG:
+            applyJointRotation(pose.leftLegPitch, 0.0f, 0.0f);
+            break;
+        case BODY:
+        default:
+            break;
+        }
 
         shader.setMat4("model", model);
 

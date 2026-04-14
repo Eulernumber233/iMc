@@ -66,6 +66,13 @@ void Player::initialize() {
     }
     // 注册到UI管理器
     UIManager::getInstance().addComponent(m_hotbar);
+
+    // 创建并加载玩家模型
+    m_model = std::make_unique<PlayerModel>();
+    if (!m_model->initialize("assert/mode/player/wide/steve.png")) {
+        std::cerr << "Player: Failed to initialize PlayerModel" << std::endl;
+        m_model.reset();
+    }
 }
 
 // ==================== 物理属性访问 ====================
@@ -247,7 +254,22 @@ void Player::moveAxis(int axis, float displacement, ChunkManager& chunkManager) 
 
 void Player::updateCameraPosition() {
     glm::vec3 cameraOffset = m_isCrouching ? m_cameraOffsetCrouching : m_cameraOffsetStanding;
-    m_camera->Position = m_position + cameraOffset;
+    glm::vec3 eyePos = m_position + cameraOffset;
+    if (m_thirdPerson) {
+        // 第三人称：相机沿当前 Front 反方向退后 m_thirdPersonDistance
+        // 不做碰撞检测，允许穿墙（简单实现）
+        m_camera->Position = eyePos - m_camera->Front * m_thirdPersonDistance;
+    } else {
+        m_camera->Position = eyePos;
+    }
+}
+
+glm::vec3 Player::getModelFootPosition() const {
+    // 玩家碰撞箱中心 -> 脚底：Y 减去当前半身高
+    // 蹲伏时碰撞箱较矮，脚底仍在同一水平面上（中心 - 半高）
+    glm::vec3 foot = m_position;
+    foot.y -= m_collisionBox.height * 0.5f;
+    return foot;
 }
 
 void Player::clampVelocity() {
@@ -443,25 +465,35 @@ void Player::update(float deltaTime, ChunkManager& chunkManager, RenderSystem& r
         // 观察者模式仍然更新方块选择和交互
         updateBlockSelection(chunkManager, renderSystem);
         handleBlockInteraction(chunkManager);
-        return;
+    } else {
+        // ---- 普通模式 ----
+        handleMovementInput(deltaTime);
+
+        // 跑动状态自动退出：松开前进键或下蹲时停止跑动
+        if (m_isRunning && (!m_moveInput.forward || m_isCrouching)) {
+            m_isRunning = false;
+        }
+
+        // 更新物理状态
+        updatePhysics(deltaTime, chunkManager);
+
+        // 更新方块选择
+        updateBlockSelection(chunkManager, renderSystem);
+
+        // 处理方块交互
+        handleBlockInteraction(chunkManager);
     }
 
-    // ---- 普通模式 ----
-    handleMovementInput(deltaTime);
-
-    // 跑动状态自动退出：松开前进键或下蹲时停止跑动
-    if (m_isRunning && (!m_moveInput.forward || m_isCrouching)) {
-        m_isRunning = false;
-    }
-
-    // 更新物理状态
-    updatePhysics(deltaTime, chunkManager);
-
-    // 更新方块选择
-    updateBlockSelection(chunkManager, renderSystem);
-
-    // 处理方块交互
-    handleBlockInteraction(chunkManager);
+    // ---- 动画更新（观察者和普通模式都推进，保证模型姿态合理） ----
+    PlayerAnimator::Input animIn;
+    animIn.horizontalVelocity = glm::vec3(m_velocity.x, 0.0f, m_velocity.z);
+    animIn.walkSpeed = m_walkSpeed;
+    animIn.onGround = m_onGround;
+    animIn.crouching = m_isCrouching;
+    animIn.running = m_isRunning;
+    animIn.cameraYaw = m_camera->Yaw;
+    animIn.cameraPitch = m_camera->Pitch;
+    m_animator.update(deltaTime, animIn);
 }
 
 // ==================== 输入处理 ====================
@@ -488,13 +520,24 @@ void Player::processMouseMovement(float xoffset, float yoffset) {
 
     // 更新摄像机向量
     m_camera->UpdateCameraVectors();
+
+    // 第三人称：朝向改变后需要重新计算相机位置（绕玩家公转）
+    if (m_thirdPerson) {
+        updateCameraPosition();
+    }
 }
 
 void Player::processMouseButton(int button, int action) {
     if (button == GLFW_MOUSE_BUTTON_LEFT) {
         m_leftMousePressed = (action == GLFW_PRESS);
+        // 左键按下瞬间即播放一次挥手（即便未命中方块/在冷却中，保证点击反馈）
+        // 长按持续破坏时，handleBlockInteraction 在每次破坏成功时会再次触发重置
+        if (action == GLFW_PRESS) {
+            m_animator.triggerSwingArm();
+        }
     } else if (button == GLFW_MOUSE_BUTTON_RIGHT) {
         m_rightMousePressed = (action == GLFW_PRESS);
+        // 右键不在按下时挥手：按用户要求，仅在成功放置/交互时（handleBlockInteraction）触发
     }
 }
 
@@ -580,22 +623,24 @@ void Player::handleMovementInput(float deltaTime) {
 // ==================== 方块交互 ====================
 
 void Player::handleBlockInteraction(ChunkManager& chunkManager) {
-    // 处理方块破坏
+    // 处理方块破坏：长按时每 cooldown 挥一次（MC 风格）
     if (m_leftMousePressed) {
         float now = static_cast<float>(glfwGetTime());
         if (now - m_lastBreakTime >= ACTION_COOLDOWN) {
             if (tryBreakBlock(chunkManager)) {
                 m_lastBreakTime = now;
+                m_animator.triggerSwingArm();
             }
         }
     }
 
-    // 处理方块放置
+    // 处理方块放置：成功放置时挥手（将来用于其他交互也一样）
     if (m_rightMousePressed) {
         float now = static_cast<float>(glfwGetTime());
         if (now - m_lastPlaceTime >= ACTION_COOLDOWN) {
             if (tryPlaceBlock(chunkManager)) {
                 m_lastPlaceTime = now;
+                m_animator.triggerSwingArm();
             }
         }
     }

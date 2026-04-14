@@ -349,28 +349,28 @@ void Chunk::print_m_instanceData() const
 bool Chunk::is_can_render(std::shared_ptr<Camera> camera)
 {
     if (!camera) return true;
+    // 第二人称（正面视角）下相机朝向被手动翻转，camera->Yaw/Pitch 构造的视锥已不再代表实际渲染视野；
+    // 此时跳过视锥剔除，只做距离剔除
+    const bool frustumEnabled = camera->FrustumCullingEnabled;
 
-    // 简单的缓存机制：如果相机参数未变，使用缓存结果
+    // 简单缓存机制：若相机位置变化不大则使用缓存
     static int frameCount = 0;
     frameCount++;
 
-    // 检查缓存是否有效
     bool cameraMoved = (glm::distance(m_cachedCameraPos, camera->Position) > 1.0f);
     bool fovChanged = (std::abs(m_cachedCameraFOV - camera->FOV) > 0.1f);
 
-    // 如果相机参数变化或超过10帧，重新计算
     if (cameraMoved || fovChanged || (frameCount - m_lastVisibilityFrame > 10)) {
         m_cachedCameraPos = camera->Position;
         m_cachedCameraFOV = camera->FOV;
         m_lastVisibilityFrame = frameCount;
 
-        // 获取视锥体平面
-        auto planes = camera->GetFrustumPlanes();       
-
-        // 检查AABB是否在视锥体内
-        if (!isAABBInFrustum(m_minPos, m_maxPos, planes)) {
-            m_cachedVisibility = false;
-            return false;
+        if (frustumEnabled) {
+            auto planes = camera->GetFrustumPlanes();
+            if (!isAABBInFrustum(m_minPos, m_maxPos, planes)) {
+                m_cachedVisibility = false;
+                return false;
+            }
         }
 
         // 距离剔除
@@ -382,6 +382,7 @@ bool Chunk::is_can_render(std::shared_ptr<Camera> camera)
     }
     return m_cachedVisibility;
 }
+
 
 // 判断AABB是否在视锥体内（使用优化的方法）
 bool Chunk::isAABBInFrustum(const glm::vec3& min, const glm::vec3& max,

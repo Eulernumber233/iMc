@@ -4,6 +4,8 @@
 #include <sstream>
 #include "../TextureMgr.h"
 #include "../UI/UIHotbar.h"
+#include "../Player.h"
+#include "../mode/PlayerModel.h"
 #include <random>
 BlockRenderer::BlockRenderer()
     : VAO(0), VBO(0), m_instanceDataVBO(0), EBO(0) {
@@ -236,11 +238,7 @@ bool RenderSystem::initialize() {
         return false;
     }
 
-    // 初始化玩家模型
-    if (!m_playerModel.initialize("assert/mode/player/wide/steve.png")) {
-        std::cerr << "Failed to initialize PlayerModel!" << std::endl;
-        // 非致命错误，继续运行
-    }
+    // 玩家模型由 Player 自己持有和初始化，此处不再加载
 
     // 配置边框
     BlockOutlineRenderer::OutlineConfig outlineConfig;
@@ -698,7 +696,8 @@ void RenderSystem::render(const ChunkManager& chunkManager,
     const glm::mat4& view,
     const glm::mat4& projection,
     std::shared_ptr<Camera> camera,
-    float deltaTime
+    float deltaTime,
+    Player* player
 ) {
       //glBindFramebuffer(GL_FRAMEBUFFER, 0);
       //glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
@@ -709,7 +708,7 @@ void RenderSystem::render(const ChunkManager& chunkManager,
     m_currentTime += deltaTime;
 
     // 更新光源位置
-    move_DirLight(deltaTime);
+    //move_DirLight(deltaTime);
 
     // 更新粒子系统
     // 获取可见区块位置信息
@@ -751,14 +750,14 @@ void RenderSystem::render(const ChunkManager& chunkManager,
     // 6.1 渲染模型（不透明，写入深度）
     // 必须传入与 G-Buffer 一致的 view/projection，否则模型与场景投影不匹配
     // （Camera::GetProjectionMatrix() 的 AspectRatio 可能与窗口实际比例不同）
-    renderModel(camera, view, projection);  // 内部已开启深度测试和深度写入
-    renderModel_test(camera, view, projection);
+    renderModel(camera, view, projection, player);  // 内部已开启深度测试和深度写入
+    //renderModel_test(camera, view, projection);
 
     // 6.2 渲染粒子（半透明，深度测试开启，深度写入关闭）
     // 确保粒子系统内部已设置 glDepthMask(GL_FALSE)
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    m_particleManager.render(camera->GetViewMatrix(), camera->GetProjectionMatrix());
+    m_particleManager.render(view, projection);
     glDisable(GL_BLEND);
 
     //// 6.3 渲染边框（根据配置，通常关闭深度测试）
@@ -957,8 +956,14 @@ void RenderSystem::lightingPass(const std::shared_ptr<Camera>camera
 }
 
 void RenderSystem::renderModel(const std::shared_ptr<Camera> camera,
-    const glm::mat4& view, const glm::mat4& projection)
+    const glm::mat4& view, const glm::mat4& projection, Player* player)
 {
+    if (!player) return;
+    PlayerModel* model = player->getModel();
+    if (!model) return;
+    // 第一人称时不渲染自己的模型（避免从头部内部看到贴图）
+    if (!player->shouldRenderOwnModel()) return;
+
     // 渲染模型（正向渲染到合成FBO，保留已有的颜色和深度）
     glEnable(GL_DEPTH_TEST);
     glDepthMask(GL_TRUE);          // 确保写入深度
@@ -977,8 +982,8 @@ void RenderSystem::renderModel(const std::shared_ptr<Camera> camera,
     m_modeShader.setVec3("viewPos", camera->Position);
     m_modeShader.setVec3("light.direction", lightDir);
 
-    // 绘制 Steve 人物模型
-    m_playerModel.draw(m_modeShader, glm::vec3(0.0f, 43.5f, -3.0f), 0.0f);
+    // 使用动画姿态绘制
+    model->drawPosed(m_modeShader, player->getModelFootPosition(), player->getPose());
 }
 
 void RenderSystem::renderModel_test(const std::shared_ptr<Camera> camera,
