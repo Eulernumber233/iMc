@@ -45,17 +45,12 @@ void Player::initialize() {
     // 初始化物品栏
     initHotbarItems();
 
-    // 创建UI热栏
+    // 创建UI热栏（像素完美，参照原版 MC 度量）
     m_hotbar = std::make_shared<UIHotbar>("hotbar", 10);
-
-    // 设置热栏位置（屏幕底部居中）
-    float hotbarWidth = 500.0f;
-    float hotbarHeight = 60.0f;
-    float hotbarX = (SCR_WIDTH - hotbarWidth) / 2.0f;
-    float hotbarY = 20.0f;
-
-    m_hotbar->setPosition(hotbarX, hotbarY);
-    m_hotbar->setSize(hotbarWidth, hotbarHeight);
+    m_hotbar->setGuiScaleForScreen(SCR_WIDTH, SCR_HEIGHT);
+    m_hotbar->anchor = glm::vec2(0.5f, 0.0f);
+    m_hotbar->setPosition(SCR_WIDTH * 0.5f, static_cast<float>(2 * m_hotbar->getGuiScale()));
+    m_hotbar->zIndex = 50;
 
     // 设置物品图标
     for (int i = 0; i < m_hotbarItems.size() && i < 10; ++i) {

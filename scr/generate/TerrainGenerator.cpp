@@ -156,17 +156,17 @@ void TerrainGenerator::fillChunk(Chunk* chunk, const glm::ivec2& chunkPos) {
                 // ÉèÖÃ·½¿é
                 chunk->setBlock(localX, y, localZ, block);
             }
-            chunk->setBlock(5, 63, 5, BLOCK_WOOD);
-            chunk->setBlock(6, 63, 5, BLOCK_WOOD);
-            chunk->setBlock(7, 63, 5, BLOCK_WOOD);
-            chunk->setBlock(8, 63, 5, BLOCK_WOOD);
-            chunk->setBlock(9, 63, 5, BLOCK_WOOD);
-            chunk->setBlock(9, 63, 6, BLOCK_WOOD);
-            chunk->setBlock(9, 63, 7, BLOCK_WOOD);
-            chunk->setBlock(9, 63, 4, BLOCK_WOOD);
-            chunk->setBlock(0, 63, 0, BLOCK_STONE);
-            chunk->setBlock(1, 63, 1, BLOCK_STONE);
-            chunk->setBlock(3, 63, 0, BLOCK_STONE);
+            //chunk->setBlock(5, 63, 5, BLOCK_WOOD);
+            //chunk->setBlock(6, 63, 5, BLOCK_WOOD);
+            //chunk->setBlock(7, 63, 5, BLOCK_WOOD);
+            //chunk->setBlock(8, 63, 5, BLOCK_WOOD);
+            //chunk->setBlock(9, 63, 5, BLOCK_WOOD);
+            //chunk->setBlock(9, 63, 6, BLOCK_WOOD);
+            //chunk->setBlock(9, 63, 7, BLOCK_WOOD);
+            //chunk->setBlock(9, 63, 4, BLOCK_WOOD);
+            //chunk->setBlock(0, 63, 0, BLOCK_STONE);
+            //chunk->setBlock(1, 63, 1, BLOCK_STONE);
+            //chunk->setBlock(3, 63, 0, BLOCK_STONE);
         }
     }
 

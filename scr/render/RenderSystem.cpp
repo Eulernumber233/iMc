@@ -437,27 +437,12 @@ void RenderSystem::createSampleUI() {
     //m_uiManager.addComponent(crosshair2);
     //m_uiManager.addComponent(inventory);
 
-    // 创建物品栏
+    // 创建物品栏（像素完美，参照原版 MC 度量）
     auto hotbar = std::make_shared<UIHotbar>("hotbar", 10);
-
-    // 设置布局参数
-    UIHotbar::LayoutParams params;
-    params.baseSlotSize = 40.0f;
-    params.borderScaleNormal = 0.95f;
-    params.borderScaleSelected = 0.80f;
-    params.iconScale = 0.58f;
-    params.iconOffsetX = 3.0f;
-    params.iconOffsetY = -4.0f;
-    params.slotSpacing = -13.0f;
-    params.overallScale = 1.0f;
-    hotbar->setLayoutParams(params);
-
-    float slotSize = m_screenWidth * 0.06f; // 槽位大小为屏幕宽度的6%
-    float hotbarWidth = slotSize * 10.0f;   // 10个槽位紧密排列
-    float hotbarHeight = slotSize;          // 槽位为正方形
-    hotbar->setSize(hotbarWidth, hotbarHeight);
-    hotbar->setPosition(m_screenWidth * 0.5f, 30); // 底部居中，距离底部30像素
-    hotbar->anchor = glm::vec2(0.5f, 0.0f); // 水平居中，垂直底部对齐
+    hotbar->setGuiScaleForScreen(m_screenWidth, m_screenHeight);
+    hotbar->anchor = glm::vec2(0.5f, 0.0f);         // 水平居中、底部对齐
+    // 距屏幕底 2 个逻辑像素（等同原版 MC 的 hotbar 底距）
+    hotbar->setPosition(m_screenWidth * 0.5f, static_cast<float>(2 * hotbar->getGuiScale()));
     hotbar->zIndex = 50;
     // 设置一些示例物品
     hotbar->setSlotItem(0, "Stone");
