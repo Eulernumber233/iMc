@@ -1,4 +1,4 @@
-#pragma once
+ï»¿#pragma once
 #ifndef _CORE_H_
 #define _CORE_H_
 
@@ -24,18 +24,20 @@
 #include <unordered_map>
 #include <memory>
 
-// Çø¿é³£Á¿
 namespace ChunkConstants {
-    constexpr int CHUNK_WIDTH = 16;      // Çø¿é¿í¶È£¨X·½Ïò£©
-    constexpr int CHUNK_HEIGHT = 64;     // Çø¿é¸ß¶È£¨Y·½Ïò£©
-    constexpr int CHUNK_DEPTH = 16;      // Çø¿éÉî¶È£¨Z·½Ïò£©
+    constexpr int CHUNK_WIDTH = 16;
+    constexpr int CHUNK_HEIGHT = 64;
+    constexpr int CHUNK_DEPTH = 16;
     constexpr int CHUNK_VOLUME = CHUNK_WIDTH * CHUNK_HEIGHT * CHUNK_DEPTH;
 }
 
-// äÖÈ¾³£Á¿
 namespace RenderConstants {
-    constexpr int MAX_INSTANCES = 1000000;  // ×î´óÊµÀýÊý
-    constexpr float BLOCK_SIZE = 1.0f;      // ·½¿é´óÐ¡
+    constexpr int MAX_INSTANCES = 1000000;
+    constexpr float BLOCK_SIZE = 1.0f;
+}
+
+namespace WorldConstants {
+    constexpr unsigned int WORLD_SEED = 114514;
 }
 
 

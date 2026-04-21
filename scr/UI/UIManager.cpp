@@ -1,4 +1,4 @@
-#include "UIManager.h"
+﻿#include "UIManager.h"
 #include "UIHotbar.h"
 #include <algorithm>
 #include <iostream>
@@ -6,7 +6,6 @@
 #include <sstream>
 #include "../TextureMgr.h"
 
-// UIComponent ʵ��
 UIComponent::UIComponent(const std::string& id) : id(id) {}
 
 UIComponent::~UIComponent() {}
@@ -38,22 +37,18 @@ void UIComponent::setRotation(float degrees) {
 glm::mat4 UIComponent::calculateTransform() const {
     glm::mat4 result = glm::mat4(1.0f);
 
-    // ƽ��
     glm::vec2 finalPos = position - size * anchor;
     result = glm::translate(result, glm::vec3(finalPos, 0.0f));
 
-    // ��ת
     if (rotation != 0.0f) {
         result = glm::rotate(result, glm::radians(rotation), glm::vec3(0.0f, 0.0f, 1.0f));
     }
 
-    // ����
     result = glm::scale(result, glm::vec3(size, 1.0f));
 
     return result;
 }
 
-// UIRect ��̬��Ա��ʼ��
 GLuint UIRect::s_VAO = 0;
 GLuint UIRect::s_VBO = 0;
 GLuint UIRect::s_EBO = 0;
@@ -96,11 +91,9 @@ void UIRect::initGeometry() {
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, s_EBO);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
 
-    // λ������
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
 
-    // ������������
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float),
         (void*)(2 * sizeof(float)));
     glEnableVertexAttribArray(1);
@@ -113,17 +106,14 @@ void UIRect::initGeometry() {
 void UIRect::render(const glm::mat4& projection) {
     if (!visible) return;
 
-    // ����任����
     glm::mat4 model = calculateTransform();
 
-    // ���û��
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDisable(GL_DEPTH_TEST); // UI渲染禁用深度测试
 
-    // ʹ����ɫ��
     auto& uiManager = UIManager::getInstance();
-    Shader& shader = uiManager.getUIShader(); // ��Ҫ�����������
+    Shader& shader = uiManager.getUIShader();
 
     shader.use();
     shader.setMat4("uProjection", projection);
@@ -138,17 +128,14 @@ void UIRect::render(const glm::mat4& projection) {
         shader.setFloat("uRadius", borderRadius);
     }
 
-    // ��Ⱦ
     glBindVertexArray(VAO);
     glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
     glBindVertexArray(0);
 
-    // �ָ��������
     glEnable(GL_DEPTH_TEST); // 恢复深度测试
     glDisable(GL_BLEND);
 }
 
-// UIImage ��̬��Ա��ʼ��
 GLuint UIImage::s_VAO = 0;
 GLuint UIImage::s_VBO = 0;
 GLuint UIImage::s_EBO = 0;
@@ -164,11 +151,9 @@ UIImage::UIImage(const std::string& id) : UIComponent(id) {
 }
 
 UIImage::~UIImage() {
-    // ע�⣺������TextureMgr���������ﲻɾ��
 }
 
 void UIImage::initGeometry() {
-    // ʹ����UIRect��ͬ�ļ�����
     UIRect::initGeometry();
     s_VAO = UIRect::s_VAO;
     s_VBO = UIRect::s_VBO;
@@ -179,15 +164,12 @@ void UIImage::initGeometry() {
 void UIImage::render(const glm::mat4& projection) {
     if (!visible || textureID == 0) return;
 
-    // ����任����
     glm::mat4 model = calculateTransform();
 
-    // ���û��
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDisable(GL_DEPTH_TEST); // UI渲染禁用深度测试
 
-    // ʹ����ɫ��
     auto& uiManager = UIManager::getInstance();
     Shader& shader = uiManager.getUIShader();
 
@@ -199,22 +181,18 @@ void UIImage::render(const glm::mat4& projection) {
     shader.setInt("uHasTexture", 1);
     shader.setInt("uIsText", 0);
 
-    // ������
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, textureID);
 
-    // ��Ⱦ
     glBindVertexArray(VAO);
     glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
     glBindVertexArray(0);
 
-    // �ָ��������
     glEnable(GL_DEPTH_TEST); // 恢复深度测试
     glDisable(GL_BLEND);
 }
 
 bool UIImage::containsPoint(const glm::vec2& point) const {
-    // ����ͼƬ��ֻ����Ƿ��ھ����ڣ�������͸������
     return UIComponent::containsPoint(point);
 }
 
@@ -222,7 +200,7 @@ bool UIImage::containsPoint(const glm::vec2& point) const {
 bool UIImage::loadTextureByFilePath(const std::string& filepath) {
     //textureID = textureMgr->loadTexture2D(filepath);
     //return textureID != 0;
-    return false; // ��ʵ��
+    return false;
 }
 
 bool UIImage::loadTextureByGLid(GLuint ID)
@@ -236,7 +214,6 @@ bool UIImage::loadTextureByTextureName(const std::string& texturename) {
     return textureID != 0;
 }
 
-// UIText ʵ��
 std::unordered_map<std::string, UIText::FontInfo> UIText::s_fonts;
 GLuint UIText::s_VAO = 0;
 GLuint UIText::s_VBO = 0;
@@ -259,7 +236,6 @@ UIText::~UIText() {
 }
 
 void UIText::initGeometry() {
-    // ʹ����UIRect��ͬ�ļ�����
     UIRect::initGeometry();
     s_VAO = UIRect::s_VAO;
     s_VBO = UIRect::s_VBO;
@@ -275,15 +251,12 @@ void UIText::setText(const std::string& text) {
 void UIText::render(const glm::mat4& projection) {
     if (!visible || text.empty() || m_textTexture == 0) return;
 
-    // ����任����
     glm::mat4 model = calculateTransform();
 
-    // ���û��
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDisable(GL_DEPTH_TEST); // UI渲染禁用深度测试
 
-    // ʹ����ɫ��
     auto& uiManager = UIManager::getInstance();
     Shader& shader = uiManager.getUIShader();
 
@@ -296,40 +269,31 @@ void UIText::render(const glm::mat4& projection) {
     shader.setInt("uIsText", 1);
     shader.setVec4("uTextColor", textColor);
 
-    // ������
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, m_textTexture);
 
-    // ��Ⱦ
     glBindVertexArray(VAO);
     glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
     glBindVertexArray(0);
 
-    // �ָ��������
     glEnable(GL_DEPTH_TEST); // 恢复深度测试
     glDisable(GL_BLEND);
 }
 
 void UIText::updateTexture() {
-    // �����ʵ�֣�����һ���򵥵��ı�����
-    // ��ʵ����Ŀ�У�Ӧ��ʹ��FreeType��
 
     if (m_textTexture != 0) {
         glDeleteTextures(1, &m_textTexture);
     }
 
-    // ��������
     glGenTextures(1, &m_textTexture);
     glBindTexture(GL_TEXTURE_2D, m_textTexture);
 
-    // ��ʾ��������һ��64x64�İ�ɫ����
     const int texSize = 64;
     std::vector<unsigned char> pixels(texSize * texSize * 4, 255);
 
-    // �򵥻�����ĸ������ֻ��ʾ����ʵ��Ӧ��ʹ�����壩
     for (int i = 0; i < text.length() && i < 8; i++) {
         int x = i * 8;
-        // �򵥻����ַ�����
         for (int y = 20; y < 44; y++) {
             int idx = (y * texSize + x + 2) * 4;
             pixels[idx] = 0;       // R
@@ -347,17 +311,14 @@ void UIText::updateTexture() {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
     m_textureSize = glm::vec2(texSize, texSize);
-    size = glm::vec2(texSize, texSize); // �Զ�������С
+    size = glm::vec2(texSize, texSize);
 }
 
 bool UIText::loadFont(const std::string& name, const std::string& texturePath,
     const std::string& configPath) {
-    // ������������������
-    // �����ʵ��
     return true;
 }
 
-// UIButton ʵ��
 UIButton::UIButton(const std::string& id) : UIComponent(id) {
     m_background = new UIRect(id + "_bg");
     m_label = new UIText(id + "_label");
@@ -376,7 +337,6 @@ void UIButton::setLabel(const std::string& label) {
     this->label = label;
     m_label->setText(label);
 
-    // ������ǩλ�þ���
     glm::vec2 labelSize = m_label->size;
     m_label->position = glm::vec2(
         (size.x - labelSize.x) * 0.5f,
@@ -387,13 +347,11 @@ void UIButton::setLabel(const std::string& label) {
 void UIButton::render(const glm::mat4& projection) {
     if (!visible) return;
 
-    // ��Ⱦ����
     m_background->position = position;
     m_background->size = size;
     m_background->visible = visible;
     m_background->render(projection);
 
-    // ��Ⱦ��ǩ
     if (!label.empty()) {
         m_label->position = position + glm::vec2(
             (size.x - m_label->size.x) * 0.5f,
@@ -405,7 +363,6 @@ void UIButton::render(const glm::mat4& projection) {
 }
 
 void UIButton::update(float deltaTime) {
-    // ���°�ť״̬
     if (isHovered && !m_isPressed) {
         m_background->color = hoverColor;
     }
@@ -433,7 +390,6 @@ void UIButton::onHoverLeave() {
     m_isPressed = false;
 }
 
-// UIContainer ʵ��
 UIContainer::UIContainer(const std::string& id) : UIComponent(id) {}
 
 UIContainer::~UIContainer() {}
@@ -464,7 +420,6 @@ std::shared_ptr<UIComponent> UIContainer::getComponent(const std::string& id) {
 void UIContainer::render(const glm::mat4& projection) {
     if (!visible) return;
 
-    // ��Ⱦ���������
     for (const auto& comp : m_children) {
         if (comp->visible) {
             // 应用容器的变换（考虑锚点，但不应用缩放）
@@ -488,7 +443,6 @@ void UIContainer::update(float deltaTime) {
     }
 }
 
-// UIManager ʵ��
 UIManager& UIManager::getInstance() {
     static UIManager instance;
     return instance;
@@ -502,7 +456,6 @@ void UIManager::initialize(int screenWidth, int screenHeight) {
     m_screenWidth = screenWidth;
     m_screenHeight = screenHeight;
 
-    // ��ʼ��UI��ɫ��
     m_uiShader.setInt("uTexture", 0);
 
     std::cout << "UIManager initialized successfully!" << std::endl;
@@ -542,12 +495,10 @@ void UIManager::update(float deltaTime) {
 void UIManager::render() {
     if (m_sortedComponents.empty()) return;
 
-    // ��������ͶӰ
     glm::mat4 projection = glm::ortho(0.0f, (float)m_screenWidth,
         0.0f, (float)m_screenHeight,
         -1.0f, 1.0f);
 
-    // ��Ⱦ�����������zIndex����
     for (const auto& component : m_sortedComponents) {
         if (component->visible) {
             component->render(projection);
@@ -558,7 +509,6 @@ void UIManager::render() {
 void UIManager::handleMouseClick(float x, float y) {
     glm::vec2 uiPoint = screenToUIPoint(x, y);
 
-    // �����zIndex��ʼ���
     std::shared_ptr<UIComponent> clickedComponent = nullptr;
     for (auto it = m_sortedComponents.rbegin(); it != m_sortedComponents.rend(); ++it) {
         auto component = *it;
@@ -578,7 +528,6 @@ void UIManager::handleMouseClick(float x, float y) {
 void UIManager::handleMouseMove(float x, float y) {
     glm::vec2 uiPoint = screenToUIPoint(x, y);
 
-    // �����ͣ
     std::shared_ptr<UIComponent> hoveredComponent = nullptr;
     for (auto it = m_sortedComponents.rbegin(); it != m_sortedComponents.rend(); ++it) {
         auto component = *it;
@@ -589,7 +538,6 @@ void UIManager::handleMouseMove(float x, float y) {
         }
     }
 
-    // ������ͣ״̬�仯
     if (hoveredComponent != m_hoveredComponent) {
         if (m_hoveredComponent) {
             m_hoveredComponent->onHoverLeave();
@@ -626,9 +574,8 @@ glm::mat4 UIManager::getProjectionMatrix() const {
 }
 
 glm::vec2 UIManager::screenToUIPoint(float screenX, float screenY) const {
-    // OpenGL����ԭ�������½ǣ���Ļ����ԭ�������Ͻ�
     float uiX = screenX;
-    float uiY = m_screenHeight - screenY; // ��תY��
+    float uiY = m_screenHeight - screenY;
     return glm::vec2(uiX, uiY);
 }
 

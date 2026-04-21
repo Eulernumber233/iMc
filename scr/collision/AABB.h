@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <glm/glm.hpp>
 
 // 轴对齐包围盒 (Axis-Aligned Bounding Box)

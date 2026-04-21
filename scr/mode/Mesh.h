@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 
 #include "../Shader.h"
@@ -9,7 +9,7 @@ struct VertexMode {
     glm::vec2 TexCoords;
     glm::vec3 tangent;
     glm::vec3 bitangent;
-    int count = 0;// ����ƽ������
+    int count = 0;
 };
 struct TexCoords {
     unsigned int id;
@@ -18,7 +18,7 @@ struct TexCoords {
 };
 class Mesh {
 public:
-    /*  ��������  */
+    /*    */
     std::vector<VertexMode> vertices;
     std::vector<unsigned int> indices;
     std::vector<TexCoords> textures;
@@ -26,10 +26,9 @@ public:
     Mesh(std::vector<VertexMode> vertices, std::vector<unsigned int> indices, std::vector<TexCoords> textures);
     void Draw(Shader& shader);
 private:
-    /*  ��Ⱦ����  */
+    /*  Ⱦ  */
     unsigned int VAO, VBO, EBO;
 
     void setupMesh();
-    // �������ߺ͸�����
     void calculateTangents();
 };

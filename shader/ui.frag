@@ -9,7 +9,6 @@ uniform int uIsText = 0;
 uniform vec4 uTextColor = vec4(0.0, 0.0, 0.0, 1.0);
 uniform float uAlpha = 1.0;
 
-// ����Բ�Ǿ���
 uniform vec2 uSize = vec2(100.0, 50.0);
 uniform float uRadius = 5.0;
 uniform int uIsRounded = 0;
@@ -21,7 +20,6 @@ void main()
     if (uHasTexture == 1) {
         finalColor = texture(uTexture, TexCoord);
         if (uIsText == 1) {
-            // �����ı���ʹ��������alphaͨ��
             float alpha = finalColor.a;
             finalColor = uTextColor;
             finalColor.a *= alpha;
@@ -33,13 +31,11 @@ void main()
         }
     }
     
-    // Բ�Ǿ��δ���
     if (uIsRounded == 1) {
         vec2 position = gl_FragCoord.xy;
         vec2 halfSize = uSize * 0.5;
         vec2 center = uSize * 0.5;
         
-        // ���㵽�ĸ��ǵľ���
         vec2 q = abs(position - center) - halfSize + uRadius;
         float distance = min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - uRadius;
         
@@ -48,7 +44,6 @@ void main()
         }
     }
     
-    // Ӧ������͸����
     finalColor.a *= uAlpha;
     FragColor = finalColor;
 }

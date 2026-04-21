@@ -5,10 +5,10 @@ layout (location = 2) in vec2 aTexCoords;
 layout (location = 3) in vec3 aTangent;   // 切线
 layout (location = 4) in vec3 aBitangent; // 副切线
 
-out vec3 FragPos;     // Ƭ��������ռ��λ��
-out vec3 Normal;      // Ƭ��������ռ�ķ���
+out vec3 FragPos;
+out vec3 Normal;
 out vec2 TexCoords;
-out mat3 TBN;         // ���߿ռ����
+out mat3 TBN;
 
 uniform mat4 model;
 uniform mat4 view;
@@ -26,17 +26,13 @@ void main()
     gl_Position = projection * view * worldPos;
 
 
-    // �����ߺ͸����߱任������ռ�
     vec3 T = normalize(mat3(model) * aTangent);
     vec3 B = normalize(mat3(model) * aBitangent);
     vec3 N = normalize(Normal);
     
-    // Gram-Schmidt��������ȷ��T��N����
     T = normalize(T - dot(T, N) * N);
     
-    // ���¼���B��ȷ��������
     B = normalize(cross(N, T));
     
-    // ����TBN���󣨴����߿ռ䵽����ռ䣩
     TBN = mat3(T, B, N);
 }

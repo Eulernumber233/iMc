@@ -1,4 +1,4 @@
-#include "Model.h"
+﻿#include "Model.h"
 
 void Model::Draw(Shader& shader)
 {
@@ -23,13 +23,11 @@ void Model::loadModel(std::string path)
 
 void Model::processNode(aiNode* node, const aiScene* scene)
 {
-    // �����ڵ����е���������еĻ���
     for (unsigned int i = 0; i < node->mNumMeshes; i++)
     {
         aiMesh* mesh = scene->mMeshes[node->mMeshes[i]];
         meshes.push_back(processMesh(mesh, scene));
     }
-    // �������������ӽڵ��ظ���һ����
     for (unsigned int i = 0; i < node->mNumChildren; i++)
     {
         processNode(node->mChildren[i], scene);
@@ -41,7 +39,6 @@ Mesh Model::processMesh(aiMesh* mesh, const aiScene* scene)
     std::vector<VertexMode> vertices;
     std::vector<unsigned int> indices;
     std::vector<TexCoords> textures;
-    // ��������
     for (unsigned int i = 0; i < mesh->mNumVertices; i++)
     {
         VertexMode vertex;
@@ -54,12 +51,11 @@ Mesh Model::processMesh(aiMesh* mesh, const aiScene* scene)
         vec.y = mesh->mNormals[i].y;
         vec.z = mesh->mNormals[i].z;
         vertex.Normal = vec;
-        // Assimp����һ��ģ����һ�������������8����ͬ����������
-        if (mesh->mTextureCoords[0]) // �����Ƿ����������ֻ꣬���ĵ�һ��
+        if (mesh->mTextureCoords[0])
         {
             glm::vec2 vec;
             vec.x = mesh->mTextureCoords[0][i].x;
-            vec.y = mesh->mTextureCoords[0][i].y; // TODO ������Ҫ����
+            vec.y = mesh->mTextureCoords[0][i].y;
             // vec.y = 1 - mesh->mTextureCoords[0][i].y;
             vertex.TexCoords = vec;
         }
@@ -68,19 +64,15 @@ Mesh Model::processMesh(aiMesh* mesh, const aiScene* scene)
         }
         vertices.push_back(vertex);
     }
-    // ��������
     for (unsigned int i = 0; i < mesh->mNumFaces; i++)
     {
         aiFace face = mesh->mFaces[i];
         for (unsigned int j = 0; j < face.mNumIndices; j++)
             indices.push_back(face.mIndices[j]);
     }
-    // ��������
     if (mesh->mMaterialIndex >= 0)
     {
         aiMaterial* material = scene->mMaterials[mesh->mMaterialIndex];
-        // һ�����ʶ�����ڲ���ÿ���������Ͷ��洢��һ������λ������
-        // ��ͬ���������Ͷ���aiTextureType_Ϊǰ׺
         std::vector<TexCoords> diffuseMaps = loadMaterialTextures(material, aiTextureType_DIFFUSE, "texture_diffuse");
         textures.insert(textures.end(), diffuseMaps.begin(), diffuseMaps.end());
         // 2. specular maps
@@ -103,9 +95,8 @@ std::vector<TexCoords> Model::loadMaterialTextures(aiMaterial* mat, aiTextureTyp
     for (unsigned int i = 0; i < mat->GetTextureCount(type); i++)
     {
         aiString str;
-        mat->GetTexture(type, i, &str);// ��ȡÿ���������ļ�λ��
+        mat->GetTexture(type, i, &str);
 
-        // TODO ����
         bool skip = false;
         for (unsigned int j = 0; j < textures_loaded.size(); j++)
         {
@@ -118,13 +109,13 @@ std::vector<TexCoords> Model::loadMaterialTextures(aiMaterial* mat, aiTextureTyp
             }
         }
         if (!skip)
-        {   // ���������û�б����أ��������
+        {
             TexCoords texture;
             texture.id = TextureFromFile(str.C_Str(), directory);
             texture.type = typeName;
             texture.path = str.C_Str();
             textures.push_back(texture);
-            textures_loaded.push_back(texture); // ���ӵ��Ѽ��ص�������
+            textures_loaded.push_back(texture);
         }
     }
     return textures;
@@ -160,8 +151,8 @@ unsigned int TextureFromFile(const char* path, const std::string& directory, boo
         //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
         // mc get textures
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); // ��С���ڽ�����
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST); // �Ŵ����ڽ�����
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
         stbi_image_free(data);
     }

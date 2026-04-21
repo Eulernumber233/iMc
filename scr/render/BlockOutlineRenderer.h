@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "../core.h"
 #include <glm/glm.hpp>
 #include <vector>
@@ -8,28 +8,25 @@
 class BlockOutlineRenderer {
 public:
     struct OutlineConfig {
-        glm::vec3 color = glm::vec3(10.0f, 10.0f, 10.0f);  // Ĭ�Ϻ�ɫ�߿�
+        glm::vec3 color = glm::vec3(10.0f, 10.0f, 10.0f);
         float lineWidth = 0.3f;
-        float pulseSpeed = 2.0f;    // ���������ٶ�
-        float pulseIntensity = 0.15f; // ����ǿ��
-        bool enablePulse = true;     // ��������Ч��
-        bool depthTest = false;      // �Ƿ�������Ȳ���
-        float outlineScale = 1.01f;  // �߿����ű���
+        float pulseSpeed = 2.0f;
+        float pulseIntensity = 0.15f;
+        bool enablePulse = true;
+        bool depthTest = false;
+        float outlineScale = 1.01f;
     };
 
     BlockOutlineRenderer();
     ~BlockOutlineRenderer();
 
-    // ��ʼ��
     bool initialize();
 
-    // ��Ⱦ��������ı߿�
     void render(const glm::ivec3& blockPos,
         const glm::mat4& view,
         const glm::mat4& projection,
         float time = 0.0f);
 
-    // ��������
     void setConfig(const OutlineConfig& config) { m_config = config; }
     const OutlineConfig& getConfig() const { return m_config; }
 

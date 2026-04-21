@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "../core.h"
 
 // 玩家模型的姿态（由动画器输出，由 PlayerModel::draw 消费）

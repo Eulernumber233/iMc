@@ -10,8 +10,8 @@ uniform sampler2D texNoise;           // 随机旋转纹理（16x16）
 // SSAO 参数（建议作为 uniform 以便实时调整）
 uniform vec3 samples[64];             // 采样核（切线空间）
 uniform int kernelSize = 64;
-uniform float radius = 2.5;            // 采样半径
-uniform float bias = 0.05;              // 深度比较偏置，防止自阴影
+uniform float radius = 0.8;            // 采样半径（方块世界尺度，1 方块约 1m）
+uniform float bias = 0.08;             // 基础 bias（掠射角下会动态放大）
 
 // 屏幕尺寸（用于噪声纹理缩放）
 uniform vec2 screenSize;
@@ -31,9 +31,21 @@ void main()
     vec3 normal = normalize(mat3(view) * normalWorld);            // 视图空间法线
     float fragDepth = -fragPos.z;                                  // 正深度（距离）
 
+    // 掠射角检测：视线 V 指向相机（view space 里相机在原点 → V = normalize(-fragPos)）
+    // NdotV 小（接近 0）意味着视线几乎平行于表面，此时 SSAO 极不稳定
+    vec3 V = normalize(-fragPos);
+    float NdotV = max(dot(normal, V), 0.0);
+    // 早退：视线背向表面（G-Buffer 精度问题常产生 NdotV<=0），直接无遮挡
+    if (NdotV < 0.05) {
+        FragColor = 1.0;
+        return;
+    }
+    // 动态 bias：掠射角（NdotV 小）时放大到原始的 3~4 倍
+    float dynamicBias = bias * (1.0 + 3.0 * (1.0 - NdotV));
+
     // 3. 获取随机旋转向量，并构建 TBN 矩阵（切线空间 -> 视图空间）
-    //    噪声纹理尺寸为 16x16，因此缩放因子为 screenSize / 16.0
-    vec2 noiseScale = screenSize / 16.0;
+    //    噪声纹理尺寸为 4x4，因此缩放因子为 screenSize / 4.0
+    vec2 noiseScale = screenSize / 4.0;
     vec3 randomVec = texture(texNoise, TexCoords * noiseScale).xyz;
 
     // 构建 tangent 和 bitangent
@@ -68,14 +80,19 @@ void main()
         float sampleDepthView = (view * vec4(sampleWorldPos, 1.0)).z;
         float sampleDepth = -sampleDepthView;                       // 采样点的正深度
 
-        // 遮挡判断：如果实际点的正深度小于采样点的正深度（实际点更近），则遮挡
-        // 加入 bias 避免因深度精度问题产生的自阴影
-        float occlude = (sampleDepth < (-samplePos.z - bias)) ? 1.0 : 0.0;
+        // 遮挡判断：使用动态 bias（掠射角下更大）
+        float occlude = (sampleDepth < (-samplePos.z - dynamicBias)) ? 1.0 : 0.0;
 
-        // 范围检查：防止半径外的采样点影响结果
+        // 范围检查 1：传统的 radius 内 smoothstep，半径外衰减
         float rangeCheck = smoothstep(0.0, 1.0, radius / abs(fragDepth - sampleDepth));
 
-        occlusion += occlude * rangeCheck;
+        // 范围检查 2：深度差过大时认为是跨越到了不相关表面（比如掠射角下
+        // 屏幕上相邻像素其实对应远处的方块），直接丢弃该样本
+        // 阈值设为 radius 的 2 倍：正常遮挡物不会超过这个差距
+        float depthDelta = abs(fragDepth - sampleDepth);
+        float validSample = step(depthDelta, radius * 2.0);
+
+        occlusion += occlude * rangeCheck * validSample;
     }
 
     // 5. 计算最终环境光遮蔽因子（1 - 平均遮挡率）

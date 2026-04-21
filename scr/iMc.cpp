@@ -70,8 +70,8 @@ int main() {
         return -1;
     }
 
-    // 创建并运行世界
-    World world(window, 114514);
+    // 创建并运行世界（种子来自 core.h 中的全局常量）
+    World world(window, WorldConstants::WORLD_SEED);
     world.run();
 
     clearAll(window);

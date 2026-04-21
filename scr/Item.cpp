@@ -1,4 +1,4 @@
-#include "Item.h"
+﻿#include "Item.h"
 #include "chunk/ChunkManager.h"
 
 bool BlockItem::onRightClick(const glm::ivec3& adjacentPos, class ChunkManager* chunkManager) {

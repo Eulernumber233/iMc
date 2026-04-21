@@ -3,10 +3,10 @@
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aTexCoord;
-layout(location = 5) in vec3 aBlockPos;      // ÊµÀıÎ»ÖÃ
-layout(location = 6) in int aFaceIndex;      // ÃæË÷Òı
-layout(location = 7) in int aBlockType;      // ·½¿éÀàĞÍ
-layout(location = 8) in int aTextureLayer;   // ÎÆÀí²ãË÷Òı
+layout(location = 5) in vec3 aBlockPos;      // å®ä¾‹ä½ç½®
+layout(location = 6) in int aFaceIndex;      // é¢ç´¢å¼•
+layout(location = 7) in int aBlockType;      // æ–¹å—ç±»å‹
+layout(location = 8) in int aTextureLayer;   // çº¹ç†å±‚ç´¢å¼•
 
 out vec3 vWorldPos;
 out vec3 vNormal;
@@ -46,7 +46,7 @@ void main() {
     mat4 model = translation * faceMatrix;
 
     vWorldPos = (model * vec4(aPos, 1.0)).xyz;
-    vNormal = mat3(faceMatrix) * aNormal;   // ·¨Ïß±ä»»
+    vNormal = mat3(faceMatrix) * aNormal;   // æ³•çº¿å˜æ¢
     vTexCoord = aTexCoord;
 
     vBlockType = aBlockType;

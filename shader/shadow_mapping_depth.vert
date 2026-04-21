@@ -2,9 +2,9 @@
 
 uniform mat4 lightSpaceMatrix;
 layout(location = 0) in vec3 aPos;
-layout(location = 5) in vec3 aBlockPos;      // ÊµÀıÎ»ÖÃ
-layout(location = 6) in int aFaceIndex;      // ÃæË÷Òı
-layout(location = 7) in int aBlockType;      // ·½¿éÀàĞÍ
+layout(location = 5) in vec3 aBlockPos;      // å®ä¾‹ä½ç½®
+layout(location = 6) in int aFaceIndex;      // é¢ç´¢å¼•
+layout(location = 7) in int aBlockType;      // æ–¹å—ç±»å‹
 
 flat out int vBlockType;
 

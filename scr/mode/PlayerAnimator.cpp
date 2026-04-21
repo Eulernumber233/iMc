@@ -1,4 +1,4 @@
-#include "PlayerAnimator.h"
+﻿#include "PlayerAnimator.h"
 #include <glm/gtc/constants.hpp>
 #include <algorithm>
 #include <cmath>

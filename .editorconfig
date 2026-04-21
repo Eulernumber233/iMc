@@ -1,0 +1,25 @@
+root = true
+
+[*]
+charset = utf-8-bom
+end_of_line = crlf
+insert_final_newline = false
+trim_trailing_whitespace = false
+
+[*.{cpp,cc,cxx,c,h,hpp,hh,inl}]
+charset = utf-8-bom
+end_of_line = crlf
+indent_style = space
+indent_size = 4
+
+[*.{frag,vert,glsl,geom,comp,tesc,tese}]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 4
+
+[*.{py,yaml,yml,json,md}]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 4

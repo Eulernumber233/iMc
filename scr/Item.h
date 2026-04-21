@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "chunk/BlockType.h"
 #include <string>
 #include <memory>

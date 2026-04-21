@@ -1,4 +1,4 @@
-#include "Mesh.h"
+ï»¿#include "Mesh.h"
 
 Mesh::Mesh(std::vector<VertexMode> vertices, std::vector<unsigned int> indices, std::vector<TexCoords> textures)
 {
@@ -17,8 +17,8 @@ void Mesh::Draw(Shader& shader)
     unsigned int normalNr = 0;
     for (unsigned int i = 0; i < textures.size(); i++)
     {
-        glActiveTexture(GL_TEXTURE0 + i); // ÔÚ°ó¶¨Ö®Ç°¼¤»îÏàÓ¦µÄÎÆÀíµ¥Ôª
-        // »ñÈ¡ÎÆÀíĞòºÅ£¨diffuse_textureN ÖĞµÄ N£©
+        glActiveTexture(GL_TEXTURE0 + i); // åœ¨ç»‘å®šä¹‹å‰æ¿€æ´»ç›¸åº”çš„çº¹ç†å•å…ƒ
+        // è·å–çº¹ç†åºå·ï¼ˆdiffuse_textureN ä¸­çš„ Nï¼‰
         std::string number;
         std::string name = textures[i].type;
         if (name == "texture_diffuse")
@@ -34,7 +34,7 @@ void Mesh::Draw(Shader& shader)
     }
     glActiveTexture(GL_TEXTURE0);
 
-    // »æÖÆÍø¸ñ
+    // ç»˜åˆ¶ç½‘æ ¼
     glBindVertexArray(VAO);
     glDrawElements(GL_TRIANGLES, indices.size(), GL_UNSIGNED_INT, 0);
     glBindVertexArray(0);
@@ -55,19 +55,19 @@ void Mesh::setupMesh()
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int),
         &indices[0], GL_STATIC_DRAW);
 
-    // ¶¥µãÎ»ÖÃ
+    // é¡¶ç‚¹ä½ç½®
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(VertexMode), (void*)0);
-    // ¶¥µã·¨Ïß
+    // é¡¶ç‚¹æ³•çº¿
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(VertexMode), (void*)offsetof(VertexMode, Normal));
-    // ¶¥µãÎÆÀí×ø±ê
+    // é¡¶ç‚¹çº¹ç†åæ ‡
     glEnableVertexAttribArray(2);
     glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(VertexMode), (void*)offsetof(VertexMode, TexCoords));
-    // ÇĞÏß
+    // åˆ‡çº¿
     glEnableVertexAttribArray(3);
     glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof(VertexMode), (void*)offsetof(VertexMode, tangent));
-    // ¸±ÇĞÏß
+    // å‰¯åˆ‡çº¿
     glEnableVertexAttribArray(4);
     glVertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, sizeof(VertexMode), (void*)offsetof(VertexMode, bitangent));
 
@@ -76,37 +76,37 @@ void Mesh::setupMesh()
 
 void Mesh::calculateTangents()
 {
-    // ±éÀúËùÓĞÈı½ÇĞÎ
+    // éå†æ‰€æœ‰ä¸‰è§’å½¢
     for (size_t i = 0; i < indices.size(); i += 3) {
-        // »ñÈ¡Èı½ÇĞÎµÄÈı¸ö¶¥µãË÷Òı
+        // è·å–ä¸‰è§’å½¢çš„ä¸‰ä¸ªé¡¶ç‚¹ç´¢å¼•
         unsigned int idx0 = indices[i];
         unsigned int idx1 = indices[i + 1];
         unsigned int idx2 = indices[i + 2];
 
-        // »ñÈ¡¶¥µãÊı¾İ
+        // è·å–é¡¶ç‚¹æ•°æ®
         VertexMode& v0 = vertices[idx0];
         VertexMode& v1 = vertices[idx1];
         VertexMode& v2 = vertices[idx2];
 
-        // ¼ÆËãÈı½ÇĞÎµÄ±ßÏòÁ¿
+        // è®¡ç®—ä¸‰è§’å½¢çš„è¾¹å‘é‡
         glm::vec3 edge1 = v1.Position - v0.Position;
         glm::vec3 edge2 = v2.Position - v0.Position;
 
-        // ¼ÆËãÎÆÀí×ø±êµÄ²îÒì
+        // è®¡ç®—çº¹ç†åæ ‡çš„å·®å¼‚
         glm::vec2 deltaUV1 = v1.TexCoords - v0.TexCoords;
         glm::vec2 deltaUV2 = v2.TexCoords - v0.TexCoords;
 
-        // ¼ÆËãĞĞÁĞÊ½
+        // è®¡ç®—è¡Œåˆ—å¼
         float det = deltaUV1.x * deltaUV2.y - deltaUV2.x * deltaUV1.y;
 
-        // ±ÜÃâ³ıÒÔÁã
+        // é¿å…é™¤ä»¥é›¶
         if (fabs(det) < 1e-6f) {
             continue;
         }
 
         float invDet = 1.0f / det;
 
-        // ¼ÆËãÇĞÏßºÍ¸±ÇĞÏß
+        // è®¡ç®—åˆ‡çº¿å’Œå‰¯åˆ‡çº¿
         glm::vec3 tangent, bitangent;
 
         tangent.x = invDet * (deltaUV2.y * edge1.x - deltaUV1.y * edge2.x);
@@ -119,7 +119,7 @@ void Mesh::calculateTangents()
         bitangent.z = invDet * (-deltaUV2.x * edge1.z + deltaUV1.x * edge2.z);
         bitangent = glm::normalize(bitangent);
 
-        // ÀÛ¼Óµ½Èı¸ö¶¥µã
+        // ç´¯åŠ åˆ°ä¸‰ä¸ªé¡¶ç‚¹
         vertices[idx0].tangent += tangent;
         vertices[idx0].bitangent += bitangent;
         vertices[idx0].count++;
@@ -133,21 +133,21 @@ void Mesh::calculateTangents()
         vertices[idx2].count++;
     }
 
-    // Æ½¾ù²¢¹éÒ»»¯ÇĞÏßºÍ¸±ÇĞÏß£¬²¢È·±£ËüÃÇÓë·¨ÏßÕı½»
+    // å¹³å‡å¹¶å½’ä¸€åŒ–åˆ‡çº¿å’Œå‰¯åˆ‡çº¿ï¼Œå¹¶ç¡®ä¿å®ƒä»¬ä¸æ³•çº¿æ­£äº¤
     for (size_t i = 0; i < vertices.size(); i++) {
         if (vertices[i].count > 0) {
-            // Æ½¾ùÇĞÏßºÍ¸±ÇĞÏß
+            // å¹³å‡åˆ‡çº¿å’Œå‰¯åˆ‡çº¿
             glm::vec3 tangent = vertices[i].tangent / (float)vertices[i].count;
             glm::vec3 bitangent = vertices[i].bitangent / (float)vertices[i].count;
 
-            // È·±£ÇĞÏßÓë·¨ÏßÕı½»£¨Gram-SchmidtÕı½»»¯£©
+            // ç¡®ä¿åˆ‡çº¿ä¸æ³•çº¿æ­£äº¤ï¼ˆGram-Schmidtæ­£äº¤åŒ–ï¼‰
             glm::vec3 normal = vertices[i].Normal;
             tangent = glm::normalize(tangent - glm::dot(tangent, normal) * normal);
 
-            // ÖØĞÂ¼ÆËã¸±ÇĞÏßÒÔÈ·±£Õı½»ĞÔ
+            // é‡æ–°è®¡ç®—å‰¯åˆ‡çº¿ä»¥ç¡®ä¿æ­£äº¤æ€§
             bitangent = glm::normalize(glm::cross(normal, tangent));
 
-            // ¼ì²éÊÖĞÔ
+            // æ£€æŸ¥æ‰‹æ€§
             if (glm::dot(glm::cross(tangent, bitangent), normal) < 0.0f) {
                 tangent = -tangent;
             }

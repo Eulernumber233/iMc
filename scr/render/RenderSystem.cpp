@@ -1,4 +1,4 @@
-#include "RenderSystem.h"
+﻿#include "RenderSystem.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -300,16 +300,17 @@ bool RenderSystem::initialize() {
         ssaoKernel.push_back(sample);
     }
 
-    // Noise texture (16x16 for better noise distribution)
+    // Noise texture 4x4：与下面的 4x4 box blur 周期严格匹配，
+    // 确保 blur 能在一个 tile 内把所有方向的随机旋转都平均到，完全消除条纹/三角图案
     std::vector<glm::vec3> ssaoNoise;
-    for (GLuint i = 0; i < 256; i++)  // 16x16 = 256 samples
+    for (GLuint i = 0; i < 16; i++)  // 4x4 = 16 samples
     {
-        glm::vec3 noise(randomFloats(generator) * 2.0 - 1.0, randomFloats(generator) * 2.0 - 1.0, 0.0f); // rotate around z-axis (in tangent space)
+        glm::vec3 noise(randomFloats(generator) * 2.0 - 1.0, randomFloats(generator) * 2.0 - 1.0, 0.0f);
         ssaoNoise.push_back(noise);
     }
     glGenTextures(1, &m_noiseTexture);
     glBindTexture(GL_TEXTURE_2D, m_noiseTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, 16, 16, 0, GL_RGB, GL_FLOAT, &ssaoNoise[0]);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, 4, 4, 0, GL_RGB, GL_FLOAT, &ssaoNoise[0]);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
@@ -333,17 +334,17 @@ bool RenderSystem::initialize() {
     glGenTextures(1, &m_depthMap);
     glBindTexture(GL_TEXTURE_2D, m_depthMap);
 
-    // glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-    // glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-     // 格式：RG32F（R存m1=线性深度，G存m2=线性深度²）
+    // 格式：RG32F（R存线性深度m1，G存线性深度²m2），VSSM 需要 mipmap 提供区域均值
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RG32F, SHADOW_WIDTH, SHADOW_HEIGHT, 0, GL_RG, GL_FLOAT, NULL);
-    // 线性过滤获取区域均值
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    // 启用 mipmap + 三线性过滤，VSSM 的 blocker search 依赖 textureLod
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    // 边界颜色：m1=1.0 表示最远（完全光照），m2=1.0
     float borderColor[] = { 1.0f, 1.0f, 1.0f, 1.0f };
     glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
+    glGenerateMipmap(GL_TEXTURE_2D); // 预生成一次，避免首帧未定义
     // 将深度纹理附加到FBO的深度附件
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_depthMap, 0);
 
@@ -692,8 +693,8 @@ void RenderSystem::render(const ChunkManager& chunkManager,
 
     m_currentTime += deltaTime;
 
-    // 更新光源位置
-    //move_DirLight(deltaTime);
+    // 更新光源位置（含日出/日落平滑过渡强度 m_sunIntensity）
+    move_DirLight(deltaTime);
 
     // 更新粒子系统
     // 获取可见区块位置信息
@@ -847,54 +848,106 @@ void RenderSystem::ssaoBlurPass()
 void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std::shared_ptr<Camera>camera
     , float& sunShine_near, float& sunShine_far, glm::mat4& lightSpaceMatrix)
 {
-    // 计算光源空间变换矩阵
-    glm::mat4 view = camera->GetViewMatrix();
-    std::vector<glm::vec3> frustumCorners = camera->GetFrustumCornersWorldSpace(view, MAX_SHADOW_DISTANCE);
-    glm::vec3 farLightPos = camera->Position - lightDir * 1000.0f;
-    glm::mat4 lightView = glm::lookAt(farLightPos, farLightPos + lightDir, glm::vec3(0, 1, 0));
-    glm::vec3 minLight = glm::vec3(FLT_MAX), maxLight = glm::vec3(-FLT_MAX);
-    for (const auto& corner : frustumCorners) {
-        glm::vec4 cornerLight = lightView * glm::vec4(corner, 1.0f);
-        minLight = glm::min(minLight, glm::vec3(cornerLight));
-        maxLight = glm::max(maxLight, glm::vec3(cornerLight));
+    // 夜晚（阳光强度为 0）：冻结上一帧的阴影矩阵，不再重建。
+    // 这样避免光方向接近水平时 lookAt 退化、阴影贴图乱跳；且夜晚着色器不使用阴影，
+    // 即便矩阵过期也无视觉影响。首次进入夜晚若无缓存则跳过阴影渲染。
+    if (m_sunIntensity <= 0.001f && m_hasCachedLightMatrix) {
+        lightSpaceMatrix = m_cachedLightSpaceMatrix;
+        sunShine_near    = m_cachedSunNear;
+        sunShine_far     = m_cachedSunFar;
+        return;
     }
 
-    // 扩展一些边界，避免阴影边缘过于锐利
-    float expand = 2.0f;
-    minLight -= glm::vec3(expand);
-    maxLight += glm::vec3(expand);
+    // ==== 稳定的阴影范围 ====
+    // 关键点：radius 必须是【恒定常量】，center 也必须稳定（仅跟随相机前向 step-wise 移动）。
+    // 若 radius 随相机每帧变化，每帧 worldUnitsPerTexel 就会变，snap 效果消失；
+    // 若 center 是视锥 8 角点的平均（受视角方向影响），相机一转 center 就会平移，
+    // 某些在边界的物体就会进出阴影范围 → 产生"阴影消失又出现"。
 
-    // 构建正交投影（光源空间 z 轴方向）
-    glm::mat4 lightProjection = glm::ortho(minLight.x, maxLight.x,
-        minLight.y, maxLight.y,
-        -maxLight.z, -minLight.z);  // 近平面= -maxZ，远平面= -minZ
-    sunShine_near = -maxLight.z;
-    sunShine_far = -minLight.z;
+    // 固定半径：覆盖半径必须 >= 视锥最大半径才能包含整个视锥
+    // tan(fov/2)*farDist 大致就是远平面半径；对 FOV=45°、MAX=300，约 124m，远平面对角线 ~175m
+    const float SHADOW_RADIUS = MAX_SHADOW_DISTANCE * 0.6f; // 180m 足够
+    const float radius = SHADOW_RADIUS;
+
+    // center：把【相机位置 + 相机前向 * offset】作为锚点，
+    // 但相机前向随转动变化很快，所以改用【纯相机位置】 —— 阴影范围以相机为中心。
+    // 这样转头不会移动阴影范围，只有移动相机位置时才会（配合 snap-to-texel 可阶跃式移动）。
+    glm::vec3 center = camera->Position;
+
+    // 光源视图：看向 center
+    glm::vec3 lightDirNorm = glm::normalize(lightDir);
+    // 近平面留 radius 余量，远平面 2*radius，保证 center 附近各方向都能命中
+    glm::vec3 lightEye = center - lightDirNorm * (radius + 50.0f);
+    glm::mat4 lightView = glm::lookAt(lightEye, center, glm::vec3(0.0f, 1.0f, 0.0f));
+
+    // ---- 正确的 snap-to-texel ----
+    // 在光源空间把 center 的 XY 分量 snap 到纹素网格，然后【用 snapped 位置重新计算 lightEye 和 lightView】
+    // 这样 light-space 坐标系原点就锁在纹素整数位置，相机小范围移动时整个阴影贴图内容不变，
+    // 只有 center 跨过纹素边界时才会"跳"一格 —— 但那一格相对整个纹理几乎不可见。
+    {
+        const float worldUnitsPerTexel = (2.0f * radius) / float(SHADOW_WIDTH);
+        glm::vec4 centerLS = lightView * glm::vec4(center, 1.0f);
+        glm::vec3 snappedLS = glm::vec3(
+            std::floor(centerLS.x / worldUnitsPerTexel) * worldUnitsPerTexel,
+            std::floor(centerLS.y / worldUnitsPerTexel) * worldUnitsPerTexel,
+            centerLS.z
+        );
+        // 把 snappedLS 变回世界空间，作为新的 center
+        glm::mat4 invLightView = glm::inverse(lightView);
+        glm::vec4 snappedWS = invLightView * glm::vec4(snappedLS, 1.0f);
+        glm::vec3 newCenter = glm::vec3(snappedWS);
+
+        // 重建 lightView：对齐后的视图矩阵把 newCenter 映射到纹素整数位置
+        lightEye = newCenter - lightDirNorm * (radius + 50.0f);
+        lightView = glm::lookAt(lightEye, newCenter, glm::vec3(0.0f, 1.0f, 0.0f));
+    }
+
+    // 正交框固定为 [-radius, radius]，尺寸恒定不再抖动
+    float left = -radius, right = radius;
+    float bottom = -radius, top = radius;
+    float nearP = 0.0f;
+    float farP = 2.0f * radius + 100.0f;
+
+    glm::mat4 lightProjection = glm::ortho(left, right, bottom, top, nearP, farP);
+
+    // 与 shader 约定：currentDepth 使用 projCoords.z（正交投影下即 [0,1] 线性），
+    // 这里的 sunShine_near/far 仅用于 PCSS 的世界尺度换算，不再用于 LinearizeDepth。
+    sunShine_near = nearP;
+    sunShine_far  = farP;
 
     lightSpaceMatrix = lightProjection * lightView;
 
     // 渲染场景到深度贴图
     glViewport(0, 0, SHADOW_WIDTH, SHADOW_HEIGHT);
     glBindFramebuffer(GL_FRAMEBUFFER, m_depthMapFBO);
-    glEnable(GL_POLYGON_OFFSET_FILL);
-    glPolygonOffset(5.0f, 0.0f);
+    // 清除为“最远”深度（m1=1, m2=1），保证未被写入区域不会产生假阴影
+    glClearColor(1.0f, 1.0f, 0.0f, 0.0f);
     glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
-    glCullFace(GL_BACK); // 使用背面剔除减少阴影痤疮
+
+    // 注意：不再使用 glPolygonOffset。正交投影下 depth 范围被压到 [0,1]，
+    // 任何固定 offset 在 depth 单位下都被放大 (farP-nearP) 倍，会把所有几何推到深度 1.0。
+    // 改为 shader 端的 slope-scale bias（CalculateBias）处理自阴影。
+    glCullFace(GL_BACK);
 
     const auto& renderData = chunkManager.getRenderData();
     if (!renderData.empty()) {
-        m_blockRenderer.renderDepth(renderData, lightSpaceMatrix, -maxLight.z, -minLight.z);
+        m_blockRenderer.renderDepth(renderData, lightSpaceMatrix, nearP, farP);
         m_drawCalls++;
         m_totalInstances += renderData.size();
     }
-
-    glCullFace(GL_BACK); // 恢复默认的背面剔除
-    glDisable(GL_POLYGON_OFFSET_FILL);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, m_screenWidth, m_screenHeight);
 
-    //glBindTexture(GL_TEXTURE_2D, m_depthMap);
-   // glGenerateMipmap(GL_TEXTURE_2D);
+    // VSSM 的 blocker search 需要 mipmap 提供区域均值，必须每帧重生成
+    glBindTexture(GL_TEXTURE_2D, m_depthMap);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    // 缓存当前阴影矩阵，供夜晚冻结使用
+    m_cachedLightSpaceMatrix = lightSpaceMatrix;
+    m_cachedSunNear = sunShine_near;
+    m_cachedSunFar  = sunShine_far;
+    m_hasCachedLightMatrix = true;
 }
 
 
@@ -926,8 +979,17 @@ void RenderSystem::lightingPass(const std::shared_ptr<Camera>camera
     m_deferredLightingShader.setVec3("uViewPos", camera->Position);
     m_deferredLightingShader.setVec3("sunShinePos", lightPos);
     m_deferredLightingShader.setVec3("sunShineDir", lightDir);
-    m_deferredLightingShader.setVec3("sunShineAmbient", 0.2f, 0.2f, 0.2f);
-    m_deferredLightingShader.setVec3("sunShineDiffuse", 0.8f, 0.8f, 0.8f);
+
+    // 环境光：白天偏白偏亮，夜晚偏冷蓝但仍保留足够基础亮度让方块能看清
+    glm::vec3 dayAmbient   = glm::vec3(0.44f, 0.44f, 0.44f);
+    glm::vec3 nightAmbient = glm::vec3(0.28f, 0.32f, 0.44f); // 提亮并加一点蓝调
+    glm::vec3 ambient = glm::mix(nightAmbient, dayAmbient, m_sunIntensity);
+    m_deferredLightingShader.setVec3("sunShineAmbient", ambient);
+
+    // 阳光 diffuse：按色温（m_sunDiffuseColor 已在 move_DirLight 计算）
+    // 乘以基础强度 0.8 作为功率
+    m_deferredLightingShader.setVec3("sunShineDiffuse", m_sunDiffuseColor * 0.8f);
+    m_deferredLightingShader.setFloat("sunShineIntensity", m_sunIntensity);
     m_deferredLightingShader.setFloat("sunShineSize", 5.0f);
     m_deferredLightingShader.setInt("SHADOW_WIDTH", SHADOW_WIDTH);
     m_deferredLightingShader.setFloat("sunShineFar", sunShine_far);

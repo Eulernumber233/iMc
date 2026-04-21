@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "../core.h"
 #include "../chunk/ChunkManager.h"
 #include "../chunk/BlockType.h"
@@ -126,18 +126,50 @@ private:
     GLuint m_compositeDepth;                   // 最终深度纹理
 
     // 光源参数
-    glm::vec3 lightPos = { -1, 1.0f, -1.0f };
-    glm::vec3 lightDir = glm::normalize(glm::vec3(1.0f, -1.0f, 1.0f));
+    glm::vec3 lightPos = { -100.0f, 100.0f, -50.0f };
+    glm::vec3 lightDir = glm::normalize(glm::vec3(1.0f, -1.0f, 0.5f));
 
+    // 白天->夜晚的强度系数 [0,1]，地平线附近平滑过渡
+    float m_sunIntensity = 1.0f;
+    // 日出/日落暖色系数 [0,1]，1=完全暖色(橙红)，0=中午白光
+    float m_sunWarmth = 0.0f;
+    // 太阳当前色温对应的 diffuse 颜色（随 m_sunWarmth 在冷白↔暖橙间插值）
+    glm::vec3 m_sunDiffuseColor = glm::vec3(1.0f);
+
+    // 夜晚冻结用的缓存（避免光方向退化时 lightSpaceMatrix 抖动）
+    glm::mat4 m_cachedLightSpaceMatrix = glm::mat4(1.0f);
+    float     m_cachedSunNear = 0.0f;
+    float     m_cachedSunFar  = 1.0f;
+    bool      m_hasCachedLightMatrix = false;
+
+    // 太阳绕固定轴做圆周运动：在 YZ 平面内旋转（Y 为高度），X 固定
+    // 这样 lightDir.y 的符号变化对应昼夜，且 up=(0,1,0) 的 lookAt 永远不会退化（除非正好与 Y 轴共线，
+    // 由于 X 分量固定非零，始终能保证光方向与 up 的夹角不为零）
     void move_DirLight(float deltaTime) {
-        static float time_now = 0.0f;
-        const float rotate_speed = 0.2f;
+        static float time_now = 1.0f;
+        const float rotate_speed = 0.08f;   // 一个完整昼夜周期约 2π/0.2 ≈ 31 秒
         time_now += deltaTime;
         float angle = rotate_speed * time_now;
-        lightPos.x = -100.0f * sin(angle);
-        lightPos.y = 100.0f * cos(angle);
-        lightPos.z = -100.0f * sin(angle);
+
+        const float R = 100.0f;
+        // 在 YZ 平面旋转，X 固定 —— 形成东升西落的日照弧线
+        lightPos.x = 30.0f;                 // 固定非零 X 分量，避免 lookAt 退化
+        lightPos.y = R * sin(angle);
+        lightPos.z = R * cos(angle);
         lightDir = glm::normalize(glm::vec3(0.0f) - lightPos);
+
+        // 高度角的正弦（>0 为白天，<0 为夜晚）
+        float sinElev = sin(angle);
+        // 地平线附近 ±0.1 弧度（约 ±5.7°）平滑过渡
+        m_sunIntensity = glm::smoothstep(-0.05f, 0.1f, sinElev);
+
+        // 色温：太阳越靠近地平线越暖
+        // sinElev ∈ [0.0, 0.35] → 暖色从 1 过渡到 0；更高时保持冷白
+        m_sunWarmth = 1.0f - glm::smoothstep(0.05f, 0.35f, sinElev);
+        // 冷白（中午）到暖橙（日出/日落）
+        glm::vec3 coolWhite(1.00f, 0.97f, 0.92f);
+        glm::vec3 warmOrange(1.00f, 0.55f, 0.25f);
+        m_sunDiffuseColor = glm::mix(coolWhite, warmOrange, m_sunWarmth);
     }
 
     // 着色器

@@ -1,82 +1,47 @@
-// [file name]: TerrainGenerator.cpp
+ï»¿// [file name]: TerrainGenerator.cpp
 #include "TerrainGenerator.h"
 #include <cmath>
 #include <algorithm>
 #include <cstring>
-#include <vector>
 #include <iostream>
 
-// Ë½ÓÐÊµÏÖÀà
 struct TerrainGenerator::Impl {
-    unsigned int seed = 131232145;
-    std::vector<float> noiseCache;
-    int cacheWidth = 0;
-    int cacheHeight = 0;
-    glm::ivec2 cacheOrigin = glm::ivec2(0);
+    unsigned int seed = 0;
 
-    // ÎªÄ³¸öÇøÓòÔ¤¼ÆËãÔëÉù
-    void buildCache(const glm::ivec2& origin, int width, int height) {
-        cacheOrigin = origin;
-        cacheWidth = width;
-        cacheHeight = height;
-        noiseCache.resize(width * height);
-
-        for (int z = 0; z < height; ++z) {
-            for (int x = 0; x < width; ++x) {
-                int worldX = origin.x + x;
-                int worldZ = origin.y + z;
-
-                // ¼ÆËã¶à²ãÔëÉù
-                float heightValue = generateTerrainNoise(worldX, worldZ);
-                noiseCache[z * width + x] = heightValue;
-            }
-        }
-    }
-
-    float getCachedNoise(int worldX, int worldZ) const {
-        // ¼ÆËãÔÚ»º´æÖÐµÄÎ»ÖÃ
-        int localX = worldX - cacheOrigin.x;
-        int localZ = worldZ - cacheOrigin.y;
-
-        if (localX >= 0 && localX < cacheWidth &&
-            localZ >= 0 && localZ < cacheHeight) {
-            return noiseCache[localZ * cacheWidth + localX];
-        }
-
-        // Èç¹û²»ÔÚ»º´æÖÐ£¬ÊµÊ±¼ÆËã£¨ÕâÖÖÇé¿öÓ¦¸ÃºÜÉÙ£©
-        return generateTerrainNoise(worldX, worldZ);
-    }
-
-private:
     float generateTerrainNoise(int worldX, int worldZ) const {
-        // ¼ÆËã¶à²ãÔëÉù£¨Ê¹ÓÃNoiseÃüÃû¿Õ¼äÖÐµÄº¯Êý£©
-        float baseNoise = Noise::fractalBrownianMotion2D(
-            worldX * 0.01f, worldZ * 0.01f,
-            5, 0.5f, 2.0f, seed);
+        const float fx = static_cast<float>(worldX);
+        const float fz = static_cast<float>(worldZ);
 
-        float mountainNoise = Noise::fractalBrownianMotion2D(
-            worldX * 0.005f, worldZ * 0.005f,
-            3, 0.5f, 2.0f, seed + 123);
+        float baseFbm = Noise::fractalBrownianMotion2D(
+            fx * 0.012f, fz * 0.012f,
+            5, 0.55f, 2.1f, seed);
+        float base = baseFbm * 2.0f - 1.0f;               // [-1, 1]
 
-        float detailNoise = Noise::fractalBrownianMotion2D(
-            worldX * 0.02f, worldZ * 0.02f,
-            4, 0.6f, 2.2f, seed + 456);
+        float ridgeRaw = Noise::perlin2D(fx * 0.018f, fz * 0.018f, seed + 2027);
+        float ridge = 1.0f - std::fabs(ridgeRaw);         // [0, 1]
+        ridge = ridge * ridge;
+        ridge = ridge * 2.0f - 1.0f;                      // [-1, 1]
 
-        // ×éºÏÔëÉù
-        float height = baseNoise * 0.6f;
-        height += mountainNoise * 0.3f;
-        height += detailNoise * 0.1f;
+        float detailFbm = Noise::fractalBrownianMotion2D(
+            fx * 0.06f, fz * 0.06f,
+            3, 0.5f, 2.0f, seed + 3041);
+        float detail = detailFbm * 2.0f - 1.0f;           // [-1, 1]
 
-        // Ó¦ÓÃÆ½»¬£¨Ê¹ÓÃÆ½·½¸ùÈÃµØÐÎ¸üÆ½»º£©
-        height = std::sqrt(height);
+        float signed_h = base * 0.55f + ridge * 0.35f + detail * 0.10f;
+        signed_h = std::clamp(signed_h, -1.0f, 1.0f);
 
-        // È·±£ÔÚ[0,1]·¶Î§ÄÚ
-        return std::clamp(height, 0.0f, 1.0f);
+        const float minY = 30.0f;
+        const float maxY = 60.0f;
+        float worldY = 0.5f * (minY + maxY) + 0.5f * (maxY - minY) * signed_h;
+
+        float norm = worldY / static_cast<float>(Chunk::HEIGHT);
+        return std::clamp(norm, 0.0f, 1.0f);
     }
 };
 
 TerrainGenerator::TerrainGenerator()
     : m_impl(std::make_unique<Impl>()) {
+    m_impl->seed = m_params.seed;
 }
 
 TerrainGenerator::~TerrainGenerator() = default;
@@ -84,128 +49,67 @@ TerrainGenerator::~TerrainGenerator() = default;
 void TerrainGenerator::setSeed(unsigned int seed) {
     m_params.seed = seed;
     m_impl->seed = seed;
-    m_impl->noiseCache.clear(); // Çå³ý»º´æ
 }
 
 void TerrainGenerator::fillChunk(Chunk* chunk, const glm::ivec2& chunkPos) {
     if (!chunk) return;
 
-    // ¼ÆËãÇø¿éÔÚÊÀ½çÖÐµÄ·¶Î§
     int startX = chunkPos.x * Chunk::WIDTH;
     int startZ = chunkPos.y * Chunk::DEPTH;
 
-    // ÎªÕâ¸öÇøÓòÔ¤¼ÆËãÔëÉù£¨°üº¬±ß½ç£©
-    int margin = 2; // ±ß½çÀ©Õ¹£¬È·±£Á¬ÐøÐÔ
-    m_impl->buildCache(
-        glm::ivec2(startX - margin, startZ - margin),
-        Chunk::WIDTH + margin * 2,
-        Chunk::DEPTH + margin * 2
-    );
-
-    // ±éÀúÇø¿éÄÚµÄËùÓÐÎ»ÖÃ
     for (int localZ = 0; localZ < Chunk::DEPTH; ++localZ) {
         for (int localX = 0; localX < Chunk::WIDTH; ++localX) {
-            // ¼ÆËãÊÀ½ç×ø±ê
             int worldX = startX + localX;
             int worldZ = startZ + localZ;
 
-            // »ñÈ¡¸ß¶È£¨Ê¹ÓÃ»º´æ£©
-            float heightValue = m_impl->getCachedNoise(worldX, worldZ);
+            float heightValue = m_impl->generateTerrainNoise(worldX, worldZ);
+            int groundHeight = std::clamp(
+                static_cast<int>(heightValue * Chunk::HEIGHT),
+                0, Chunk::HEIGHT - 1);
 
-            //// ½«¸ß¶ÈÖµÓ³Éäµ½Êµ¼Ê·½¿é¸ß¶È
-            //// 0-1 Ó³Éäµ½ 0-HEIGHT£¬²¢¿¼ÂÇº£Æ½Ãæ
-            //float minHeight = m_params.seaLevel * Chunk::HEIGHT;
-            //float maxHeight = m_params.mountainLevel * Chunk::HEIGHT;
-            //int groundHeight = static_cast<int>(
-            //    minHeight + heightValue * (maxHeight - minHeight)
-            //    );
-            //groundHeight = std::clamp(groundHeight, 0, Chunk::HEIGHT - 1);
-
-            int groundHeight = std::clamp((int)(heightValue * Chunk::HEIGHT), 0, Chunk::HEIGHT - 1);
-            // ÎªÕâÒ»ÁÐÌî³ä·½¿é
             for (int y = 0; y < Chunk::HEIGHT; ++y) {
                 BlockType block = BLOCK_AIR;
 
                 if (y <= groundHeight) {
-                    // µØÃæÒÔÏÂ
-                    if (y >= m_params.dirtDepth* Chunk::HEIGHT) {
-                        // ±í²ãÄàÍÁ
-                        block = BLOCK_DIRT;
-                    }
-                    else if (y >= m_params.stoneDepth* Chunk::HEIGHT) {
-                        // ÖÐ²ãÊ¯Í·
+                    if (y < 45) {
                         block = BLOCK_STONE;
+                    }
+                    else if (y == groundHeight) {
+                        block = (y >= 50) ? BLOCK_GRASS : BLOCK_DIRT;
                     }
                     else {
-                        // Éî²ãÊ¯Í·
-                        block = BLOCK_STONE;
+                        block = BLOCK_DIRT;
                     }
                 }
 
-                if (y == groundHeight && heightValue > m_params.grassLevel) {
-                    // ¸ßº£°Î´¦¿ÉÄÜÖ±½ÓÊÇÊ¯Í·
-                    block = BLOCK_GRASS;
-                }
-
-                //// Ìí¼ÓÒ»Ð©É½Ê¯ÂãÂ¶Ð§¹û
-                //if (heightValue > 0.90f) {
-                //    // ¸ßº£°Î´¦¿ÉÄÜÖ±½ÓÊÇÊ¯Í·
-                //    block = BLOCK_STONE;
-                //}
-
-                // ÉèÖÃ·½¿é
                 chunk->setBlock(localX, y, localZ, block);
             }
-            //chunk->setBlock(5, 63, 5, BLOCK_WOOD);
-            //chunk->setBlock(6, 63, 5, BLOCK_WOOD);
-            //chunk->setBlock(7, 63, 5, BLOCK_WOOD);
-            //chunk->setBlock(8, 63, 5, BLOCK_WOOD);
-            //chunk->setBlock(9, 63, 5, BLOCK_WOOD);
-            //chunk->setBlock(9, 63, 6, BLOCK_WOOD);
-            //chunk->setBlock(9, 63, 7, BLOCK_WOOD);
-            //chunk->setBlock(9, 63, 4, BLOCK_WOOD);
-            //chunk->setBlock(0, 63, 0, BLOCK_STONE);
-            //chunk->setBlock(1, 63, 1, BLOCK_STONE);
-            //chunk->setBlock(3, 63, 0, BLOCK_STONE);
         }
     }
 
-    // µ÷ÊÔÐÅÏ¢
     std::cout << "Generated terrain for chunk (" << chunkPos.x << ", "
         << chunkPos.y << ")" << std::endl;
 }
 
 float TerrainGenerator::getHeightAt(int worldX, int worldZ) const {
-    // »ñÈ¡ÔëÉùÖµ£¨Ê¹ÓÃ»º´æ»òÊµÊ±¼ÆËã£©
-    float heightValue = m_impl->getCachedNoise(worldX, worldZ);
-
-    // Ó³Éäµ½Êµ¼Ê¸ß¶È
-    float minHeight = m_params.seaLevel * Chunk::HEIGHT;
-    float maxHeight = m_params.mountainLevel * Chunk::HEIGHT;
-
-    return minHeight + heightValue * (maxHeight - minHeight);
+    float heightValue = m_impl->generateTerrainNoise(worldX, worldZ);
+    return heightValue * Chunk::HEIGHT;
 }
 
 BlockType TerrainGenerator::getBlockAt(int worldX, int worldY, int worldZ) const {
-    // »ñÈ¡¸ß¶È
-    float heightValue = m_impl->getCachedNoise(worldX, worldZ);
-    float minHeight = m_params.seaLevel * Chunk::HEIGHT;
-    float maxHeight = m_params.mountainLevel * Chunk::HEIGHT;
-    int groundHeight = static_cast<int>(
-        minHeight + heightValue * (maxHeight - minHeight)
-        );
+    float heightValue = m_impl->generateTerrainNoise(worldX, worldZ);
+    int groundHeight = std::clamp(
+        static_cast<int>(heightValue * Chunk::HEIGHT),
+        0, Chunk::HEIGHT - 1);
 
-    // È·±£¸ß¶ÈÔÚºÏÀí·¶Î§ÄÚ
-    groundHeight = std::clamp(groundHeight, 0, Chunk::HEIGHT - 1);
-
-    // ¸ù¾Ý¸ß¶ÈÅÐ¶Ï·½¿éÀàÐÍ
     if (worldY > groundHeight) {
         return BLOCK_AIR;
     }
-    else if (worldY >= groundHeight - m_params.dirtDepth) {
-        return BLOCK_DIRT;
-    }
-    else {
+    if (worldY < 45) {
         return BLOCK_STONE;
     }
+    if (worldY == groundHeight) {
+        return (worldY >= 50) ? BLOCK_GRASS : BLOCK_DIRT;
+    }
+    return BLOCK_DIRT;
 }
