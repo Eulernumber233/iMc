@@ -82,33 +82,24 @@ void BlockOutlineRenderer::render(const glm::ivec3& blockPos,
 
     glLineWidth(m_config.lineWidth);
 
+    // 交给硬件深度测试：compositeFBO 的深度附件就是 G-Buffer 的 m_depthTexture，
+    // 已包含完整场景深度。outlineScale=1.0 让线段与方块表面完全共面，
+    // GL_LEQUAL 让等深度的后绘制线段通过测试，被前景方块挡住时则被正常剔除。
     if (m_config.depthTest) {
         glEnable(GL_DEPTH_TEST);
-    }
-    else {
+        glDepthFunc(GL_LEQUAL);
+        glDepthMask(GL_FALSE);        // 不污染深度缓冲，避免影响后续粒子/UI
+    } else {
         glDisable(GL_DEPTH_TEST);
     }
 
-    // 使用着色器
     m_shader.use();
 
-    // 绑定深度纹理（如果存在）
-    if (m_depthTexture) {
-        glActiveTexture(GL_TEXTURE3);
-        glBindTexture(GL_TEXTURE_2D, m_depthTexture);
-        m_shader.setInt("uDepthTexture", 3);
-        m_shader.setInt("uDepthTestEnabled", 1);
-    } else {
-        m_shader.setInt("uDepthTestEnabled", 0);
-    }
-
-    // 设置变换矩阵
     m_shader.setMat4("uModel", model);
     m_shader.setMat4("uView", view);
     m_shader.setMat4("uProjection", projection);
 
     m_shader.setVec3("uOutlineColor", m_config.color);
-    //m_shader.setFloat("uTime", time);
     m_shader.setFloat("uPulseSpeed", m_config.pulseSpeed);
     m_shader.setFloat("uPulseIntensity", m_config.pulseIntensity);
     m_shader.setInt("uEnablePulse", m_config.enablePulse ? 1 : 0);
@@ -118,5 +109,9 @@ void BlockOutlineRenderer::render(const glm::ivec3& blockPos,
         GL_UNSIGNED_INT, 0);
     glBindVertexArray(0);
 
+    if (m_config.depthTest) {
+        glDepthFunc(GL_LESS);
+        glDepthMask(GL_TRUE);
+    }
     glEnable(GL_DEPTH_TEST);
 }

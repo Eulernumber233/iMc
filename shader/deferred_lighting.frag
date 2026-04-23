@@ -133,6 +133,8 @@ float PCSS_VSSM_Filter(vec2 uv, float filterRadiusUV, float currentDepth, vec2 r
     // 低频抖动角度：每 4x4 屏幕像素共享同一角度（配合后续可加空间模糊）
     float angle = IGN(floor(rotUV * 0.25)) * 6.2831853;
     float ca = cos(angle), sa = sin(angle);
+
+    // 打破 16 个固定方向的环形伪影
     mat2 rot = mat2(ca, -sa, sa, ca);
 
     float sum = 0.0;

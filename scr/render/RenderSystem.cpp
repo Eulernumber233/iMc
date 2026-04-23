@@ -247,8 +247,11 @@ bool RenderSystem::initialize() {
     outlineConfig.pulseSpeed = 3.0f;
     outlineConfig.pulseIntensity = 0.15f;
     outlineConfig.enablePulse = true;
-    outlineConfig.depthTest = false;  // 禁用深度测试，确保边框始终可见
-    outlineConfig.outlineScale = 1.005f;  // 稍微放大
+    // 启用硬件深度测试（GL_LEQUAL），让被前景方块挡住的边自动剔除。
+    // outlineScale 必须保持 1.0 与方块表面共面，否则放大后线段浮在表面前方，
+    // LEQUAL 会让 12 条边全部通过测试（背面也画出来）。
+    outlineConfig.depthTest = true;
+    outlineConfig.outlineScale = 1.0f;
     m_outlineRenderer.setConfig(outlineConfig);
 
 
@@ -768,13 +771,8 @@ void RenderSystem::render(const ChunkManager& chunkManager,
 }
 
 void RenderSystem::renderOutlines(const glm::mat4& view, const glm::mat4& projection) {
-    // 更新边框渲染器的时间
+    // 遮挡交由 compositeFBO 的深度附件做硬件深度测试，无需再传入深度纹理。
     m_outlineRenderer.updateTime(m_currentTime);
-
-    // 设置深度纹理用于遮挡检测
-    m_outlineRenderer.setDepthTexture(m_depthTexture);
-
-    // 渲染选中方块的边框
     m_outlineRenderer.render(m_selectedBlockPos, view, projection, m_currentTime);
 }
 

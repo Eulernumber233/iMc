@@ -716,8 +716,11 @@ void Player::setSelectedSlot(int slot) {
 // ==================== 方块选择更新 ====================
 
 void Player::updateBlockSelection(ChunkManager& chunkManager, RenderSystem& renderSystem) {
-    // 从摄像机获取视线
-    std::shared_ptr<Ray> ray = m_camera->GetViewRay();
+    // 射线必须从玩家眼睛位置发出，而不是 m_camera->Position。
+    // 第三人称下相机已退后到玩家身后，若用相机位置会让交互距离凭空增加。
+    glm::vec3 cameraOffset = m_isCrouching ? m_cameraOffsetCrouching : m_cameraOffsetStanding;
+    glm::vec3 eyePos = m_position + cameraOffset;
+    auto ray = std::make_shared<Ray>(eyePos, m_camera->Front);
     Ray::HitResult hitResult = ray->cast(&chunkManager, m_interactionDistance);
 
     m_selection.hasSelected = hitResult.hit;
