@@ -104,7 +104,6 @@ float ChebyshevUpperBound(vec2 moments, float currentDepth) {
 }
 
 // Interleaved Gradient Noise（Jimenez 2014）——基于屏幕坐标的低频抖动
-// 相比 fract(sin(...)) 噪声更低频、更连贯，配合一次空间平均后视觉上几乎无噪
 float IGN(vec2 p) {
     return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
 }

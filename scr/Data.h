@@ -199,4 +199,4 @@ const unsigned int SCR_HEIGHT = 900;
 const unsigned int SHADOW_WIDTH = 4096;
 const unsigned int SHADOW_HEIGHT = 4096;
 
-const float MAX_SHADOW_DISTANCE = 300.0f;
+const float MAX_SHADOW_DISTANCE = 180.0f;

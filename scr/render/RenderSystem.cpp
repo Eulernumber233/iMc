@@ -563,7 +563,8 @@ bool RenderSystem::createGBuffer() {
     glBindFramebuffer(GL_FRAMEBUFFER, m_ssaoBlurFBO);
     glGenTextures(1, &m_ssaoColorBufferBlur);
     glBindTexture(GL_TEXTURE_2D, m_ssaoColorBufferBlur);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R16F, m_screenWidth, m_screenHeight, 0, GL_RED, GL_FLOAT, nullptr);    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R16F, m_screenWidth, m_screenHeight, 0, GL_RED, GL_FLOAT, nullptr);    
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -856,20 +857,7 @@ void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std
         return;
     }
 
-    // ==== 稳定的阴影范围 ====
-    // 关键点：radius 必须是【恒定常量】，center 也必须稳定（仅跟随相机前向 step-wise 移动）。
-    // 若 radius 随相机每帧变化，每帧 worldUnitsPerTexel 就会变，snap 效果消失；
-    // 若 center 是视锥 8 角点的平均（受视角方向影响），相机一转 center 就会平移，
-    // 某些在边界的物体就会进出阴影范围 → 产生"阴影消失又出现"。
-
-    // 固定半径：覆盖半径必须 >= 视锥最大半径才能包含整个视锥
-    // tan(fov/2)*farDist 大致就是远平面半径；对 FOV=45°、MAX=300，约 124m，远平面对角线 ~175m
-    const float SHADOW_RADIUS = MAX_SHADOW_DISTANCE * 0.6f; // 180m 足够
-    const float radius = SHADOW_RADIUS;
-
-    // center：把【相机位置 + 相机前向 * offset】作为锚点，
-    // 但相机前向随转动变化很快，所以改用【纯相机位置】 —— 阴影范围以相机为中心。
-    // 这样转头不会移动阴影范围，只有移动相机位置时才会（配合 snap-to-texel 可阶跃式移动）。
+    const float radius = MAX_SHADOW_DISTANCE;
     glm::vec3 center = camera->Position;
 
     // 光源视图：看向 center
@@ -878,7 +866,7 @@ void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std
     glm::vec3 lightEye = center - lightDirNorm * (radius + 50.0f);
     glm::mat4 lightView = glm::lookAt(lightEye, center, glm::vec3(0.0f, 1.0f, 0.0f));
 
-    // ---- 正确的 snap-to-texel ----
+    // ---- snap-to-texel ----
     // 在光源空间把 center 的 XY 分量 snap 到纹素网格，然后【用 snapped 位置重新计算 lightEye 和 lightView】
     // 这样 light-space 坐标系原点就锁在纹素整数位置，相机小范围移动时整个阴影贴图内容不变，
     // 只有 center 跨过纹素边界时才会"跳"一格 —— 但那一格相对整个纹理几乎不可见。
@@ -900,7 +888,7 @@ void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std
         lightView = glm::lookAt(lightEye, newCenter, glm::vec3(0.0f, 1.0f, 0.0f));
     }
 
-    // 正交框固定为 [-radius, radius]，尺寸恒定不再抖动
+    // 正交框固定为 [-radius, radius]
     float left = -radius, right = radius;
     float bottom = -radius, top = radius;
     float nearP = 0.0f;
@@ -922,9 +910,7 @@ void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std
     glClearColor(1.0f, 1.0f, 0.0f, 0.0f);
     glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
 
-    // 注意：不再使用 glPolygonOffset。正交投影下 depth 范围被压到 [0,1]，
-    // 任何固定 offset 在 depth 单位下都被放大 (farP-nearP) 倍，会把所有几何推到深度 1.0。
-    // 改为 shader 端的 slope-scale bias（CalculateBias）处理自阴影。
+
     glCullFace(GL_BACK);
 
     const auto& renderData = chunkManager.getRenderData();
