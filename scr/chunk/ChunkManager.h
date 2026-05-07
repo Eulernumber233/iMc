@@ -5,12 +5,21 @@
 #include <queue>
 #include <glm/glm.hpp>
 #include "BlockType.h"
+#include "ChunkArena.h"
 #include "../Camera.h"
-#include <mutex>   
+#include <mutex>
 
-//#include "../generate/TerrainGenerator.h"
 // 区块键（64位整数）
 using ChunkKey = int64_t;
+
+// 与 OpenGL 4.3 的 DrawElementsIndirectCommand 二进制布局一致
+struct DrawElementsIndirectCommand {
+    GLuint count;          // 顶点索引数（每个面 6）
+    GLuint instanceCount;  // 该 chunk 的面数
+    GLuint firstIndex;     // 共享索引起点（0）
+    GLint  baseVertex;     // 共享顶点起点（0）
+    GLuint baseInstance;   // 该 chunk 在 arena 中的实例偏移
+};
 
 // 区块管理器 - 负责加载、卸载和管理区块
 class Chunk;
@@ -27,11 +36,16 @@ public:
     // 更新（每帧调用）
     void update(std::shared_ptr<Camera> camera);
 
-    // 获取渲染数据
-    const std::vector<InstanceData>& getRenderData() const {
-        return m_instanceData;
+    // 当前帧的 indirect 绘制命令（per-chunk 一条）
+    const std::vector<DrawElementsIndirectCommand>& getDrawCommands() const {
+        return m_drawCommands;
     }
-    std::mutex& getRenderDataMutex() { return m_renderDataMutex; }  
+    // arena VBO（实例属性数据源）
+    GLuint getArenaVBO() const { return m_arena.getVBO(); }
+    // CPU 端 indirect buffer 已经填好的 GL 对象（绑定后即可 MDI）
+    GLuint getIndirectBuffer() const { return m_indirectBuffer; }
+    int getVisibleInstanceCount() const { return m_visibleInstanceCount; }
+    std::mutex& getRenderDataMutex() { return m_renderDataMutex; }
 
     // 获取区块
     Chunk* getChunk(const glm::ivec2& chunkPos);
@@ -62,9 +76,18 @@ private:
     std::unordered_map<ChunkKey, std::unique_ptr<Chunk>> m_loadedChunks;
     std::vector<Chunk*> m_visibleChunks;
 
-    // 渲染数据（合并所有可见区块的实例化数据）
-    std::vector<InstanceData> m_instanceData;
-    mutable std::mutex m_renderDataMutex;   // 保护 m_instanceData
+    // GPU 端实例数据：所有 chunk 共用一块大 VBO，每个 chunk 占据其中一段
+    ChunkArena m_arena;
+    // 每个已分配 slot 的 chunk 的对应 slot（key 同 m_loadedChunks）
+    std::unordered_map<ChunkKey, ChunkArena::Slot> m_chunkSlots;
+
+    // 本帧 indirect 命令（CPU 端构建，写入 m_indirectBuffer 后 MDI 提交）
+    std::vector<DrawElementsIndirectCommand> m_drawCommands;
+    GLuint m_indirectBuffer = 0;
+    GLsizeiptr m_indirectBufferCapacityBytes = 0;
+    int m_visibleInstanceCount = 0;
+
+    mutable std::mutex m_renderDataMutex;
 
     // 渲染半径
     int m_renderRadius;
@@ -86,8 +109,15 @@ private:
     void loadChunk(const glm::ivec2& chunkPos);
     void unloadChunk(const glm::ivec2& chunkPos);
 
-    // 合并渲染数据
-    void mergeRenderData();
+    // 把脏 chunk 的 mesh 上传到 arena，构建本帧 indirect 命令
+    void rebuildDrawCommands();
+
+    // 把单个 chunk 的最新 mesh 上传到 arena（必要时分配/换段）
+    void uploadChunkToArena(Chunk* chunk);
+    // 释放 chunk 的 arena slot
+    void releaseChunkSlot(ChunkKey key);
+    // 把 m_drawCommands 同步到 GPU indirect buffer
+    void syncIndirectBuffer();
 
     // 检查区块是否应该可见
     bool shouldChunkBeVisible(const glm::ivec2& chunkPos,

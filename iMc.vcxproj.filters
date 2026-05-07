@@ -24,6 +24,9 @@
     <ClCompile Include="scr\chunk\ChunkManager.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="scr\chunk\ChunkArena.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="scr\collision\Ray.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
@@ -99,6 +102,9 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="scr\chunk\ChunkManager.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\chunk\ChunkArena.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="scr\collision\Ray.h">

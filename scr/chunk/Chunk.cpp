@@ -39,6 +39,7 @@ void Chunk::load() {
     calculateVisibility();
 
     m_isLoaded = true;
+    m_dirty = true;
 
     // 输出调试信息
     //print_m_instanceData();
@@ -119,6 +120,7 @@ void Chunk::is_boundary_face_visible(Chunk* self, BlockFace face)
         }
         break;
     }
+    m_dirty = true;
 }
 
 glm::ivec3 Chunk::getWorldPos(int localX, int localY, int localZ) const {
@@ -456,6 +458,7 @@ BlockType Chunk::setBlockAndUpdate(int x, int y, int z, BlockType newType) {
         // 锁定邻居区块
         //std::lock_guard<std::mutex> neighborLock(neighborChunk->m_mutex);
         neighborChunk->updateFaceUnlocked(lx, ny, lz, neighborFaces[i]);
+        if (neighborChunk != this) neighborChunk->m_dirty = true;
     }
 
     // 4. 检查是否需要压缩
@@ -463,6 +466,7 @@ BlockType Chunk::setBlockAndUpdate(int x, int y, int z, BlockType newType) {
         compactInstanceDataUnlocked();
     }
 
+    m_dirty = true;
     return oldType;
 }
 

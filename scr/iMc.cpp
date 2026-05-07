@@ -31,7 +31,8 @@ bool setWindowIcon(GLFWwindow* window, const char* iconPath) {
 GLFWwindow* initAll() {
     // 1. 初始化GLFW
     glfwInit();
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    // 4.3 core：方块渲染走 glMultiDrawElementsIndirect + baseInstance（4.2 起进核心）
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_DEPTH_BITS, 24);  // 确保默认帧缓冲有深度缓冲区

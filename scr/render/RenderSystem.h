@@ -25,20 +25,24 @@ public:
     BlockRenderer();
     ~BlockRenderer();
     bool initialize();
-    void render(const std::vector<InstanceData>& instanceMatrices,
+    // 把 arena VBO 绑定为本 VAO 的实例属性源；arena 扩容后需要重新调用
+    void bindArenaVBO(GLuint arenaVBO);
+    // MDI 渲染：indirectBuffer 中存放 cmdCount 条 DrawElementsIndirectCommand
+    void render(GLuint indirectBuffer, int cmdCount,
         const glm::mat4& view, const glm::mat4& projection);
-    void renderDepth(const std::vector<InstanceData>& instanceData,
+    void renderDepth(GLuint indirectBuffer, int cmdCount,
         const glm::mat4& lightSpaceMatrix, float near, float far);
     GLuint getVAO() const { return VAO; }
     void setTextureArray(GLuint texArray) { m_textureArray = texArray; }
 
 private:
     void createFaceVertices();
+    void bindInstanceAttribs();
 
     GLuint VAO;
     GLuint VBO;
     GLuint EBO;
-    GLuint m_instanceDataVBO;
+    GLuint m_currentArenaVBO = 0;
     GLuint m_textureArray = 0;
     std::vector<unsigned int> m_indices;
     std::vector<FaceVertex> m_vertices;

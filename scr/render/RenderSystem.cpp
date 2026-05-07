@@ -8,7 +8,7 @@
 #include "../mode/PlayerModel.h"
 #include <random>
 BlockRenderer::BlockRenderer()
-    : VAO(0), VBO(0), m_instanceDataVBO(0), EBO(0) {
+    : VAO(0), VBO(0), EBO(0) {
 
 }
 
@@ -23,7 +23,6 @@ bool BlockRenderer::initialize() {
     glGenVertexArrays(1, &VAO);
     glGenBuffers(1, &VBO);
     glGenBuffers(1, &EBO);
-    glGenBuffers(1, &m_instanceDataVBO);
 
     glBindVertexArray(VAO);
     // 绑定顶点数据
@@ -37,96 +36,79 @@ bool BlockRenderer::initialize() {
         m_indices.data(), GL_STATIC_DRAW);
 
     // 配置顶点属性
-    // 位置属性（location 0）
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(FaceVertex),
         (void*)offsetof(FaceVertex, position));
     glEnableVertexAttribArray(0);
-
-    // 3. 法线属性（location 1）
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(FaceVertex),
         (void*)offsetof(FaceVertex, normal));
     glEnableVertexAttribArray(1);
-
-    // 纹理坐标属性 (location 2)
     glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE,
         sizeof(FaceVertex), (void*)offsetof(FaceVertex, texCoord));
     glEnableVertexAttribArray(2);
 
-    //glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof(FaceVertex),
-    //    (void*)offsetof(FaceVertex, tangent));
-    //glEnableVertexAttribArray(3);
+    // 实例属性的具体源 VBO 由 ChunkManager 通过 bindArenaVBO 注入
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-    //glVertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, sizeof(FaceVertex),
-    //    (void*)offsetof(FaceVertex, bitangent));
-    //glEnableVertexAttribArray(4);
+    return true;
+}
 
-
-    glBindBuffer(GL_ARRAY_BUFFER, m_instanceDataVBO);
-    // 预分配空间（假设最大10000个实例）
-    glBufferData(GL_ARRAY_BUFFER, sizeof(InstanceData) * 10000, NULL, GL_DYNAMIC_DRAW);
-
-    // 设置实例属性 (location 5-8)
-    // 位置 (vec3)
+void BlockRenderer::bindInstanceAttribs() {
+    // 调用前需保证 VAO 已绑定且 GL_ARRAY_BUFFER 已绑定到 arena VBO
     glEnableVertexAttribArray(5);
     glVertexAttribPointer(5, 3, GL_FLOAT, GL_FALSE, sizeof(InstanceData), (void*)offsetof(InstanceData, position));
     glVertexAttribDivisor(5, 1);
 
-    // 面索引 (int)
     glEnableVertexAttribArray(6);
     glVertexAttribIPointer(6, 1, GL_INT, sizeof(InstanceData), (void*)offsetof(InstanceData, faceIndex));
     glVertexAttribDivisor(6, 1);
 
-    // 方块类型 (int)
     glEnableVertexAttribArray(7);
     glVertexAttribIPointer(7, 1, GL_INT, sizeof(InstanceData), (void*)offsetof(InstanceData, blockType));
     glVertexAttribDivisor(7, 1);
 
-    // 纹理层索引 (int)
     glEnableVertexAttribArray(8);
     glVertexAttribIPointer(8, 1, GL_INT, sizeof(InstanceData), (void*)offsetof(InstanceData, textureLayer));
     glVertexAttribDivisor(8, 1);
+}
 
+void BlockRenderer::bindArenaVBO(GLuint arenaVBO) {
+    if (arenaVBO == 0) return;
+    if (arenaVBO == m_currentArenaVBO) return;
+    m_currentArenaVBO = arenaVBO;
+
+    glBindVertexArray(VAO);
+    glBindBuffer(GL_ARRAY_BUFFER, arenaVBO);
+    bindInstanceAttribs();
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
-
-
-    return true;
 }
-void BlockRenderer::render(
-    const std::vector<InstanceData>& instanceData,
-    const glm::mat4& view,
-    const glm::mat4& projection
-)
+
+void BlockRenderer::render(GLuint indirectBuffer, int cmdCount,
+    const glm::mat4& view, const glm::mat4& projection)
 {
-    if (instanceData.empty()) return;
+    if (cmdCount <= 0 || indirectBuffer == 0) return;
 
     m_shader.use();
     m_shader.setMat4("uView", view);
     m_shader.setMat4("uProjection", projection);
 
-    // 绑定纹理数组
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D_ARRAY, m_textureArray);
     m_shader.setInt("uTextureArray", 0);
 
-    // 上传实例数据
-    glBindBuffer(GL_ARRAY_BUFFER, m_instanceDataVBO);
-    glBufferData(GL_ARRAY_BUFFER, instanceData.size() * sizeof(InstanceData),
-        instanceData.data(), GL_STREAM_DRAW);
-
-    // 绘制
     glBindVertexArray(VAO);
-    glDrawElementsInstanced(GL_TRIANGLES,
-        static_cast<GLsizei>(m_indices.size()),
-        GL_UNSIGNED_INT, 0,
-        static_cast<GLsizei>(instanceData.size()));
+    glBindBuffer(GL_DRAW_INDIRECT_BUFFER, indirectBuffer);
+    glMultiDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_INT,
+        (const void*)0, cmdCount, 0);
+    glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
     glBindVertexArray(0);
 }
 
-void BlockRenderer::renderDepth(const std::vector<InstanceData>& instanceData,
-    const glm::mat4& lightSpaceMatrix,
-    float near, float far) {
-    if (instanceData.empty()) return;
+void BlockRenderer::renderDepth(GLuint indirectBuffer, int cmdCount,
+    const glm::mat4& lightSpaceMatrix, float near, float far)
+{
+    if (cmdCount <= 0 || indirectBuffer == 0) return;
 
     m_depthShader.use();
     m_depthShader.setMat4("lightSpaceMatrix", lightSpaceMatrix);
@@ -134,14 +116,11 @@ void BlockRenderer::renderDepth(const std::vector<InstanceData>& instanceData,
     m_depthShader.setFloat("dir_far", far);
 
     glBindVertexArray(VAO);
-    glBindBuffer(GL_ARRAY_BUFFER, m_instanceDataVBO);
-    glBufferData(GL_ARRAY_BUFFER, instanceData.size() * sizeof(InstanceData),
-        instanceData.data(), GL_STREAM_DRAW);
-
-    glDrawElementsInstanced(GL_TRIANGLES, m_indices.size(),
-        GL_UNSIGNED_INT, 0, instanceData.size());
+    glBindBuffer(GL_DRAW_INDIRECT_BUFFER, indirectBuffer);
+    glMultiDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_INT,
+        (const void*)0, cmdCount, 0);
+    glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
     glBindVertexArray(0);
-
 }
 
 void BlockRenderer::createFaceVertices() {
@@ -800,14 +779,14 @@ void RenderSystem::geometryPass(const ChunkManager& chunkManager,
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
 
-    //printt_RenderData(renderData);
-    // 获取渲染数据
-    const auto& renderData = chunkManager.getRenderData();
+    // arena 可能因扩容换了底层 VBO，每帧重绑（内部已做相等短路）
+    m_blockRenderer.bindArenaVBO(chunkManager.getArenaVBO());
 
-    if (!renderData.empty()) {
-        m_blockRenderer.render(renderData, view, projection);
-        m_drawCalls++;
-        m_totalInstances += renderData.size();
+    const auto& cmds = chunkManager.getDrawCommands();
+    if (!cmds.empty()) {
+        m_blockRenderer.render(chunkManager.getIndirectBuffer(), (int)cmds.size(), view, projection);
+        m_drawCalls++;     // 一次 MDI 算一次 draw call
+        m_totalInstances += chunkManager.getVisibleInstanceCount();
     }
     // 解绑FBO
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -913,11 +892,12 @@ void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std
 
     glCullFace(GL_BACK);
 
-    const auto& renderData = chunkManager.getRenderData();
-    if (!renderData.empty()) {
-        m_blockRenderer.renderDepth(renderData, lightSpaceMatrix, nearP, farP);
+    m_blockRenderer.bindArenaVBO(chunkManager.getArenaVBO());
+    const auto& cmds = chunkManager.getDrawCommands();
+    if (!cmds.empty()) {
+        m_blockRenderer.renderDepth(chunkManager.getIndirectBuffer(), (int)cmds.size(),
+            lightSpaceMatrix, nearP, farP);
         m_drawCalls++;
-        m_totalInstances += renderData.size();
     }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, m_screenWidth, m_screenHeight);

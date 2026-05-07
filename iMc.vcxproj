@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -129,6 +129,7 @@
     <ClCompile Include="scr\chunk\BlockType.cpp" />
     <ClCompile Include="scr\chunk\Chunk.cpp" />
     <ClCompile Include="scr\chunk\ChunkManager.cpp" />
+    <ClCompile Include="scr\chunk\ChunkArena.cpp" />
     <ClCompile Include="scr\collision\Ray.cpp" />
     <ClCompile Include="scr\collision\AABB.cpp" />
     <ClCompile Include="scr\generate\Noise.cpp" />
@@ -157,6 +158,7 @@
     <ClInclude Include="scr\chunk\BlockType.h" />
     <ClInclude Include="scr\chunk\Chunk.h" />
     <ClInclude Include="scr\chunk\ChunkManager.h" />
+    <ClInclude Include="scr\chunk\ChunkArena.h" />
     <ClInclude Include="scr\collision\Ray.h" />
     <ClInclude Include="scr\collision\AABB.h" />
     <ClInclude Include="scr\collision\PhysicsConstants.h" />

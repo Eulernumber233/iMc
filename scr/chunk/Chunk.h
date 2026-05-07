@@ -49,10 +49,18 @@ public:
     BlockType setBlockAndUpdate(int x, int y, int z, BlockType newType);
 
 
-    // 获取实例化数据
+    // 获取实例化数据（CPU 侧 staging，用于上传到 ChunkArena）
     const std::vector<InstanceData>& getInstanceData() const {
         return m_instanceData;
     }
+
+    // 脏标记：mesh 数据相对 GPU 缓冲是否过期
+    bool isDirty() const { return m_dirty; }
+    void markDirty() { m_dirty = true; }
+    void clearDirty() { m_dirty = false; }
+
+    // 当前面数（含 BLOCK_ERRER 占位；上传 GPU 前会被 compact 掉）
+    size_t getInstanceCount() const { return m_instanceData.size(); }
 
     // 获取渲染统计
     int getTotalInstances() const;
@@ -94,6 +102,7 @@ private:
     // 状态标志
     bool m_isLoaded;
     bool m_isVisible;
+    bool m_dirty = true;   // 自上次上传到 GPU 后被修改过
     std::vector<bool>m_boundary_face_isLoaded = { false }; // 标记边界面是否进行了可见性判断 0:+X  1:-X  2:+Z  3:-Z
 
 	// 可见性缓存
