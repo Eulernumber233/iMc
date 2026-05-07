@@ -1,20 +1,25 @@
 ﻿#include "ChunkManager.h"
+#include "Chunk.h"
+#include "Section.h"
+#include "../generate/TerrainGenerator.h"
 #include <iostream>
 #include <algorithm>
-#include "Chunk.h"
+#include <thread>
 
 ChunkManager::ChunkManager(unsigned int seed)
     : m_renderRadius(8) {
-	generator = std::make_shared<TerrainGenerator>();
-	generator->setSeed(seed);
+    m_generator = std::make_shared<TerrainGenerator>();
+    m_generator->setSeed(seed);
 }
 
 ChunkManager::~ChunkManager() {
-    // 清理所有区块
+    m_workerPool.stop();
+
     m_loadedChunks.clear();
-    m_visibleChunks.clear();
-    m_chunkSlots.clear();
+    m_activeChunks.clear();
+    m_sectionSlots.clear();
     m_drawCommands.clear();
+    m_inFlight.clear();
 
     if (m_indirectBuffer) {
         glDeleteBuffers(1, &m_indirectBuffer);
@@ -23,11 +28,20 @@ ChunkManager::~ChunkManager() {
     m_arena.shutdown();
 }
 
+SectionKey ChunkManager::makeSectionKey(int chunkX, int chunkZ, int sectionY) {
+    uint64_t ux = (uint32_t)chunkX & 0xFFFFFFu;
+    uint64_t uz = (uint32_t)chunkZ & 0xFFFFFFu;
+    uint64_t uy = (uint32_t)sectionY & 0xFFu;
+    return (ux << 32) | (uz << 8) | uy;
+}
+
 void ChunkManager::initialize(int renderRadius, const glm::vec3& cameraPos) {
     m_renderRadius = renderRadius;
-    m_currentCenterChunk = glm::ivec2(0);
+    m_currentCenterChunk = glm::ivec2(
+        (int)std::floor(cameraPos.x / Chunk::WIDTH),
+        (int)std::floor(cameraPos.z / Chunk::DEPTH)
+    );
 
-    // 初始 arena 容量按典型可见 chunk 数预估（(2R+1)^2 * 平均面数）
     const uint32_t initialInstances = std::max<uint32_t>(1u << 16,
         (uint32_t)((2 * renderRadius + 1) * (2 * renderRadius + 1) * 1024));
     m_arena.initialize(initialInstances);
@@ -38,68 +52,56 @@ void ChunkManager::initialize(int renderRadius, const glm::vec3& cameraPos) {
     glBufferData(GL_DRAW_INDIRECT_BUFFER, m_indirectBufferCapacityBytes, nullptr, GL_DYNAMIC_DRAW);
     glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
 
-    updateVisibleChunks(cameraPos);
+    int hw = (int)std::thread::hardware_concurrency();
+    int n = std::max(2, std::min(8, hw - 2));
+    m_workerPool.start(m_generator.get(), n);
+
+    updateActiveChunks(cameraPos);
 }
 
 void ChunkManager::update(std::shared_ptr<Camera> camera) {
     m_camera = camera;
     glm::ivec2 cameraChunk(
-        static_cast<int>(std::floor(m_camera->Position.x / Chunk::WIDTH)),
-        static_cast<int>(std::floor(m_camera->Position.z / Chunk::DEPTH))
+        (int)std::floor(m_camera->Position.x / Chunk::WIDTH),
+        (int)std::floor(m_camera->Position.z / Chunk::DEPTH)
     );
-
     if (cameraChunk != m_currentCenterChunk) {
         m_currentCenterChunk = cameraChunk;
-        updateVisibleChunks(m_camera->Position);
+        updateActiveChunks(m_camera->Position);
     }
 
-    int loadsThisFrame = 0;
-    while (!m_loadQueue.empty() && loadsThisFrame < MAX_LOADS_PER_FRAME) {
-        glm::ivec2 chunkPos = m_loadQueue.front();
-        m_loadQueue.pop();
+    // 把已完成的 worker result 接管进来（push 进 m_activeChunks）
+    integrateBuiltChunks();
 
-        loadChunk(chunkPos);
-        loadsThisFrame++;
+    // 补投递：初始化或一次性大批量请求时 MAX_INFLIGHT_REQUESTS 限流会丢一部分；
+    // 完成的 chunk 腾出 in-flight 配额后，每帧扫一次半径内缺失的 chunk 把它们补上。
+    if ((int)m_inFlight.size() < MAX_INFLIGHT_REQUESTS) {
+        requestMissingChunks();
     }
 
     rebuildDrawCommands();
 }
 
 Chunk* ChunkManager::getChunk(const glm::ivec2& chunkPos) {
-    ChunkKey key = chunkPosToKey(chunkPos);
-    auto it = m_loadedChunks.find(key);
-    if (it != m_loadedChunks.end()) {
-        return it->second.get();
-    }
-    return nullptr;
+    auto it = m_loadedChunks.find(chunkPosToKey(chunkPos));
+    return it != m_loadedChunks.end() ? it->second.get() : nullptr;
 }
 
-Chunk* ChunkManager::getChunk(int x, int z){
-    glm::ivec2 a = { x, z };
-    return getChunk(a);
+Chunk* ChunkManager::getChunk(int x, int z) {
+    return getChunk(glm::ivec2(x, z));
 }
 
-Chunk* ChunkManager::getChunkAtWorld(const glm::vec3& worldPos) {
-    glm::ivec2 chunkPos(
-        static_cast<int>(std::floor(worldPos.x / Chunk::WIDTH)),
-        static_cast<int>(std::floor(worldPos.z / Chunk::DEPTH))
-    );
-    return getChunk(chunkPos);
-}
-
-std::vector<glm::ivec2> ChunkManager::getVisibleChunkPositions()const
-{
-    std::vector<glm::ivec2>ret;
-    for(auto chunk : m_visibleChunks){
-        ret.push_back(chunk->getPosition());
-	}
+std::vector<glm::ivec2> ChunkManager::getActiveChunkPositions() const {
+    std::vector<glm::ivec2> ret;
+    ret.reserve(m_activeChunks.size());
+    for (auto chunk : m_activeChunks) ret.push_back(chunk->getPosition());
     return ret;
 }
 
 void ChunkManager::setRenderRadius(int radius) {
     if (radius > 0 && radius != m_renderRadius) {
         m_renderRadius = radius;
-        updateVisibleChunks(glm::vec3(
+        updateActiveChunks(glm::vec3(
             m_currentCenterChunk.x * Chunk::WIDTH + Chunk::WIDTH / 2.0f,
             Chunk::HEIGHT / 2.0f,
             m_currentCenterChunk.y * Chunk::DEPTH + Chunk::DEPTH / 2.0f
@@ -107,159 +109,202 @@ void ChunkManager::setRenderRadius(int radius) {
     }
 }
 
-int ChunkManager::getTotalInstances() const {
-    return m_visibleInstanceCount;
-}
-
 void ChunkManager::printStats() const {
     std::cout << "=== Chunk Manager Stats ===" << std::endl;
     std::cout << "Render Radius: " << m_renderRadius << std::endl;
     std::cout << "Loaded Chunks: " << getLoadedChunkCount() << std::endl;
-    std::cout << "Visible Chunks: " << getVisibleChunkCount() << std::endl;
+    std::cout << "Active Chunks: " << getActiveChunkCount() << std::endl;
     std::cout << "Visible Instances: " << m_visibleInstanceCount << std::endl;
-    std::cout << "Arena: " << m_arena.getInUse() << " / " << m_arena.getCapacity() << " instances" << std::endl;
+    std::cout << "InFlight: " << m_inFlight.size()
+              << " / WorkerPending: " << m_workerPool.pendingCount() << std::endl;
+    std::cout << "Arena: " << m_arena.getInUse() << " / " << m_arena.getCapacity()
+              << " | freeBlocks=" << m_arena.getFreeBlockCount()
+              << " largestFree=" << m_arena.getLargestFreeBlock() << std::endl;
     std::cout << "===========================" << std::endl;
 }
 
 ChunkKey ChunkManager::chunkPosToKey(const glm::ivec2& pos) const {
-    return ((static_cast<int64_t>(pos.x) & 0xFFFFFFFF) << 32) |
-        (static_cast<int64_t>(pos.y) & 0xFFFFFFFF);
+    return ((int64_t)(uint32_t)pos.x << 32) | (int64_t)(uint32_t)pos.y;
 }
 
-void ChunkManager::updateVisibleChunks(const glm::vec3& cameraPos) {
-    m_visibleChunks.clear();
+bool ChunkManager::isWithinActiveRadius(const glm::ivec2& chunkPos,
+                                        const glm::ivec2& centerChunk) const {
+    int dx = std::abs(chunkPos.x - centerChunk.x);
+    int dz = std::abs(chunkPos.y - centerChunk.y);
+    return dx <= m_renderRadius && dz <= m_renderRadius;
+}
+
+void ChunkManager::updateActiveChunks(const glm::vec3& cameraPos) {
+    m_activeChunks.clear();
 
     for (int dx = -m_renderRadius; dx <= m_renderRadius; ++dx) {
         for (int dz = -m_renderRadius; dz <= m_renderRadius; ++dz) {
-            glm::ivec2 chunkPos(m_currentCenterChunk.x + dx,
-                m_currentCenterChunk.y + dz);
+            glm::ivec2 chunkPos(m_currentCenterChunk.x + dx, m_currentCenterChunk.y + dz);
 
-            if (shouldChunkBeVisible(chunkPos, m_currentCenterChunk)) {
-                Chunk* chunk = getChunk(chunkPos);
-
-                if (chunk) {
-                    chunk->setVisible(true);
-                    m_visibleChunks.push_back(chunk);
-                }
-                else {
-                    m_loadQueue.push(chunkPos);
+            Chunk* chunk = getChunk(chunkPos);
+            if (chunk) {
+                m_activeChunks.push_back(chunk);
+            } else {
+                if ((int)m_inFlight.size() < MAX_INFLIGHT_REQUESTS) {
+                    requestChunkLoad(chunkPos);
                 }
             }
         }
     }
+}
 
-    // 把不再可见的 chunk 标记为不可见（卸载策略另议）
-    for (const auto& pair : m_loadedChunks) {
-        Chunk* chunk = pair.second.get();
-        glm::ivec2 chunkPos = chunk->getPosition();
-
-        if (!shouldChunkBeVisible(chunkPos, m_currentCenterChunk)) {
-            chunk->setVisible(false);
+void ChunkManager::requestMissingChunks() {
+    // 优先靠近相机中心：用曼哈顿距离逐圈扩散
+    for (int r = 0; r <= m_renderRadius; ++r) {
+        if ((int)m_inFlight.size() >= MAX_INFLIGHT_REQUESTS) return;
+        for (int dx = -r; dx <= r; ++dx) {
+            int absDx = std::abs(dx);
+            for (int dz = -r; dz <= r; ++dz) {
+                if (std::max(absDx, std::abs(dz)) != r) continue; // 只取最外圈
+                glm::ivec2 chunkPos(m_currentCenterChunk.x + dx, m_currentCenterChunk.y + dz);
+                if (getChunk(chunkPos)) continue;
+                if (m_inFlight.find(chunkPosToKey(chunkPos)) != m_inFlight.end()) continue;
+                if ((int)m_inFlight.size() >= MAX_INFLIGHT_REQUESTS) return;
+                requestChunkLoad(chunkPos);
+            }
         }
     }
 }
 
-void ChunkManager::loadChunk(const glm::ivec2& chunkPos) {
-    if (getChunk(chunkPos) != nullptr) {
-        return;
-    }
-
-    auto chunk = std::make_unique<Chunk>(chunkPos,this);
+void ChunkManager::requestChunkLoad(const glm::ivec2& chunkPos) {
     ChunkKey key = chunkPosToKey(chunkPos);
-
-    chunk->load();
-
-    m_visibleChunks.push_back(chunk.get());
-    chunk->setVisible(true);
-
-    m_loadedChunks[key] = std::move(chunk);
-
-    std::cout << "Loaded chunk at (" << chunkPos.x << ", " << chunkPos.y << ")" << std::endl;
+    if (m_loadedChunks.find(key) != m_loadedChunks.end()) return;
+    if (m_inFlight.find(key) != m_inFlight.end()) return;
+    m_inFlight.insert(key);
+    m_workerPool.submit(chunkPos);
 }
 
-void ChunkManager::unloadChunk(const glm::ivec2& chunkPos) {
-    ChunkKey key = chunkPosToKey(chunkPos);
-    auto it = m_loadedChunks.find(key);
+void ChunkManager::integrateBuiltChunks() {
+    auto results = m_workerPool.drainCompleted();
+    for (auto& r : results) {
+        ChunkKey key = chunkPosToKey(r.pos);
+        m_inFlight.erase(key);
 
-    if (it != m_loadedChunks.end()) {
-        std::cout << "Unloading chunk at (" << chunkPos.x << ", " << chunkPos.y << ")" << std::endl;
-        releaseChunkSlot(key);
-        m_loadedChunks.erase(it);
+        // 已存在（极少情况：重复投递）→ 丢弃。
+        if (m_loadedChunks.find(key) != m_loadedChunks.end()) continue;
+
+        auto chunk = std::make_unique<Chunk>(r.pos, this);
+        chunk->adoptSections(std::move(r.sections));
+
+        Chunk* raw = chunk.get();
+        m_loadedChunks[key] = std::move(chunk);
+        linkNeighbors(raw);
+        raw->stitchHorizontalNeighbors();
+
+        // 仍在玩家半径内才加入活跃列表
+        if (isWithinActiveRadius(r.pos, m_currentCenterChunk)) {
+            m_activeChunks.push_back(raw);
+        }
     }
 }
 
-void ChunkManager::releaseChunkSlot(ChunkKey key) {
-    auto it = m_chunkSlots.find(key);
-    if (it == m_chunkSlots.end()) return;
+void ChunkManager::linkNeighbors(Chunk* newChunk) {
+    glm::ivec2 p = newChunk->getPosition();
+    Chunk* xp = getChunk(p.x + 1, p.y);
+    Chunk* xn = getChunk(p.x - 1, p.y);
+    Chunk* zp = getChunk(p.x, p.y + 1);
+    Chunk* zn = getChunk(p.x, p.y - 1);
+
+    newChunk->m_neighbors[0] = xp;
+    newChunk->m_neighbors[1] = xn;
+    newChunk->m_neighbors[2] = zp;
+    newChunk->m_neighbors[3] = zn;
+
+    if (xp) xp->m_neighbors[1] = newChunk;
+    if (xn) xn->m_neighbors[0] = newChunk;
+    if (zp) zp->m_neighbors[3] = newChunk;
+    if (zn) zn->m_neighbors[2] = newChunk;
+}
+
+void ChunkManager::releaseSectionSlot(SectionKey key) {
+    auto it = m_sectionSlots.find(key);
+    if (it == m_sectionSlots.end()) return;
     m_arena.free(it->second);
-    m_chunkSlots.erase(it);
+    m_sectionSlots.erase(it);
 }
 
-void ChunkManager::uploadChunkToArena(Chunk* chunk) {
-    // 不强制 compact：g_buffer.frag 对 BLOCK_ERRER 已 discard，
-    // BLOCK_ERRER 占位顶点只是顶点着色器里几个白扔的 ALU，远比每次都 compact 便宜。
-    // compact 由 Chunk::setBlockAndUpdate 内部按 errerCount/总数阈值触发，
-    // compact 后下一次 reupload 自然把 GPU 段同步到压缩后的尺寸。
-    const auto& data = chunk->getInstanceData();
-    ChunkKey key = chunkPosToKey(chunk->getPosition());
+void ChunkManager::uploadSection(int chunkX, int chunkZ, int sectionY,
+                                 Section& section, int& uploadBudget) {
+    if (uploadBudget <= 0) return;
 
-    auto it = m_chunkSlots.find(key);
-    ChunkArena::Slot oldSlot = (it != m_chunkSlots.end()) ? it->second : ChunkArena::Slot{};
+    SectionKey key = makeSectionKey(chunkX, chunkZ, sectionY);
+    const auto& data = section.getInstanceData();
+
+    auto it = m_sectionSlots.find(key);
+    ChunkArena::Slot oldSlot = (it != m_sectionSlots.end()) ? it->second : ChunkArena::Slot{};
     ChunkArena::Slot newSlot = m_arena.reupload(oldSlot,
         data.empty() ? nullptr : data.data(),
         (uint32_t)data.size());
 
-    if (newSlot.valid() || data.empty()) {
-        if (data.empty()) {
-            // 没有面，把 slot 释放掉
-            if (oldSlot.valid()) m_chunkSlots.erase(key);
-        } else {
-            m_chunkSlots[key] = newSlot;
-        }
+    if (data.empty()) {
+        if (oldSlot.valid()) m_sectionSlots.erase(key);
+    } else if (newSlot.valid()) {
+        m_sectionSlots[key] = newSlot;
     }
-    chunk->clearDirty();
+
+    section.clearDirty();
+    --uploadBudget;
 }
 
 void ChunkManager::rebuildDrawCommands() {
-    std::lock_guard<std::mutex> lock(m_renderDataMutex);
-
     m_drawCommands.clear();
-    m_drawCommands.reserve(m_visibleChunks.size());
     m_visibleInstanceCount = 0;
 
-    for (Chunk* chunk : m_visibleChunks) {
-        if (!chunk->isVisible() || !chunk->is_can_render(m_camera)) continue;
+    int uploadBudget = MAX_UPLOADS_PER_FRAME;
 
-        // 脏的就上传一遍
-        if (chunk->isDirty()) {
-            uploadChunkToArena(chunk);
+    // 第一遍：所有已加载 chunk 的脏 section 都尝试上传。
+    // 跨 chunk stitch 可能改到当前不渲染的 chunk 的 mesh，必须先把数据传上去。
+    for (auto& kv : m_loadedChunks) {
+        Chunk* chunk = kv.second.get();
+        if (!chunk->isMeshReady()) continue;
+        for (int sy = 0; sy < Chunk::SECTION_COUNT; ++sy) {
+            Section& s = chunk->getSection(sy);
+            if (s.isDirty()) {
+                glm::ivec2 cp = chunk->getPosition();
+                uploadSection(cp.x, cp.y, sy, s, uploadBudget);
+                if (uploadBudget <= 0) break;
+            }
         }
+        if (uploadBudget <= 0) break;
+    }
 
-        ChunkKey key = chunkPosToKey(chunk->getPosition());
-        auto it = m_chunkSlots.find(key);
-        if (it == m_chunkSlots.end()) continue;       // 该 chunk 没有面（如纯空气）
-        const ChunkArena::Slot& slot = it->second;
-        if (slot.count == 0) continue;
+    // 第二遍：按 active chunk -> per-section 视锥/距离剔除生成 indirect 命令
+    for (Chunk* chunk : m_activeChunks) {
+        if (!chunk->isMeshReady()) continue;
+        if (!chunk->isChunkPotentiallyVisible(m_camera)) continue;
 
-        DrawElementsIndirectCommand cmd{};
-        cmd.count = 6;                  // 一个面 2 个三角形 6 个顶点
-        cmd.instanceCount = slot.count;
-        cmd.firstIndex = 0;
-        cmd.baseVertex = 0;
-        cmd.baseInstance = slot.offset;
-        m_drawCommands.push_back(cmd);
+        for (int sy = 0; sy < Chunk::SECTION_COUNT; ++sy) {
+            if (!chunk->isSectionVisible(sy, m_camera)) continue;
 
-        m_visibleInstanceCount += slot.count;
+            SectionKey key = makeSectionKey(chunk->getPosition().x,
+                                            chunk->getPosition().y, sy);
+            auto it = m_sectionSlots.find(key);
+            if (it == m_sectionSlots.end()) continue;
+            const ChunkArena::Slot& slot = it->second;
+            if (slot.count == 0) continue;
+
+            DrawElementsIndirectCommand cmd{};
+            cmd.count = 6;
+            cmd.instanceCount = slot.count;
+            cmd.firstIndex = 0;
+            cmd.baseVertex = 0;
+            cmd.baseInstance = slot.offset;
+            m_drawCommands.push_back(cmd);
+            m_visibleInstanceCount += slot.count;
+        }
     }
 
     syncIndirectBuffer();
 }
 
 void ChunkManager::syncIndirectBuffer() {
-    if (!m_indirectBuffer) return;
-    if (m_drawCommands.empty()) return;
-
-    GLsizeiptr needed = GLsizeiptr(m_drawCommands.size()) * sizeof(DrawElementsIndirectCommand);
+    if (!m_indirectBuffer || m_drawCommands.empty()) return;
+    GLsizeiptr needed = (GLsizeiptr)m_drawCommands.size() * sizeof(DrawElementsIndirectCommand);
     glBindBuffer(GL_DRAW_INDIRECT_BUFFER, m_indirectBuffer);
     if (needed > m_indirectBufferCapacityBytes) {
         m_indirectBufferCapacityBytes = needed * 2;
@@ -269,27 +314,10 @@ void ChunkManager::syncIndirectBuffer() {
     glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
 }
 
-bool ChunkManager::shouldChunkBeVisible(const glm::ivec2& chunkPos,
-    const glm::ivec2& centerChunk) const {
-    int dx = std::abs(chunkPos.x - centerChunk.x);
-    int dz = std::abs(chunkPos.y - centerChunk.y);
-    return dx <= m_renderRadius && dz <= m_renderRadius;
-}
-
-float ChunkManager::distanceToCamera(const glm::ivec2& chunkPos,
-    const glm::vec3& cameraPos) const {
-    glm::vec3 chunkCenter(
-        chunkPos.x * Chunk::WIDTH + Chunk::WIDTH / 2.0f,
-        Chunk::HEIGHT / 2.0f,
-        chunkPos.y * Chunk::DEPTH + Chunk::DEPTH / 2.0f
-    );
-    return glm::distance(chunkCenter, cameraPos);
-}
-
 bool ChunkManager::setBlock(const glm::ivec3& worldPos, BlockType type) {
     glm::ivec2 chunkPos(
-        static_cast<int>(std::floor(worldPos.x / (float)Chunk::WIDTH)),
-        static_cast<int>(std::floor(worldPos.z / (float)Chunk::DEPTH))
+        (int)std::floor(worldPos.x / (float)Chunk::WIDTH),
+        (int)std::floor(worldPos.z / (float)Chunk::DEPTH)
     );
     Chunk* chunk = getChunk(chunkPos);
     if (!chunk) return false;
@@ -305,14 +333,13 @@ bool ChunkManager::setBlock(const glm::ivec3& worldPos, BlockType type) {
     return true;
 }
 
-BlockType ChunkManager::getBlockAt(const glm::ivec3& worldPos){
+BlockType ChunkManager::getBlockAt(const glm::ivec3& worldPos) {
     glm::ivec2 chunkPos(
-        static_cast<int>(std::floor(worldPos.x / (float)Chunk::WIDTH)),
-        static_cast<int>(std::floor(worldPos.z / (float)Chunk::DEPTH))
+        (int)std::floor(worldPos.x / (float)Chunk::WIDTH),
+        (int)std::floor(worldPos.z / (float)Chunk::DEPTH)
     );
     Chunk* chunk = getChunk(chunkPos);
     if (!chunk) return BLOCK_AIR;
-
     glm::ivec3 localPos(
         ((worldPos.x % Chunk::WIDTH) + Chunk::WIDTH) % Chunk::WIDTH,
         worldPos.y,

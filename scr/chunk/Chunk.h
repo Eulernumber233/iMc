@@ -1,140 +1,103 @@
 ﻿#pragma once
 #include "../core.h"
 #include "BlockType.h"
+#include "Section.h"
 #include "ChunkManager.h"
+#include <array>
 #include <vector>
-#include <unordered_map>
 #include <glm/glm.hpp>
 #include <memory>
 #include "../Camera.h"
-#include "../generate/TerrainGenerator.h"
-#include <mutex>   // 新增
+#include <mutex>
 
-// 区块类 - 管理16x64x16区域的方块
+// 区块：16x64x16，由 4 个 16x16x16 Section 组成（Y 方向堆叠）。
 class Chunk {
 public:
-    // 使用常量
-    static constexpr int WIDTH = ChunkConstants::CHUNK_WIDTH;
+    static constexpr int WIDTH  = ChunkConstants::CHUNK_WIDTH;
     static constexpr int HEIGHT = ChunkConstants::CHUNK_HEIGHT;
-    static constexpr int DEPTH = ChunkConstants::CHUNK_DEPTH;
+    static constexpr int DEPTH  = ChunkConstants::CHUNK_DEPTH;
     static constexpr int VOLUME = ChunkConstants::CHUNK_VOLUME;
+    static constexpr int SECTION_COUNT = HEIGHT / Section::HEIGHT; // 4
 
-    // 构造函数/析构函数
-    Chunk(const glm::ivec2& position, ChunkManager* chunkManager);  // position是区块的XZ坐标（Y轴是连续的）
+    Chunk(const glm::ivec2& position, ChunkManager* chunkManager);
     ~Chunk();
 
-    // 加载区块：生成地形并计算可见性
-    void load();
     void unload();
-    void is_boundary_face_visible(Chunk* self, BlockFace face);
 
+    // 由 worker 走完后，主线程调用 adoptSections 把 result 装入本对象。
+    // sections 数组已经由 worker 计算过 visibility（仅 section 内 + 垂直邻居）。
+    void adoptSections(std::array<Section, SECTION_COUNT>&& sections);
 
-    // 获取区块状态
+    // 把横向（4 邻居）的边界面双向缝合：本 chunk 与 4 个已加载邻居各自 mesh 互改。
+    void stitchHorizontalNeighbors();
+
+    // 状态
     bool isLoaded() const { return m_isLoaded; }
-    bool isVisible() const { return m_isVisible; }
-    void setVisible(bool visible) { m_isVisible = visible; }
+    bool isMeshReady() const { return m_meshReady; }
 
-    // 获取区块位置
     glm::ivec2 getPosition() const { return m_position; }
-    glm::ivec3 getWorldPos(int localX, int localY, int localZ) const;
     glm::vec3 getCenter() const;
+    const glm::vec3& getMinPos() const { return m_minPos; }
+    const glm::vec3& getMaxPos() const { return m_maxPos; }
 
-    // 获取方块
+    // 全局（chunk 局部）坐标，y ∈ [0, HEIGHT)
     BlockType getBlock(int x, int y, int z) const;
-
-    // 设置方块
-    void setBlock(int x, int y, int z, BlockType block);
-
-    // 新增：增量更新方块（返回旧类型）
+    void setBlock(int x, int y, int z, BlockType b);
     BlockType setBlockAndUpdate(int x, int y, int z, BlockType newType);
 
+    // section 访问
+    Section& getSection(int sy) { return m_sections[sy]; }
+    const Section& getSection(int sy) const { return m_sections[sy]; }
+    static int sectionIndexOf(int worldY) { return worldY / Section::HEIGHT; }
+    static int sectionLocalY(int worldY) { return worldY % Section::HEIGHT; }
 
-    // 获取实例化数据（CPU 侧 staging，用于上传到 ChunkArena）
-    const std::vector<InstanceData>& getInstanceData() const {
-        return m_instanceData;
-    }
+    // 把所有 section 标脏（用于 stitch 之后整体重传）
+    void markAllDirty();
 
-    // 脏标记：mesh 数据相对 GPU 缓冲是否过期
-    bool isDirty() const { return m_dirty; }
-    void markDirty() { m_dirty = true; }
-    void clearDirty() { m_dirty = false; }
+    // 渲染层可见性 —— 粗剔（chunk 整体 AABB + 距离），每帧/每相机状态变化时重算并缓存
+    bool isChunkPotentiallyVisible(std::shared_ptr<Camera> camera);
+    // 渲染层可见性 —— 精剔（section AABB），调用前应先确认 isChunkPotentiallyVisible
+    bool isSectionVisible(int sectionY, std::shared_ptr<Camera> camera) const;
 
-    // 当前面数（含 BLOCK_ERRER 占位；上传 GPU 前会被 compact 掉）
-    size_t getInstanceCount() const { return m_instanceData.size(); }
+    // 给 ChunkManager 调用：把本 chunk 在 face 方向的边界面与 other 缝合（双向）。
+    // face: 本 chunk 视角的方向（RIGHT/LEFT/FRONT/BACK 之一）
+    void stitchWithNeighbor(Chunk* other, BlockFace faceFromSelf);
 
-    // 获取渲染统计
-    int getTotalInstances() const;
-    void printDebugInfo() const;
-    void print_m_instanceData()const;
-
-    // 摄像机视锥剔除
-	bool is_can_render(std::shared_ptr<Camera> camera);
-    // 判断点是否在平面正面（可见）
-    bool isPointInFrontOfPlane(const glm::vec3& point, const glm::vec4& plane) {
-        return glm::dot(glm::vec3(plane), point) + plane.w > 0;
-    }
-    bool isAABBInFrustum(const glm::vec3& min, const glm::vec3& max,
-        const std::array<glm::vec4, 6>& planes) const;
-
-    // 新增：互斥锁（为方便 ChunkManager 访问，设为 public）
     mutable std::mutex m_mutex;
+
 private:
-    std::shared_ptr<TerrainGenerator> generator;
-
-	ChunkManager* m_chunkManager;  // 指向区块管理器的指针
-    // 方块数据
-    std::vector<BlockType> m_blocks;
-
-    // 区块位置（只有XZ坐标，Y轴是连续的）
-    glm::ivec2 m_position;  // 区块坐标，不是世界坐标
+    ChunkManager* m_chunkManager = nullptr;
+    glm::ivec2 m_position;
     glm::vec3 m_minPos;
     glm::vec3 m_maxPos;
 
-    // 实例化数据：每种方块类型对应一个矩阵列表
-    //std::unordered_map<BlockFaceType, std::vector<glm::mat4>> m_instanceData;
-    //std::unordered_map<BlockFaceKey, int> m_PosToBlockFace;
+    std::array<Section, SECTION_COUNT> m_sections;
 
-    // 待删除计数器
-    int m_errerCount = 0;
-    std::vector<InstanceData> m_instanceData = {}; // 存储所有可见面的坐标和面信息，用于增删方块时快速查询
-	std::unordered_map<BlockFaceLocKey, int> m_PosToInstanceIndex; // 存储每个方块面对应的实例化数据索引，方便增删方块时更新实例化数据
+    bool m_isLoaded = false;
+    bool m_meshReady = false;
 
-    // 状态标志
-    bool m_isLoaded;
-    bool m_isVisible;
-    bool m_dirty = true;   // 自上次上传到 GPU 后被修改过
-    std::vector<bool>m_boundary_face_isLoaded = { false }; // 标记边界面是否进行了可见性判断 0:+X  1:-X  2:+Z  3:-Z
+    // 4 横向邻居（z+/z-/x+/x-，与原 NeighborChunk 顺序一致：0:+X 1:-X 2:+Z 3:-Z）
+    std::array<Chunk*, 4> m_neighbors{ {nullptr, nullptr, nullptr, nullptr} };
 
-	// 可见性缓存
+    // 可见性缓存（chunk 粗剔结果）
     mutable bool m_cachedVisibility = true;
     mutable int m_lastVisibilityFrame = -1;
-    glm::vec3 m_cachedCameraPos;
-    float m_cachedCameraFOV;
+    glm::vec3 m_cachedCameraPos{ 0.0f };
+    float m_cachedCameraFOV = 0.0f;
 
-    // 私有方法
-    void generateTerrain();
-    void calculateVisibility();
+    // 内部：AABB vs 视锥
+    static bool aabbInFrustum(const glm::vec3& min, const glm::vec3& max,
+        const std::array<glm::vec4, 6>& planes);
 
-    // 可见性检查
-    bool isFaceVisible(int x, int y, int z, BlockFace face) const;
-    void addFaceToInstanceData(int x, int y, int z, BlockFace face, BlockType blockType);
+    // 内部
+    Chunk* getNeighborChunk(int nx, int nz) const;
 
-    // 生成面矩阵
-    glm::mat4 createFaceMatrix(int x, int y, int z, BlockFace face) const;
+    // 给定 chunk 局部 (x,y,z) 处方块，更新它在 face 方向的可见性
+    // 会自动跨 section 路由以及跨 chunk 路由邻居
+    void updateFaceAt(int x, int y, int z, BlockFace face);
 
-    // 连接相邻区块区块
-    void connectNeighborBlock();
+    // 给定 (x,y,z) 处的方块在 face 方向的邻居方块（自动跨 section / 跨 chunk）
+    BlockType neighborBlock(int x, int y, int z, BlockFace face) const;
 
-    // 获取相邻区块
-    Chunk* getNeighborChunk(int nx,int nz)const ;
-
-    std::vector<Chunk*> NeighborChunk = std::vector<Chunk*>(4, nullptr);// 0:+X  1:-X  2:+Z  3:-Z
-
-    // 新增：无锁版本的辅助函数（假设已持有锁）
-    void removeFaceUnlocked(const BlockFaceLocKey& key);
-    void addFaceUnlocked(int x, int y, int z, BlockFace face, BlockType type);
-    void updateFaceUnlocked(int x, int y, int z, BlockFace face);
-    void compactInstanceDataUnlocked();
-
-    friend class ChunkManager;  
+    friend class ChunkManager;
 };

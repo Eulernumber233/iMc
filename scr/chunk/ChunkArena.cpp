@@ -117,6 +117,12 @@ void ChunkArena::upload(Slot& slot, const InstanceData* data, uint32_t count) {
     slot.count = count;
 }
 
+uint32_t ChunkArena::getLargestFreeBlock() const {
+    uint32_t best = 0;
+    for (const auto& fb : m_freeBlocks) if (fb.capacity > best) best = fb.capacity;
+    return best;
+}
+
 ChunkArena::Slot ChunkArena::reupload(Slot oldSlot, const InstanceData* data, uint32_t count) {
     // 容量足够就原地覆盖
     if (oldSlot.valid() && count <= oldSlot.capacity) {

@@ -38,6 +38,8 @@ namespace RenderConstants {
 
 namespace WorldConstants {
     constexpr unsigned int WORLD_SEED = 114514;
+
+    constexpr unsigned int RENDER_RADIUS = 4;
 }
 
 

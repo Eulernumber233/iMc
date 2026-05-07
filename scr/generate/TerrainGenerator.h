@@ -1,6 +1,7 @@
 ﻿// [file name]: TerrainGenerator.h
 #pragma once
 #include "../chunk/Chunk.h"
+#include "../chunk/BlockType.h"
 #include "Noise.h"
 #include <glm/glm.hpp>
 #include <functional>
@@ -26,8 +27,11 @@ public:
     // 设置种子
     void setSeed(unsigned int seed);
 
-    // 填充区块（确保边界连续）
-    void fillChunk(Chunk* chunk, const glm::ivec2& chunkPos);
+    // 线程安全：直接把方块写到外部 buffer。
+    // dst 大小必须为 ChunkConstants::CHUNK_VOLUME，
+    // 索引同 Chunk 内部布局：(y * DEPTH + z) * WIDTH + x
+    // 该接口只读 noise + seed，不依赖 generator 实例的可变状态，可在 worker 线程并发调用。
+    void fillChunkBuffer(BlockType* dst, const glm::ivec2& chunkPos) const;
 
     // 获取世界位置的高度（用于区块间连续）
     float getHeightAt(int worldX, int worldZ) const;

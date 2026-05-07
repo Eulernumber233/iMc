@@ -679,11 +679,9 @@ void RenderSystem::render(const ChunkManager& chunkManager,
     // 更新光源位置（含日出/日落平滑过渡强度 m_sunIntensity）
     move_DirLight(deltaTime);
 
-    // 更新粒子系统
-    // 获取可见区块位置信息
-    std::vector<glm::ivec2> visibleChunkPositions = chunkManager.getVisibleChunkPositions();
-
-    m_particleManager.update(deltaTime, camera, visibleChunkPositions);
+    // 粒子系统按 active chunk 范围限制采样
+    std::vector<glm::ivec2> activeChunkPositions = chunkManager.getActiveChunkPositions();
+    m_particleManager.update(deltaTime, camera, activeChunkPositions);
 
     // 几何通道：渲染方块到 G-Buffer
     geometryPass(chunkManager, view, projection);
@@ -827,8 +825,8 @@ void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std
     , float& sunShine_near, float& sunShine_far, glm::mat4& lightSpaceMatrix)
 {
     // 夜晚（阳光强度为 0）：冻结上一帧的阴影矩阵，不再重建。
-    // 这样避免光方向接近水平时 lookAt 退化、阴影贴图乱跳；且夜晚着色器不使用阴影，
-    // 即便矩阵过期也无视觉影响。首次进入夜晚若无缓存则跳过阴影渲染。
+    // 避免光方向接近水平时 lookAt 退化、阴影贴图乱跳；且夜晚着色器不使用阴影，
+    // 首次进入夜晚若无缓存则跳过阴影渲染。
     if (m_sunIntensity <= 0.001f && m_hasCachedLightMatrix) {
         lightSpaceMatrix = m_cachedLightSpaceMatrix;
         sunShine_near    = m_cachedSunNear;
@@ -846,9 +844,7 @@ void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std
     glm::mat4 lightView = glm::lookAt(lightEye, center, glm::vec3(0.0f, 1.0f, 0.0f));
 
     // ---- snap-to-texel ----
-    // 在光源空间把 center 的 XY 分量 snap 到纹素网格，然后【用 snapped 位置重新计算 lightEye 和 lightView】
-    // 这样 light-space 坐标系原点就锁在纹素整数位置，相机小范围移动时整个阴影贴图内容不变，
-    // 只有 center 跨过纹素边界时才会"跳"一格 —— 但那一格相对整个纹理几乎不可见。
+    // 只有 center 跨过纹素边界时才会跳一格
     {
         const float worldUnitsPerTexel = (2.0f * radius) / float(SHADOW_WIDTH);
         glm::vec4 centerLS = lightView * glm::vec4(center, 1.0f);
@@ -879,8 +875,8 @@ void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std
     // 这里的 sunShine_near/far 仅用于 PCSS 的世界尺度换算，不再用于 LinearizeDepth。
     sunShine_near = nearP;
     sunShine_far  = farP;
-
     lightSpaceMatrix = lightProjection * lightView;
+
 
     // 渲染场景到深度贴图
     glViewport(0, 0, SHADOW_WIDTH, SHADOW_HEIGHT);
@@ -888,10 +884,7 @@ void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std
     // 清除为“最远”深度（m1=1, m2=1），保证未被写入区域不会产生假阴影
     glClearColor(1.0f, 1.0f, 0.0f, 0.0f);
     glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
-
-
     glCullFace(GL_BACK);
-
     m_blockRenderer.bindArenaVBO(chunkManager.getArenaVBO());
     const auto& cmds = chunkManager.getDrawCommands();
     if (!cmds.empty()) {
@@ -901,6 +894,7 @@ void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std
     }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, m_screenWidth, m_screenHeight);
+
 
     // VSSM 的 blocker search 需要 mipmap 提供区域均值，必须每帧重生成
     glBindTexture(GL_TEXTURE_2D, m_depthMap);

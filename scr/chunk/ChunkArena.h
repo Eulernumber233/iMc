@@ -10,7 +10,6 @@
 class ChunkArena {
 public:
     struct Slot {
-        // 单位：InstanceData 个数（不是字节）
         uint32_t offset = 0;
         uint32_t capacity = 0;   // 已分配空间（实例数）
         uint32_t count = 0;      // 实际有效实例数 (count <= capacity)
@@ -20,21 +19,18 @@ public:
     ChunkArena();
     ~ChunkArena();
 
-    // 创建底层 VBO，预留 initialInstances 个 InstanceData 的空间。
-    // 必须在有效 GL 上下文内调用。
+    // 创建底层 VBO
     bool initialize(uint32_t initialInstances);
 
-    // 销毁底层 GL 资源
     void shutdown();
 
     // 申请一段空间。capacity 向上取整到 SLOT_ALIGN 的倍数。
-    // 失败返回 invalid slot（capacity == 0）。
     Slot allocate(uint32_t requestedInstances);
 
     // 释放 slot；slot.capacity 之后归还到 free list
     void free(const Slot& slot);
 
-    // 把 data 上传到 slot 起始处，更新 slot.count
+    // 更新 slot.count
     // 调用方需保证 data.size() <= slot.capacity
     void upload(Slot& slot, const InstanceData* data, uint32_t count);
 
@@ -45,8 +41,11 @@ public:
     GLuint getVBO() const { return m_vbo; }
     uint32_t getCapacity() const { return m_capacity; }
     uint32_t getInUse() const { return m_inUse; }   // 已分配出去的总实例数
+    // 外部碎片统计：free list 里的块数 / 最大空闲块
+    int getFreeBlockCount() const { return (int)m_freeBlocks.size(); }
+    uint32_t getLargestFreeBlock() const;
 
-    // arena 对齐粒度（实例为单位）。64 个面 ≈ 一段 cache 行级别，避免碎片爆炸
+    // arena 对齐粒度
     static constexpr uint32_t SLOT_ALIGN = 64;
 
 private:
@@ -57,7 +56,6 @@ private:
     uint32_t m_capacity = 0;     // VBO 中可容纳的 InstanceData 总数
     uint32_t m_inUse = 0;        // 当前已分配的实例数
 
-    // free list：(offset, capacity) 升序按 offset
     struct FreeBlock {
         uint32_t offset;
         uint32_t capacity;

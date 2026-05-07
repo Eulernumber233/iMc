@@ -1,134 +1,19 @@
 ﻿#include "Chunk.h"
 #include <iostream>
 #include <algorithm>
-#include <cstring>
 
-Chunk::Chunk(const glm::ivec2& position,ChunkManager* chunkManeger)
-    : m_position(position)
-    , m_isLoaded(false)
-    , m_isVisible(false)
-	, m_chunkManager(chunkManeger)
-{
-	generator = chunkManeger->getTerrainGenerator();
-    m_minPos.x = m_position.x * WIDTH;
-    m_minPos.y = 0;  // Y轴从0开始
-    m_minPos.z = m_position.y * DEPTH;
+Chunk::Chunk(const glm::ivec2& position, ChunkManager* chunkManager)
+    : m_chunkManager(chunkManager), m_position(position) {
+    m_minPos = glm::vec3(m_position.x * WIDTH, 0.0f, m_position.y * DEPTH);
+    m_maxPos = m_minPos + glm::vec3(WIDTH, HEIGHT, DEPTH);
 
-    m_maxPos.x = m_minPos.x + WIDTH;
-    m_maxPos.y = HEIGHT;
-    m_maxPos.z = m_minPos.z + DEPTH;
-    // 初始化方块数组
-    m_blocks.resize(VOLUME, BLOCK_AIR);
-
+    for (int sy = 0; sy < SECTION_COUNT; ++sy) {
+        m_sections[sy].setCoords(m_position.x, m_position.y, sy);
+    }
 }
 
 Chunk::~Chunk() {
     unload();
-}
-
-void Chunk::load() {
-    if (m_isLoaded) return;
-
-    // 生成地形
-    generateTerrain();
-
-    // 连接邻居区块
-    connectNeighborBlock();
-
-    // 计算可见性并生成实例化数据
-    calculateVisibility();
-
-    m_isLoaded = true;
-    m_dirty = true;
-
-    // 输出调试信息
-    //print_m_instanceData();
-}
-
-void Chunk::unload() {
-    if (!m_isLoaded) return;
-
-    // 清空实例化数据
-	m_instanceData.clear();
-    m_PosToInstanceIndex.clear();
-
-    // 清空方块数据
-    m_blocks.clear();
-    m_blocks.shrink_to_fit();
-
-    m_isLoaded = false;
-    m_isVisible = false;
-}
-
-void Chunk::is_boundary_face_visible(Chunk* self, BlockFace face)
-{
-    if (NeighborChunk[face] == nullptr) {
-        NeighborChunk[face] = self;
-    }
-    else {
-        std::cout << "NeightChunk is not nullptr\n";
-        return;
-    }
-
-    // 对之前未处理的边界面进行可见性判断
-    switch (face) {
-    case RIGHT:
-        for (int i = 0; i < DEPTH; i++) {
-            for (int j = 0; j < HEIGHT; j++) {
-                BlockType block = getBlock(WIDTH - 1, j, i);
-                if (block == BLOCK_AIR) continue;
-                if (self->getBlock(0, j, i) == BLOCK_AIR) {
-                    addFaceToInstanceData(WIDTH - 1, j, i, face, block);
-                }
-                else {
-					//std::cout << "RIGHT face not visible at (" << WIDTH - 1 << ", " << j << ", " << i << ")\n";
-                }
-            }
-        }
-        break;
-    case LEFT:
-        for (int i = 0; i < DEPTH; i++) {
-            for (int j = 0; j < HEIGHT; j++) {
-                BlockType block = getBlock(0, j, i);
-                if (block == BLOCK_AIR) continue;
-                if (self->getBlock(WIDTH - 1, j, i) == BLOCK_AIR) {
-                    addFaceToInstanceData(0, j, i, face, block);
-                }
-            }
-        }
-        break;
-    case FRONT:
-        for (int i = 0; i < WIDTH; i++) {
-            for (int j = 0; j < HEIGHT; j++) {
-                BlockType block = getBlock(i, j, DEPTH-1);
-                if (block == BLOCK_AIR) continue;
-                if (self->getBlock(i, j, 0) == BLOCK_AIR) {
-                    addFaceToInstanceData(i, j, DEPTH - 1, face, block);
-                }
-            }
-        }
-        break;
-    case BACK:
-        for (int i = 0; i < WIDTH; i++) {
-            for (int j = 0; j < HEIGHT; j++) {
-                BlockType block = getBlock(i, j, 0);
-                if (block == BLOCK_AIR) continue;
-                if (self->getBlock(i, j, DEPTH-1) == BLOCK_AIR) {
-                    addFaceToInstanceData(i, j, 0, face, block);
-                }
-            }
-        }
-        break;
-    }
-    m_dirty = true;
-}
-
-glm::ivec3 Chunk::getWorldPos(int localX, int localY, int localZ) const {
-    return glm::ivec3(
-        m_position.x * WIDTH + localX,
-        localY,  // Y轴是连续的
-        m_position.y * DEPTH + localZ
-    );
 }
 
 glm::vec3 Chunk::getCenter() const {
@@ -140,222 +25,209 @@ glm::vec3 Chunk::getCenter() const {
 }
 
 BlockType Chunk::getBlock(int x, int y, int z) const {
-    // 检查边界
-    if (x < 0 || x >= WIDTH ||
-        y < 0 || y >= HEIGHT ||
-        z < 0 || z >= DEPTH) {
+    if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT || z < 0 || z >= DEPTH) {
         return BLOCK_AIR;
     }
-
-    // 计算索引
-    int index = (y * DEPTH + z) * WIDTH + x;
-    return m_blocks[index];
+    int sy = y / Section::HEIGHT;
+    int ly = y % Section::HEIGHT;
+    return m_sections[sy].getBlock(x, ly, z);
 }
 
-void Chunk::setBlock(int x, int y, int z, BlockType block)
-{
-    // 检查边界
-    if (x < 0 || x >= WIDTH ||
-        y < 0 || y >= HEIGHT ||
-        z < 0 || z >= DEPTH) {
-        return;
+void Chunk::setBlock(int x, int y, int z, BlockType b) {
+    if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT || z < 0 || z >= DEPTH) return;
+    int sy = y / Section::HEIGHT;
+    int ly = y % Section::HEIGHT;
+    m_sections[sy].setBlockRaw(x, ly, z, b);
+}
+
+void Chunk::markAllDirty() {
+    for (auto& s : m_sections) s.markDirty();
+}
+
+void Chunk::adoptSections(std::array<Section, SECTION_COUNT>&& sections) {
+    for (int sy = 0; sy < SECTION_COUNT; ++sy) {
+        m_sections[sy].setCoords(m_position.x, m_position.y, sy);
+        m_sections[sy].adoptFrom(std::move(sections[sy]));
     }
-    m_blocks[(y * DEPTH + z)* WIDTH + x] = block;
+    m_isLoaded = true;
+    m_meshReady = true;
+    markAllDirty();
 }
 
-void Chunk::generateTerrain() {
-    // 使用地形生成器填充方块
-    // 生成地形
-    generator->fillChunk(this, m_position);
-    //TerrainGenerator::fillChunk(this, m_position);
+void Chunk::unload() {
+    if (!m_isLoaded) return;
+    // 把邻居反向指针清掉，避免悬挂引用
+    // slot 映射：0(+X)<->1(-X), 2(+Z)<->3(-Z)
+    static constexpr int oppSlot[4] = { 1, 0, 3, 2 };
+    for (int i = 0; i < 4; ++i) {
+        if (m_neighbors[i] && m_neighbors[i]->m_neighbors[oppSlot[i]] == this) {
+            m_neighbors[i]->m_neighbors[oppSlot[i]] = nullptr;
+        }
+        m_neighbors[i] = nullptr;
+    }
+    m_isLoaded = false;
+    m_meshReady = false;
 }
 
-void Chunk::calculateVisibility() {
-    // 清空现有实例化数据
-	m_instanceData.clear();
+Chunk* Chunk::getNeighborChunk(int nx, int nz) const {
+    if (nx < 0)        return m_neighbors[1]; // -X
+    if (nx >= WIDTH)   return m_neighbors[0]; // +X
+    if (nz < 0)        return m_neighbors[3]; // -Z
+    if (nz >= DEPTH)   return m_neighbors[2]; // +Z
+    return nullptr;
+}
 
-    BlockFace Faces[] = { BlockFace::RIGHT, BlockFace::LEFT, BlockFace::FRONT, BlockFace::BACK, BlockFace::UP, BlockFace::DOWN };
+BlockType Chunk::neighborBlock(int x, int y, int z, BlockFace face) const {
+    int nx = x, ny = y, nz = z;
+    switch (face) {
+    case RIGHT: nx++; break;
+    case LEFT:  nx--; break;
+    case UP:    ny++; break;
+    case DOWN:  ny--; break;
+    case FRONT: nz++; break;
+    case BACK:  nz--; break;
+    }
+    if (ny < 0 || ny >= HEIGHT) return BLOCK_AIR; // 顶/底视为透空
+    if (nx < 0 || nx >= WIDTH || nz < 0 || nz >= DEPTH) {
+        Chunk* nc = getNeighborChunk(nx, nz);
+        if (!nc) return BLOCK_AIR;
+        int lx = (nx + WIDTH) % WIDTH;
+        int lz = (nz + DEPTH) % DEPTH;
+        return nc->getBlock(lx, ny, lz);
+    }
+    return getBlock(nx, ny, nz);
+}
 
-    // 遍历所有方块
-    for (int z = 0; z < DEPTH; ++z) {
+void Chunk::updateFaceAt(int x, int y, int z, BlockFace face) {
+    if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT || z < 0 || z >= DEPTH) return;
+    int sy = y / Section::HEIGHT;
+    int ly = y % Section::HEIGHT;
+    BlockType nb = neighborBlock(x, y, z, face);
+    m_sections[sy].updateFaceWithNeighbor(x, ly, z, face, nb);
+}
+
+void Chunk::stitchWithNeighbor(Chunk* other, BlockFace faceFromSelf) {
+    if (!other || !m_meshReady || !other->m_meshReady) return;
+
+    // 在 self 一侧的边界（x=WIDTH-1 等）和 other 一侧（对面）双向更新。
+    BlockFace oppFace;
+    int selfX = -1, selfZ = -1;     // -1 表示该轴遍历
+    int otherX = -1, otherZ = -1;
+    switch (faceFromSelf) {
+    case RIGHT: oppFace = LEFT;  selfX = WIDTH - 1; otherX = 0; break;
+    case LEFT:  oppFace = RIGHT; selfX = 0;         otherX = WIDTH - 1; break;
+    case FRONT: oppFace = BACK;  selfZ = DEPTH - 1; otherZ = 0; break;
+    case BACK:  oppFace = FRONT; selfZ = 0;         otherZ = DEPTH - 1; break;
+    default: return;
+    }
+
+    auto runRange = [](int fixedX, int fixedZ, auto&& fn) {
         for (int y = 0; y < HEIGHT; ++y) {
-            for (int x = 0; x < WIDTH; ++x) {
-                BlockType block = getBlock(x, y, z);
+            if (fixedX >= 0) {
+                for (int z = 0; z < DEPTH; ++z) fn(fixedX, y, z);
+            } else {
+                for (int x = 0; x < WIDTH; ++x) fn(x, y, fixedZ);
+            }
+        }
+    };
 
-                // 跳过空气方块
-                if (block == BLOCK_AIR) continue;
+    // self 边界面更新
+    runRange(selfX, selfZ, [&](int x, int y, int z) {
+        updateFaceAt(x, y, z, faceFromSelf);
+    });
+    // other 边界面更新
+    runRange(otherX, otherZ, [&](int x, int y, int z) {
+        other->updateFaceAt(x, y, z, oppFace);
+    });
+}
 
-                // 获取方块属性
-                BlockProperties props = GetBlockProperties(block);
+void Chunk::stitchHorizontalNeighbors() {
+    // 4 个方向都试一次，邻居为空就跳过
+    BlockFace dirs[4] = { RIGHT, LEFT, FRONT, BACK };
+    int slots[4] = { 0, 1, 2, 3 };
+    for (int i = 0; i < 4; ++i) {
+        Chunk* nc = m_neighbors[slots[i]];
+        if (!nc) continue;
+        stitchWithNeighbor(nc, dirs[i]);
+    }
+}
 
-                // 如果是透明方块，渲染所有面（简化处理）
-                if (props.isTransparent) {
-                    for (int face = 0; face < 6; ++face) {
-                        addFaceToInstanceData(x, y, z, Faces[face], block);
-                    }
-                }
-                // 如果是固体方块，只渲染可见面
-                else if (props.isSolid) {
-                    for (int face = 0; face < 6; ++face) {
-                        if (isFaceVisible(x, y, z, Faces[face])) {
-                            addFaceToInstanceData(x, y, z, Faces[face], block);
-                        }
-                    }
-                }
+
+// 未来进一步优化：TODO
+// 持久映射（GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT）
+// addFaceLocal/removeFaceLocal 直接写映射内存，省掉 staging vector。
+BlockType Chunk::setBlockAndUpdate(int x, int y, int z, BlockType newType) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    BlockType oldType = getBlock(x, y, z);
+    if (oldType == newType) return oldType;
+
+    setBlock(x, y, z, newType);
+
+    int sy = y / Section::HEIGHT;
+    int ly = y % Section::HEIGHT;
+    Section& s = m_sections[sy];
+
+    // 1. 删除旧方块的所有面（在所属 section）
+    if (oldType != BLOCK_AIR) {
+        BlockFace allFaces[6] = { RIGHT, LEFT, FRONT, BACK, UP, DOWN };
+        for (int f = 0; f < 6; ++f) s.removeFaceLocal(x, ly, z, allFaces[f]);
+    }
+
+    // 2. 添加新方块的可见面
+    if (newType != BLOCK_AIR) {
+        BlockFace allFaces[6] = { RIGHT, LEFT, FRONT, BACK, UP, DOWN };
+        for (int f = 0; f < 6; ++f) {
+            BlockType nb = neighborBlock(x, y, z, allFaces[f]);
+            if (nb == BLOCK_AIR) {
+                s.addFaceLocal(x, ly, z, allFaces[f], newType);
             }
         }
     }
-}
 
-bool Chunk::isFaceVisible(int x, int y, int z, BlockFace face) const {
-    // 计算相邻方块的世界坐标
-    int nx = x, ny = y, nz = z;
-
-    switch (face) {
-    case RIGHT: nx++; break; // +X
-    case LEFT: nx--; break; // -X
-    case UP: ny++; break; // +Y
-    case DOWN: ny--; break; // -Y
-    case FRONT: nz++; break; // +Z
-    case BACK: nz--; break; // -Z
-    }
-
-    if (ny > HEIGHT || ny < 0) {
-        return true;
-    }
-    BlockType neighbor;
-    //BlockProperties neighborProps = GetBlockProperties(neighbor);
-    //return neighborProps.isTransparent;
-    if (nx < 0 || nx>15 || nz < 0 || nz>15) {
-        Chunk* neighbor_chunk = getNeighborChunk(nx, nz);
-
-        if (neighbor_chunk == nullptr) {
-            return false;// 相邻未加载的区块直接设为不可见面
+    // 3. 6 邻居的反向面也要重新算
+    glm::ivec3 dirs[6] = {
+        {x + 1,y,z}, {x - 1,y,z}, {x,y,z + 1}, {x,y,z - 1}, {x,y + 1,z}, {x,y - 1,z}
+    };
+    BlockFace neighborFaces[6] = { LEFT, RIGHT, BACK, FRONT, DOWN, UP };
+    for (int i = 0; i < 6; ++i) {
+        int nx = dirs[i].x, ny = dirs[i].y, nz = dirs[i].z;
+        if (ny < 0 || ny >= HEIGHT) continue;
+        if (nx < 0 || nx >= WIDTH || nz < 0 || nz >= DEPTH) {
+            Chunk* nc = getNeighborChunk(nx, nz);
+            if (!nc) continue;
+            int lx = (nx + WIDTH) % WIDTH;
+            int lz = (nz + DEPTH) % DEPTH;
+            nc->updateFaceAt(lx, ny, lz, neighborFaces[i]);
+        } else {
+            updateFaceAt(nx, ny, nz, neighborFaces[i]);
         }
-        neighbor = neighbor_chunk->getBlock((nx + WIDTH) % WIDTH, ny, (nz + DEPTH) % DEPTH);
     }
-    else {
-        neighbor = getBlock(nx, ny, nz);
+
+    // 4. 阈值压缩自己这个 section
+    if (s.getErrerCount() > (int)s.getInstanceCount() / 4) {
+        s.compact();
     }
-    return neighbor == BLOCK_AIR;
+
+    return oldType;
 }
 
-void Chunk::addFaceToInstanceData(int x, int y, int z, BlockFace face, BlockType blockType) {
-    //glm::mat4 matrix = createFaceMatrix(x, y, z, face);
-	glm::vec2 pos_world = glm::vec2(m_position.x * ChunkConstants::CHUNK_WIDTH, m_position.y * ChunkConstants::CHUNK_DEPTH);
-    m_instanceData.push_back({ glm::vec3(x + pos_world.x + 0.5f,y + 0.5f,z + pos_world.y + 0.5f)
-        ,face, blockType,BlockFaceType::getTextureLayer({blockType,face}) });
-	m_PosToInstanceIndex[{ (uint8_t)x, (uint8_t)y, (uint8_t)z, face }] = m_instanceData.size() - 1;
+bool Chunk::aabbInFrustum(const glm::vec3& min, const glm::vec3& max,
+    const std::array<glm::vec4, 6>& planes) {
+    for (const auto& plane : planes) {
+        glm::vec3 p = min;
+        if (plane.x >= 0) p.x = max.x;
+        if (plane.y >= 0) p.y = max.y;
+        if (plane.z >= 0) p.z = max.z;
+        if (glm::dot(glm::vec3(plane), p) + plane.w < 0) return false;
+    }
+    return true;
 }
 
-glm::mat4 Chunk::createFaceMatrix(int x, int y, int z, BlockFace face) const {
-    // 基础变换：平移到方块位置
-    glm::mat4 matrix = glm::translate(glm::mat4(1.0f),
-        glm::vec3(x + m_position.x * WIDTH+0.5, y+0.5, z + m_position.y * DEPTH+0.5));
-
-    // 根据面方向应用旋转
-    switch (face) {
-    case RIGHT: // +X (右)
-        matrix = glm::translate(matrix, glm::vec3(0.5f, 0.0f, 0.0f));
-        matrix = glm::rotate(matrix, glm::radians(90.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-        break;
-    case LEFT: // -X (左)
-        matrix = glm::translate(matrix, glm::vec3(-0.5f, 0.0f, 0.0f));// -0.5
-        matrix = glm::rotate(matrix, glm::radians(-90.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-       
-        break;
-    case UP: // +Y (上)
-        matrix = glm::translate(matrix, glm::vec3(0.0f, 0.5f, 0.0f));
-        matrix = glm::rotate(matrix, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-        
-        break;
-    case DOWN: // -Y (下)
-        matrix = glm::translate(matrix, glm::vec3(0.0f, -0.5f, 0.0f));// -0.5
-        matrix = glm::rotate(matrix, glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-        
-        break;
-    case FRONT: // +Z (前)
-        // 默认朝向就是+Z
-        matrix = glm::translate(matrix, glm::vec3(0.0f, 0.0f, 0.5f));
-        break;
-    case BACK: // -Z (后)
-        matrix = glm::translate(matrix, glm::vec3(0.0f, 0.0f, -0.5f));// -0.5
-        matrix = glm::rotate(matrix, glm::radians(180.0f), glm::vec3(0.0f, 1.0f, 0.0f));       
-        break;
-    }
-
-    return matrix;
-}
-
-void Chunk::connectNeighborBlock()
-{
-    NeighborChunk[0] = m_chunkManager->getChunk(m_position.x + 1, m_position.y);
-    NeighborChunk[1] = m_chunkManager->getChunk(m_position.x - 1, m_position.y);
-    NeighborChunk[2] = m_chunkManager->getChunk(m_position.x, m_position.y + 1);
-    NeighborChunk[3] = m_chunkManager->getChunk(m_position.x, m_position.y - 1);
-
-    // 此面是邻居的视角
-    BlockFace neighborFaces[4] = { BlockFace::LEFT, BlockFace::RIGHT, BlockFace::BACK, BlockFace::FRONT };
-    for (int i = 0; i < 4;i++) {
-        if (NeighborChunk[i] == nullptr)continue;
-        NeighborChunk[i]->is_boundary_face_visible(this, neighborFaces[i]);
-    }
-} 
-
-Chunk* Chunk::getNeighborChunk(int x, int z) const
-{
-    if (x < 0) {
-        return NeighborChunk[1];
-    }
-    else if (x >= WIDTH) {
-        return  NeighborChunk[0];
-    }
-    else if (z < 0) {
-        return  NeighborChunk[3];
-    }
-    else if(z >= DEPTH) {
-        return  NeighborChunk[2];
-    }
-    return  nullptr;
-}
-
-
-
-int Chunk::getTotalInstances() const {
-    int total = 0;
-    //for (const auto& pair : m_instanceData) {
-    //    total += pair.second.size();
-    //}
-    return total;
-}
-
-void Chunk::printDebugInfo() const {
-    std::cout << "=== Chunk Debug Info ===" << std::endl;
-    std::cout << "Position: (" << m_position.x << ", " << m_position.y << ")" << std::endl;
-    std::cout << "Loaded: " << (m_isLoaded ? "Yes" : "No") << std::endl;
-    std::cout << "Visible: " << (m_isVisible ? "Yes" : "No") << std::endl;
-    std::cout << "Total Instances: " << getTotalInstances() << std::endl;
-    std::cout << "========================" << std::endl;
-}
-
-void Chunk::print_m_instanceData() const
-{
-  //  std::cout << "Chunk (" << m_position.x << ", " << m_position.y
-  //      << ") loaded. Total instances: " << getTotalInstances() << std::endl;
-  //  for (auto data : m_instanceData) {
-		//std::cout << "BlockType " << static_cast<int>(data.first.type)<< "BlockFace " 
-  //          << static_cast<int>(data.first.face_id) << " has " << data.second.size() << " instances." << std::endl;
-  //  }
-}
-
-bool Chunk::is_can_render(std::shared_ptr<Camera> camera)
-{
+bool Chunk::isChunkPotentiallyVisible(std::shared_ptr<Camera> camera) {
     if (!camera) return true;
-    // 第二人称（正面视角）下相机朝向被手动翻转，camera->Yaw/Pitch 构造的视锥已不再代表实际渲染视野；
-    // 此时跳过视锥剔除，只做距离剔除
     const bool frustumEnabled = camera->FrustumCullingEnabled;
 
-    // 简单缓存机制：若相机位置变化不大则使用缓存
     static int frameCount = 0;
     frameCount++;
 
@@ -369,165 +241,36 @@ bool Chunk::is_can_render(std::shared_ptr<Camera> camera)
 
         if (frustumEnabled) {
             auto planes = camera->GetFrustumPlanes();
-            if (!isAABBInFrustum(m_minPos, m_maxPos, planes)) {
+            if (!aabbInFrustum(m_minPos, m_maxPos, planes)) {
                 m_cachedVisibility = false;
                 return false;
             }
         }
-
-        // 距离剔除
         glm::vec3 chunkCenter = getCenter();
         float distance = glm::distance(chunkCenter, camera->Position);
         const float MAX_RENDER_DISTANCE = 300.0f;
-
         m_cachedVisibility = (distance <= MAX_RENDER_DISTANCE);
     }
     return m_cachedVisibility;
 }
 
+bool Chunk::isSectionVisible(int sectionY, std::shared_ptr<Camera> camera) const {
+    if (!camera) return true;
 
-// 判断AABB是否在视锥体内（使用优化的方法）
-bool Chunk::isAABBInFrustum(const glm::vec3& min, const glm::vec3& max,
-    const std::array<glm::vec4, 6>& planes) const {
-    // 对每个平面进行测试
-    for (const auto& plane : planes) {
-        // 找到AABB在平面法线方向上的最远点（负方向最远点）
-        glm::vec3 p = min;
+    // section AABB
+    glm::vec3 smin(
+        m_position.x * (float)WIDTH,
+        sectionY * (float)Section::HEIGHT,
+        m_position.y * (float)DEPTH
+    );
+    glm::vec3 smax = smin + glm::vec3((float)Section::WIDTH, (float)Section::HEIGHT, (float)Section::DEPTH);
 
-        if (plane.x >= 0) p.x = max.x;
-        if (plane.y >= 0) p.y = max.y;
-        if (plane.z >= 0) p.z = max.z;
-
-        // 如果最远点在平面背面，则整个AABB都在平面外
-        if (glm::dot(glm::vec3(plane), p) + plane.w < 0) {
-            return false;
-        }
+    if (camera->FrustumCullingEnabled) {
+        auto planes = camera->GetFrustumPlanes();
+        if (!aabbInFrustum(smin, smax, planes)) return false;
     }
-    return true;
-}
-
-
-
-BlockType Chunk::setBlockAndUpdate(int x, int y, int z, BlockType newType) {
-    std::lock_guard<std::mutex> lock(m_mutex);   // 锁定整个更新过程
-
-    BlockType oldType = getBlock(x, y, z);
-    if (oldType == newType) return oldType;
-
-    setBlock(x, y, z, newType);
-
-    // 1. 删除旧方块的所有面
-    if (oldType != BLOCK_AIR) {
-        for (int face = 0; face < 6; ++face) {
-            removeFaceUnlocked({ (uint8_t)x, (uint8_t)y, (uint8_t)z, (BlockFace)face });
-        }
-    }
-
-    // 2. 添加新方块的面（如果新方块非空气）
-    if (newType != BLOCK_AIR) {
-        BlockFace faces[6] = { RIGHT, LEFT, FRONT, BACK, UP, DOWN };
-        for (int i = 0; i < 6; ++i) {
-            if (isFaceVisible(x, y, z, faces[i])) {
-                addFaceUnlocked(x, y, z, faces[i], newType);
-            }
-        }
-    }
-
-    // 3. 更新六个邻居的面
-    glm::ivec3 neighbors[6] = {
-        {x + 1,y,z}, {x - 1,y,z}, {x,y + 1,z}, {x,y - 1,z}, {x,y,z + 1}, {x,y,z - 1}
-    };
-    BlockFace neighborFaces[6] = { LEFT, RIGHT, DOWN, UP, BACK, FRONT };
-
-    for (int i = 0; i < 6; ++i) {
-        int nx = neighbors[i].x;
-        int ny = neighbors[i].y;
-        int nz = neighbors[i].z;
-
-        if (ny < 0 || ny >= HEIGHT) continue;   // Y轴超出，不处理
-
-        Chunk* neighborChunk = this;
-        int lx = nx, lz = nz;
-        if (nx < 0 || nx >= WIDTH || nz < 0 || nz >= DEPTH) {
-            neighborChunk = getNeighborChunk(nx, nz);
-            if (!neighborChunk) continue;
-            lx = (nx + WIDTH) % WIDTH;
-            lz = (nz + DEPTH) % DEPTH;
-        }
-
-        // 锁定邻居区块
-        //std::lock_guard<std::mutex> neighborLock(neighborChunk->m_mutex);
-        neighborChunk->updateFaceUnlocked(lx, ny, lz, neighborFaces[i]);
-        if (neighborChunk != this) neighborChunk->m_dirty = true;
-    }
-
-    // 4. 检查是否需要压缩
-    if (m_errerCount > m_instanceData.size() / 4) {
-        compactInstanceDataUnlocked();
-    }
-
-    m_dirty = true;
-    return oldType;
-}
-
-void Chunk::removeFaceUnlocked(const BlockFaceLocKey& key) {
-    auto it = m_PosToInstanceIndex.find(key);
-    if (it != m_PosToInstanceIndex.end()) {
-        int index = it->second;
-        m_instanceData[index].blockType = BLOCK_ERRER;   // 标记为错误类型（不渲染）
-        m_PosToInstanceIndex.erase(it);
-        m_errerCount++;
-    }
-}
-
-void Chunk::addFaceUnlocked(int x, int y, int z, BlockFace face, BlockType type) {
-    BlockFaceLocKey key{ (uint8_t)x, (uint8_t)y, (uint8_t)z, face };
-    if (m_PosToInstanceIndex.find(key) != m_PosToInstanceIndex.end()) {
-        return;   // 已经存在，理论上不应发生
-    }
-    glm::vec2 pos_world = glm::vec2(m_position.x * ChunkConstants::CHUNK_WIDTH, m_position.y * ChunkConstants::CHUNK_DEPTH);
-    m_instanceData.push_back({ glm::vec3(x + pos_world.x + 0.5f,y + 0.5f,z + pos_world.y + 0.5f)
-        ,face, type,BlockFaceType::getTextureLayer({type,face}) });
-    m_PosToInstanceIndex[key] = m_instanceData.size() - 1;
-}
-
-void Chunk::updateFaceUnlocked(int x, int y, int z, BlockFace face) {
-    BlockType block = getBlock(x, y, z);
-    BlockFaceLocKey key{ (uint8_t)x, (uint8_t)y, (uint8_t)z, face };
-
-    if (block == BLOCK_AIR) {
-        // 空气方块不应该有面，删除可能存在的面
-        removeFaceUnlocked(key);
-        return;
-    }
-
-    bool visible = isFaceVisible(x, y, z, face);
-    if (visible) {
-        if (m_PosToInstanceIndex.find(key) == m_PosToInstanceIndex.end()) {
-            addFaceUnlocked(x, y, z, face, block);
-        }
-    }
-    else {
-        removeFaceUnlocked(key);
-    }
-}
-
-void Chunk::compactInstanceDataUnlocked() {
-    if (m_errerCount == 0) return;
-
-    std::vector<InstanceData> newData;
-    std::unordered_map<BlockFaceLocKey, int> newMap;
-    newData.reserve(m_instanceData.size() - m_errerCount);
-
-    for (size_t i = 0; i < m_instanceData.size(); ++i) {
-        if (m_instanceData[i].blockType != BLOCK_ERRER) {
-            BlockFaceLocKey key = InstanceData::ChangeToBlockFaceLocKey(m_instanceData[i]);
-            newMap[key] = newData.size();
-            newData.push_back(m_instanceData[i]);
-        }
-    }
-
-    m_instanceData.swap(newData);
-    m_PosToInstanceIndex.swap(newMap);
-    m_errerCount = 0;
+    // 距离用 section 中心
+    glm::vec3 center = (smin + smax) * 0.5f;
+    const float MAX_RENDER_DISTANCE = 300.0f;
+    return glm::distance(center, camera->Position) <= MAX_RENDER_DISTANCE;
 }

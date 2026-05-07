@@ -51,44 +51,36 @@ void TerrainGenerator::setSeed(unsigned int seed) {
     m_impl->seed = seed;
 }
 
-void TerrainGenerator::fillChunk(Chunk* chunk, const glm::ivec2& chunkPos) {
-    if (!chunk) return;
+void TerrainGenerator::fillChunkBuffer(BlockType* dst, const glm::ivec2& chunkPos) const {
+    if (!dst) return;
 
-    int startX = chunkPos.x * Chunk::WIDTH;
-    int startZ = chunkPos.y * Chunk::DEPTH;
+    const int W = ChunkConstants::CHUNK_WIDTH;
+    const int H = ChunkConstants::CHUNK_HEIGHT;
+    const int D = ChunkConstants::CHUNK_DEPTH;
 
-    for (int localZ = 0; localZ < Chunk::DEPTH; ++localZ) {
-        for (int localX = 0; localX < Chunk::WIDTH; ++localX) {
+    int startX = chunkPos.x * W;
+    int startZ = chunkPos.y * D;
+
+    for (int localZ = 0; localZ < D; ++localZ) {
+        for (int localX = 0; localX < W; ++localX) {
             int worldX = startX + localX;
             int worldZ = startZ + localZ;
 
             float heightValue = m_impl->generateTerrainNoise(worldX, worldZ);
             int groundHeight = std::clamp(
-                static_cast<int>(heightValue * Chunk::HEIGHT),
-                0, Chunk::HEIGHT - 1);
+                static_cast<int>(heightValue * H), 0, H - 1);
 
-            for (int y = 0; y < Chunk::HEIGHT; ++y) {
+            for (int y = 0; y < H; ++y) {
                 BlockType block = BLOCK_AIR;
-
                 if (y <= groundHeight) {
-                    if (y < 45) {
-                        block = BLOCK_STONE;
-                    }
-                    else if (y == groundHeight) {
-                        block = (y >= 50) ? BLOCK_GRASS : BLOCK_DIRT;
-                    }
-                    else {
-                        block = BLOCK_DIRT;
-                    }
+                    if (y < 45)                        block = BLOCK_STONE;
+                    else if (y == groundHeight)        block = (y >= 50) ? BLOCK_GRASS : BLOCK_DIRT;
+                    else                               block = BLOCK_DIRT;
                 }
-
-                chunk->setBlock(localX, y, localZ, block);
+                dst[(y * D + localZ) * W + localX] = block;
             }
         }
     }
-
-    std::cout << "Generated terrain for chunk (" << chunkPos.x << ", "
-        << chunkPos.y << ")" << std::endl;
 }
 
 float TerrainGenerator::getHeightAt(int worldX, int worldZ) const {
