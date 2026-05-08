@@ -142,26 +142,10 @@ void Chunk::stitchWithNeighbor(Chunk* other, BlockFace faceFromSelf) {
     });
 }
 
-void Chunk::stitchHorizontalNeighbors() {
-    // 4 个方向都试一次，邻居为空就跳过
-    BlockFace dirs[4] = { RIGHT, LEFT, FRONT, BACK };
-    int slots[4] = { 0, 1, 2, 3 };
-    for (int i = 0; i < 4; ++i) {
-        Chunk* nc = m_neighbors[slots[i]];
-        if (!nc) continue;
-        stitchWithNeighbor(nc, dirs[i]);
-        nc->refreshNonEmptyMask();
-    }
-    refreshNonEmptyMask();
-}
-
-
 // 未来进一步优化：TODO
 // 持久映射（GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT）
 // addFaceLocal/removeFaceLocal 直接写映射内存，省掉 staging vector。
 BlockType Chunk::setBlockAndUpdate(int x, int y, int z, BlockType newType) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-
     BlockType oldType = getBlock(x, y, z);
     if (oldType == newType) return oldType;
 

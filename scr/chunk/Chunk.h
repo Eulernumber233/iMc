@@ -9,7 +9,6 @@
 #include <glm/glm.hpp>
 #include <memory>
 #include "../Camera.h"
-#include <mutex>
 
 // 区块：16x64x16，由 4 个 16x16x16 Section 组成（Y 方向堆叠）。
 class Chunk {
@@ -28,9 +27,6 @@ public:
     // 由 worker 走完后，主线程调用 adoptSections 把 result 装入本对象。
     // sections 数组已经由 worker 计算过 visibility（仅 section 内 + 垂直邻居）。
     void adoptSections(std::array<Section, SECTION_COUNT>&& sections);
-
-    // 把横向（4 邻居）的边界面双向缝合：本 chunk 与 4 个已加载邻居各自 mesh 互改。
-    void stitchHorizontalNeighbors();
 
     // 状态
     bool isLoaded() const { return m_isLoaded; }
@@ -71,11 +67,28 @@ public:
     // 渲染层可见性 —— 精剔（section AABB），调用前应先确认 isChunkPotentiallyVisible
     bool isSectionVisible(int sectionY, std::shared_ptr<Camera> camera) const;
 
-    // 给 ChunkManager 调用：把本 chunk 在 face 方向的边界面与 other 缝合（双向）。
+    // 给 ChunkManager / worker 调用：把本 chunk 在 face 方向的边界面与 other 缝合（双向）。
     // face: 本 chunk 视角的方向（RIGHT/LEFT/FRONT/BACK 之一）
     void stitchWithNeighbor(Chunk* other, BlockFace faceFromSelf);
 
-    mutable std::mutex m_mutex;
+    // ---------------- 异步 stitch 状态位（4 方向：0:+X 1:-X 2:+Z 3:-Z） ----------------
+    // 主线程独占读写。仅在 chunk 处于 ChunkManager::m_pendingChunks 时有意义。
+    //   m_stitchDone[i]    = 1 表示该方向已与对应邻居缝合完成
+    //   m_stitchPending[i] = 1 表示该方向 stitch 任务已投递、未完成
+    // 全部 4 位 done 之后该 chunk 才会被晋升到 m_loadedChunks 进入显示。
+    bool isStitchDone(int dir) const { return (m_stitchDone & (uint8_t)(1u << dir)) != 0; }
+    bool isStitchPending(int dir) const { return (m_stitchPending & (uint8_t)(1u << dir)) != 0; }
+    void markStitchPending(int dir) { m_stitchPending |= (uint8_t)(1u << dir); }
+    void markStitchDone(int dir) {
+        m_stitchDone |= (uint8_t)(1u << dir);
+        m_stitchPending &= (uint8_t)~(1u << dir);
+    }
+    bool allStitchDone() const { return m_stitchDone == 0x0F; }
+
+    // 同一 chunk 同时只能参与一个 stitch 任务（4 方向需串行投递），
+    // 否则两个 worker 会同时改它的 mesh 导致数据竞争。
+    bool isStitchBusy() const { return m_stitchBusy; }
+    void setStitchBusy(bool b) { m_stitchBusy = b; }
 
 private:
     ChunkManager* m_chunkManager = nullptr;
@@ -91,6 +104,11 @@ private:
 
     // 4 横向邻居（z+/z-/x+/x-，与原 NeighborChunk 顺序一致：0:+X 1:-X 2:+Z 3:-Z）
     std::array<Chunk*, 4> m_neighbors{ {nullptr, nullptr, nullptr, nullptr} };
+
+    // 异步 stitch 状态位：bit i 对应 m_neighbors[i] 方向。
+    uint8_t m_stitchDone = 0;
+    uint8_t m_stitchPending = 0;
+    bool m_stitchBusy = false;
 
     // 可见性缓存（chunk 粗剔结果）
     mutable bool m_cachedVisibility = true;

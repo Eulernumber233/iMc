@@ -42,7 +42,6 @@ public:
     size_t getInstanceCount() const { return m_instanceData.size(); }
 
     // 是否完全没有有效面（含全空气、全包裹的实心、纯被邻居挡住三种情况）。
-    // 注意：m_instanceData 可能仍含 BLOCK_ERRER 占位，但 m_PosToInstanceIndex 是 ground truth。
     bool isEmpty() const { return m_PosToInstanceIndex.empty(); }
 
     bool isDirty() const { return m_dirty; }

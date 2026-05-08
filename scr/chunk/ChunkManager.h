@@ -64,18 +64,27 @@ private:
     std::shared_ptr<TerrainGenerator> m_generator;
 
     std::shared_ptr<Camera> m_camera;
-    // 已加载的全部 chunk（含磁盘读回的、worker 产出的；目前不主动驱逐）
+
+    // PHASE 2：已完成横向 stitch、可参与渲染与玩家交互的 chunk。
     std::unordered_map<ChunkKey, std::unique_ptr<Chunk>> m_loadedChunks;
+
+    // PHASE 1：已生成方块 + 内部/垂直可见面、但还有横向边界未缝合的 chunk。
+    // 仅主线程读写。worker 的 stitch 任务只可能涉及此容器中的 chunk
+    std::unordered_map<ChunkKey, std::unique_ptr<Chunk>> m_pendingChunks;
+
     // "活跃" chunk：玩家附近、需要逻辑更新与渲染候选的 chunk。
     // 与渲染层 frustum/距离剔除无关，那部分由 Chunk::isSectionVisible 决定。
     std::vector<Chunk*> m_activeChunks;
 
+    // 投递加载区块任务 load及 stitch
     ChunkWorkerPool m_workerPool;
     std::unordered_set<ChunkKey> m_inFlight;
 
+    // 渲染数据缓冲区管理
     ChunkArena m_arena;
     std::unordered_map<SectionKey, ChunkArena::Slot> m_sectionSlots;
 
+    // 渲染指令
     std::vector<DrawElementsIndirectCommand> m_drawCommands;
     GLuint m_indirectBuffer = 0;
     GLsizeiptr m_indirectBufferCapacityBytes = 0;
@@ -95,7 +104,12 @@ private:
     // hysteresis 避免边界来回走时反复释放/重传。
     static constexpr int EVICT_MARGIN_CHUNKS = 2;
 
-    // 从 RuntimeConfig 读，运行时可调
+    // 异步 stitch 需要外圈一格的 "陪练" chunk 也已生成，否则 render 边缘的 chunk 永远凑不齐 4 邻居。
+    // 因此 build 任务的请求半径 = renderRadius + STITCH_PRELOAD_MARGIN，外圈 chunk 进 m_pendingChunks 但
+    // 不会被晋升到 m_loadedChunks（它们自己缺一个外侧邻居）。
+    static constexpr int STITCH_PRELOAD_MARGIN = 1;
+
+    // 从 RuntimeConfig 读
     int m_maxUploadsPerFrame = 8;
     int m_maxInflightRequests = 64;
 
@@ -108,6 +122,17 @@ private:
     // 扫一遍半径内还没加载且不在 in-flight 队列里的 chunk，从近到远补投递
     void requestMissingChunks();
     void integrateBuiltChunks();
+    // worker 完成的 stitch 任务回主线程：更新 stitch 状态位，必要时晋升 chunk 到 loaded。
+    void integrateStitchResults();
+
+    // 在 m_pendingChunks 中查 chunk（不查 loaded）
+    Chunk* getPendingChunk(const glm::ivec2& chunkPos);
+
+    // 给定一个 pending chunk，扫它 4 方向：邻居在 pending 且双方该方向都未 stitch
+    // 也未在投递中 → 投递 stitch 任务并标记 pending。
+    void trySubmitStitchJobs(Chunk* chunk);
+    // 若 pending chunk 的 4 方向 stitch 全部完成，把它移入 m_loadedChunks。
+    void promoteIfReady(const glm::ivec2& chunkPos);
 
     void rebuildDrawCommands();
     void uploadSection(int chunkX, int chunkZ, int sectionY, Section& section, int& uploadBudget);

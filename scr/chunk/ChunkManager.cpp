@@ -34,6 +34,7 @@ ChunkManager::~ChunkManager() {
     m_workerPool.stop();
 
     m_loadedChunks.clear();
+    m_pendingChunks.clear();
     m_activeChunks.clear();
     m_sectionSlots.clear();
     m_drawCommands.clear();
@@ -105,8 +106,10 @@ void ChunkManager::update(std::shared_ptr<Camera> camera) {
         updateActiveChunks(m_camera->Position);
     }
 
-    // 把已完成的 worker result 接管进来（push 进 m_activeChunks）
+    // 把已完成的 build worker 结果接管为 pending chunk
     integrateBuiltChunks();
+    // 把已完成的 stitch worker 结果应用到 pending chunk 的状态位，必要时晋升到 loaded
+    integrateStitchResults();
 
     // 补投递：初始化或一次性大批量请求时 m_maxInflightRequests 限流会丢一部分；
     // 完成的 chunk 腾出 in-flight 配额后，每帧扫一次半径内缺失的 chunk 把它们补上。
@@ -180,19 +183,20 @@ bool ChunkManager::isWithinEvictRadius(const glm::ivec2& chunkPos,
 void ChunkManager::updateActiveChunks(const glm::vec3& cameraPos) {
     m_activeChunks.clear();
 
+    // 1) active 半径内：已 loaded 的进 active 列表
     for (int dx = -m_renderRadius; dx <= m_renderRadius; ++dx) {
         for (int dz = -m_renderRadius; dz <= m_renderRadius; ++dz) {
             glm::ivec2 chunkPos(m_currentCenterChunk.x + dx, m_currentCenterChunk.y + dz);
-
-            Chunk* chunk = getChunk(chunkPos);
-            if (chunk) {
+            if (Chunk* chunk = getChunk(chunkPos)) {
                 m_activeChunks.push_back(chunk);
-            } else {
-                if ((int)m_inFlight.size() < m_maxInflightRequests) {
-                    requestChunkLoad(chunkPos);
-                }
             }
         }
+    }
+
+    // 2) 投递缺失的 build：从中心向外按 Chebyshev 距离逐圈扩散，确保由近到远加载。
+    //    扫描范围扩展到 stitch 预加载半径，外圈陪练用于让边缘 chunk 凑齐 4 邻居。
+    if ((int)m_inFlight.size() < m_maxInflightRequests) {
+        requestMissingChunks();
     }
 
     // 把走出 evict 半径的 chunk 的 GPU slot 释放掉（CPU 数据保留）
@@ -221,15 +225,16 @@ void ChunkManager::evictFarChunkSlots() {
 }
 
 void ChunkManager::requestMissingChunks() {
-    // 优先靠近相机中心：用曼哈顿距离逐圈扩散
-    for (int r = 0; r <= m_renderRadius; ++r) {
+    // 优先靠近相机中心：用曼哈顿距离逐圈扩散；扫描到 stitch 预加载半径以填外圈陪练。
+    const int loadR = m_renderRadius + STITCH_PRELOAD_MARGIN;
+    for (int r = 0; r <= loadR; ++r) {
         if ((int)m_inFlight.size() >= m_maxInflightRequests) return;
         for (int dx = -r; dx <= r; ++dx) {
             int absDx = std::abs(dx);
             for (int dz = -r; dz <= r; ++dz) {
                 if (std::max(absDx, std::abs(dz)) != r) continue; // 只取最外圈
                 glm::ivec2 chunkPos(m_currentCenterChunk.x + dx, m_currentCenterChunk.y + dz);
-                if (getChunk(chunkPos)) continue;
+                if (getChunk(chunkPos) || getPendingChunk(chunkPos)) continue;
                 if (m_inFlight.find(chunkPosToKey(chunkPos)) != m_inFlight.end()) continue;
                 if ((int)m_inFlight.size() >= m_maxInflightRequests) return;
                 requestChunkLoad(chunkPos);
@@ -241,9 +246,15 @@ void ChunkManager::requestMissingChunks() {
 void ChunkManager::requestChunkLoad(const glm::ivec2& chunkPos) {
     ChunkKey key = chunkPosToKey(chunkPos);
     if (m_loadedChunks.find(key) != m_loadedChunks.end()) return;
+    if (m_pendingChunks.find(key) != m_pendingChunks.end()) return;
     if (m_inFlight.find(key) != m_inFlight.end()) return;
     m_inFlight.insert(key);
     m_workerPool.submit(chunkPos);
+}
+
+Chunk* ChunkManager::getPendingChunk(const glm::ivec2& chunkPos) {
+    auto it = m_pendingChunks.find(chunkPosToKey(chunkPos));
+    return it != m_pendingChunks.end() ? it->second.get() : nullptr;
 }
 
 void ChunkManager::integrateBuiltChunks() {
@@ -253,30 +264,43 @@ void ChunkManager::integrateBuiltChunks() {
         ChunkKey key = chunkPosToKey(r.pos);
         m_inFlight.erase(key);
 
-        // 已存在（极少情况：重复投递）→ 丢弃。
+        // 已存在 → 丢弃（重复投递或竞态）。
         if (m_loadedChunks.find(key) != m_loadedChunks.end()) continue;
+        if (m_pendingChunks.find(key) != m_pendingChunks.end()) continue;
 
         auto chunk = std::make_unique<Chunk>(r.pos, this);
         chunk->adoptSections(std::move(r.sections));
 
         Chunk* raw = chunk.get();
-        m_loadedChunks[key] = std::move(chunk);
+        m_pendingChunks[key] = std::move(chunk);
+        // 邻居图只在 pending 内部连：worker stitch 任务只能涉及 pending chunk。
         linkNeighbors(raw);
-        raw->stitchHorizontalNeighbors();
 
-        // 仍在玩家半径内才加入活跃列表
-        if (isWithinActiveRadius(r.pos, m_currentCenterChunk)) {
-            m_activeChunks.push_back(raw);
+        // 投递自己 4 方向能投的 stitch；同时让已存在的邻居重新检查（它们之前可能因为
+        // self 不存在而漏投，self 入场后那条边现在能投了）。trySubmitStitchJobs 内部
+        // 会检查双方 stitch 状态，幂等，不会重复投递。
+        trySubmitStitchJobs(raw);
+        for (int d = 0; d < 4; ++d) {
+            if (Chunk* nb = raw->m_neighbors[d]) {
+                trySubmitStitchJobs(nb);
+            }
         }
     }
 }
 
 void ChunkManager::linkNeighbors(Chunk* newChunk) {
     glm::ivec2 p = newChunk->getPosition();
-    Chunk* xp = getChunk(p.x + 1, p.y);
-    Chunk* xn = getChunk(p.x - 1, p.y);
-    Chunk* zp = getChunk(p.x, p.y + 1);
-    Chunk* zn = getChunk(p.x, p.y - 1);
+    // 邻居指针对 pending / loaded 都连通：玩家交互路径（setBlockAndUpdate）需要跨 chunk
+    // 路由到任何已存在的邻居。stitch 任务的发起逻辑由 trySubmitStitchJobs 单独管控，只对
+    // pending↔pending 投递，所以指向 loaded 邻居不会触发 worker 修改 loaded mesh。
+    auto findAny = [this](const glm::ivec2& q) -> Chunk* {
+        if (Chunk* c = getPendingChunk(q)) return c;
+        return getChunk(q); // loaded
+    };
+    Chunk* xp = findAny(glm::ivec2(p.x + 1, p.y));
+    Chunk* xn = findAny(glm::ivec2(p.x - 1, p.y));
+    Chunk* zp = findAny(glm::ivec2(p.x, p.y + 1));
+    Chunk* zn = findAny(glm::ivec2(p.x, p.y - 1));
 
     newChunk->m_neighbors[0] = xp;
     newChunk->m_neighbors[1] = xn;
@@ -287,6 +311,111 @@ void ChunkManager::linkNeighbors(Chunk* newChunk) {
     if (xn) xn->m_neighbors[0] = newChunk;
     if (zp) zp->m_neighbors[3] = newChunk;
     if (zn) zn->m_neighbors[2] = newChunk;
+}
+
+void ChunkManager::trySubmitStitchJobs(Chunk* chunk) {
+    // 仅当 self 在 pending 时调用。4 方向逐个看：邻居存在且也在 pending、双方该边
+    // 都未 done 且未 pending → 投递。loaded 邻居跳过（loaded 不再参与 stitch；
+    // 不变量是 chunk 进入 loaded 时它和所有邻居的 stitch 都已经完成）。
+    //
+    // 互斥：每个 chunk 同一时刻只能参与一个 stitch 任务（m_stitchBusy）。
+    // 因为 stitchWithNeighbor 会改 self 与 nb 的 mesh，两个 worker 同时改同一 chunk
+    // 会产生数据竞争。busy 由 self 和 nb 共同决定，stitch 完成时主线程清掉双方 busy
+    // 并再次调用 trySubmitStitchJobs，把剩余方向的边继续推进。
+    static constexpr int oppDir[4] = { 1, 0, 3, 2 };
+    static const BlockFace dirToFace[4] = { RIGHT, LEFT, FRONT, BACK };
+
+    if (chunk->isStitchBusy()) return;
+
+    for (int d = 0; d < 4; ++d) {
+        if (chunk->isStitchDone(d) || chunk->isStitchPending(d)) continue;
+        Chunk* nb = chunk->m_neighbors[d];
+        if (!nb) continue;
+        // loaded 邻居：见函数注释，按 done 处理。
+        if (m_loadedChunks.find(chunkPosToKey(nb->getPosition())) != m_loadedChunks.end()) {
+            chunk->markStitchDone(d);
+            continue;
+        }
+        int od = oppDir[d];
+        if (nb->isStitchDone(od) || nb->isStitchPending(od)) continue;
+        if (nb->isStitchBusy()) continue; // 邻居正在被别的 stitch 任务占用
+
+        chunk->markStitchPending(d);
+        nb->markStitchPending(od);
+        chunk->setStitchBusy(true);
+        nb->setStitchBusy(true);
+        m_workerPool.submitStitch(chunk, nb, (uint8_t)dirToFace[d]);
+        return; // self 已经 busy，剩下的方向得等本次完成才能投
+    }
+}
+
+void ChunkManager::integrateStitchResults() {
+    PROFILE_SCOPE("integrateStitchResults");
+    auto results = m_workerPool.drainStitchResults();
+    if (results.empty()) return;
+
+    static constexpr int faceToDir[6] = { 0, 1, 2, 3, -1, -1 }; // RIGHT/LEFT/FRONT/BACK -> 0..3
+
+    for (const auto& sr : results) {
+        Chunk* a = getPendingChunk(sr.posA);
+        Chunk* b = getPendingChunk(sr.posB);
+        // 不变量：pending chunk 在 stitch 完成前不会被晋升或销毁，所以这两个查找一定命中。
+        // 防御性跳过仅为容灾。
+        if (!a || !b) continue;
+        int dA = faceToDir[sr.dirA];
+        int dB = faceToDir[sr.dirB];
+        if (dA < 0 || dB < 0) continue;
+        a->markStitchDone(dA);
+        b->markStitchDone(dB);
+        // 清除 busy，恢复 a/b 接受新 stitch 投递。
+        a->setStitchBusy(false);
+        b->setStitchBusy(false);
+    }
+
+    // 推进剩余方向：busy 解除后双方都可能再投一条新边。同时本次涉及的 chunk 还可能
+    // 让它们的"次邻居"具备投递条件（次邻居的某方向曾因为对端 busy 跳过）。
+    for (const auto& sr : results) {
+        Chunk* a = getPendingChunk(sr.posA);
+        Chunk* b = getPendingChunk(sr.posB);
+        if (a) {
+            trySubmitStitchJobs(a);
+            for (int d = 0; d < 4; ++d) if (Chunk* nb = a->m_neighbors[d]) {
+                if (m_pendingChunks.find(chunkPosToKey(nb->getPosition())) != m_pendingChunks.end())
+                    trySubmitStitchJobs(nb);
+            }
+        }
+        if (b) {
+            trySubmitStitchJobs(b);
+            for (int d = 0; d < 4; ++d) if (Chunk* nb = b->m_neighbors[d]) {
+                if (m_pendingChunks.find(chunkPosToKey(nb->getPosition())) != m_pendingChunks.end())
+                    trySubmitStitchJobs(nb);
+            }
+        }
+    }
+
+    // 再扫一遍把 4 方向都 done 的 chunk 晋升到 loaded。
+    for (const auto& sr : results) {
+        promoteIfReady(sr.posA);
+        promoteIfReady(sr.posB);
+    }
+}
+
+void ChunkManager::promoteIfReady(const glm::ivec2& chunkPos) {
+    auto it = m_pendingChunks.find(chunkPosToKey(chunkPos));
+    if (it == m_pendingChunks.end()) return;
+    Chunk* raw = it->second.get();
+    if (!raw->allStitchDone()) return;
+
+    // 4 方向都 stitch 完毕 → 晋升。邻居指针保留不动（它们指向的 pending chunk 在它们
+    // 各自晋升时也不会改 m_neighbors，所以 loaded chunk 之间的邻居图不连续是允许的：
+    // loaded chunk 不再使用 m_neighbors 做 stitch；玩家交互路径会通过 ChunkManager
+    // 的 setBlock/getBlockAt 主动按坐标查 loaded map 找邻居）。
+    auto node = m_pendingChunks.extract(it);
+    ChunkKey key = chunkPosToKey(chunkPos);
+    m_loadedChunks[key] = std::move(node.mapped());
+    if (isWithinActiveRadius(chunkPos, m_currentCenterChunk)) {
+        m_activeChunks.push_back(raw);
+    }
 }
 
 void ChunkManager::releaseSectionSlot(SectionKey key) {

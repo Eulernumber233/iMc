@@ -1,4 +1,5 @@
 ﻿#include "ChunkWorkerPool.h"
+#include "Chunk.h"
 #include "../generate/TerrainGenerator.h"
 #include <iostream>
 
@@ -14,7 +15,7 @@ void ChunkWorkerPool::start(const TerrainGenerator* generator, int numThreads) {
     m_stop.store(false);
 
     if (numThreads <= 0) numThreads = 2;
-    if (numThreads > 8) numThreads = 8;
+    //if (numThreads > 8) numThreads = 8;
 
     m_workers.reserve(numThreads);
     for (int i = 0; i < numThreads; ++i) {
@@ -39,15 +40,30 @@ void ChunkWorkerPool::stop() {
         std::lock_guard<std::mutex> lk(m_doneMutex);
         m_done.clear();
     }
+    {
+        std::lock_guard<std::mutex> lk(m_stitchDoneMutex);
+        m_stitchDone.clear();
+    }
     m_pending.store(0);
 }
 
 void ChunkWorkerPool::submit(const glm::ivec2& pos) {
     {
         std::lock_guard<std::mutex> lk(m_jobMutex);
-        m_jobs.push_back(pos);
+        Job j; j.kind = JOB_BUILD; j.pos = pos;
+        m_jobs.push_back(std::move(j));
     }
     m_pending.fetch_add(1, std::memory_order_relaxed);
+    m_jobCV.notify_one();
+}
+
+void ChunkWorkerPool::submitStitch(Chunk* a, Chunk* b, uint8_t dirAtoB) {
+    {
+        std::lock_guard<std::mutex> lk(m_jobMutex);
+        Job j; j.kind = JOB_STITCH; j.a = a; j.b = b; j.dirAtoB = dirAtoB;
+        // stitch 任务比 build 短得多 → 放队首，避免被一长串 build 阻塞
+        m_jobs.push_front(std::move(j));
+    }
     m_jobCV.notify_one();
 }
 
@@ -58,26 +74,43 @@ std::vector<ChunkBuildResult> ChunkWorkerPool::drainCompleted() {
     return out;
 }
 
+std::vector<StitchResult> ChunkWorkerPool::drainStitchResults() {
+    std::vector<StitchResult> out;
+    std::lock_guard<std::mutex> lk(m_stitchDoneMutex);
+    out.swap(m_stitchDone);
+    return out;
+}
+
 void ChunkWorkerPool::workerMain() {
     while (true) {
-        glm::ivec2 pos;
+        Job job;
         {
             std::unique_lock<std::mutex> lk(m_jobMutex);
             m_jobCV.wait(lk, [this] { return m_stop.load() || !m_jobs.empty(); });
             if (m_stop.load() && m_jobs.empty()) return;
-            pos = m_jobs.front();
+            job = m_jobs.front();
             m_jobs.pop_front();
         }
 
-        ChunkBuildResult result;
-        result.pos = pos;
-        buildOne(pos, result);
+        if (job.kind == JOB_BUILD) {
+            ChunkBuildResult result;
+            result.pos = job.pos;
+            buildOne(job.pos, result);
 
-        {
-            std::lock_guard<std::mutex> lk(m_doneMutex);
-            m_done.push_back(std::move(result));
+            {
+                std::lock_guard<std::mutex> lk(m_doneMutex);
+                m_done.push_back(std::move(result));
+            }
+            m_pending.fetch_sub(1, std::memory_order_relaxed);
+        } else {
+            StitchResult sr;
+            stitchOne(job.a, job.b, job.dirAtoB, sr);
+            {
+                std::lock_guard<std::mutex> lk(m_stitchDoneMutex);
+                m_stitchDone.push_back(sr);
+            }
+            // stitch 不计入 pendingCount（pendingCount 只跟 build 配额有关）
         }
-        m_pending.fetch_sub(1, std::memory_order_relaxed);
     }
 }
 
@@ -112,4 +145,28 @@ void ChunkWorkerPool::buildOne(const glm::ivec2& pos, ChunkBuildResult& out) con
         const Section* below = (sy > 0) ? &out.sections[sy - 1] : nullptr;
         out.sections[sy].rebuildVisibilityInternal(above, below);
     }
+}
+
+void ChunkWorkerPool::stitchOne(Chunk* a, Chunk* b, uint8_t dirAtoB, StitchResult& out) const {
+    // 直接调 Chunk::stitchWithNeighbor —— 双向修改 a / b 的边界 mesh。
+    // 调用方保证 a / b 在投递期间始终在 m_pendingChunks 中，主线程不会触碰，无需加锁。
+    BlockFace face = (BlockFace)dirAtoB;
+    a->stitchWithNeighbor(b, face);
+    a->refreshNonEmptyMask();
+    b->refreshNonEmptyMask();
+
+    // dirB = 反向
+    uint8_t dirB = 0;
+    switch (face) {
+    case RIGHT: dirB = LEFT; break;
+    case LEFT:  dirB = RIGHT; break;
+    case FRONT: dirB = BACK; break;
+    case BACK:  dirB = FRONT; break;
+    default: dirB = 0; break;
+    }
+
+    out.posA = a->getPosition();
+    out.posB = b->getPosition();
+    out.dirA = dirAtoB;
+    out.dirB = dirB;
 }
