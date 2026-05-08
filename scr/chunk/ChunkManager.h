@@ -2,6 +2,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <deque>
 #include <queue>
 #include <glm/glm.hpp>
 #include "BlockType.h"
@@ -79,6 +80,9 @@ private:
     // 投递加载区块任务 load及 stitch
     ChunkWorkerPool m_workerPool;
     std::unordered_set<ChunkKey> m_inFlight;
+    // 主线程持有：每帧从 worker drain 出来后先放到这里，按 MAX_INTEGRATE_PER_FRAME 慢慢消化，
+    // 避免单帧瞬时 adoptSections 多次叠加成 16ms 尖峰。
+    std::deque<ChunkBuildResult> m_pendingIntegrate;
 
     // 渲染数据缓冲区管理
     ChunkArena m_arena;
@@ -108,6 +112,11 @@ private:
     // 因此 build 任务的请求半径 = renderRadius + STITCH_PRELOAD_MARGIN，外圈 chunk 进 m_pendingChunks 但
     // 不会被晋升到 m_loadedChunks（它们自己缺一个外侧邻居）。
     static constexpr int STITCH_PRELOAD_MARGIN = 1;
+
+    // 每帧最多接管多少个 build 结果。多 worker 时一帧 drain 出 8+ 个 chunk 的尖峰
+    // 会导致 adoptSections 串行 ~16ms（profiler 实测），把帧率打回原形。把消化量摊到多帧，
+    // 总吞吐不变（worker 已经做完了，只是结果在 m_buildDone 队列里多等几帧）。
+    static constexpr int MAX_INTEGRATE_PER_FRAME = 4;
 
     // 从 RuntimeConfig 读
     int m_maxUploadsPerFrame = 8;

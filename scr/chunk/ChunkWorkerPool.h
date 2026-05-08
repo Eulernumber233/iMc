@@ -81,15 +81,23 @@ private:
     std::vector<std::thread> m_workers;
     std::atomic<bool> m_stop{ false };
 
+    // 任务队列：所有 worker 共享一把锁取任务 + 投递任务。
     std::mutex m_jobMutex;
     std::condition_variable m_jobCV;
     std::deque<Job> m_jobs;
 
-    std::mutex m_doneMutex;
-    std::vector<ChunkBuildResult> m_done;
-
+    // 完成结果：build / stitch 各一把锁。
+    //
+    // ChunkBuildResult 含 4 个 Section，每个 Section 内 m_blocks 是 std::array<BlockType, 4096>，
+    // 即 4KB 字节数组（不是指针，move 也要 memcpy）。直接 push_back ChunkBuildResult 会让锁内
+    // 完成 16KB 拷贝 + 4 个 hash map 的内部指针交换 —— profiler 实测多 worker 时锁内最高耗时 17ms。
+    //
+    // 改用 unique_ptr：worker 在锁外 new 完整结果（堆分配在 worker 自己上下文），锁内只往 deque
+    // push 一个指针。持锁时间稳定在 ns 级。
+    std::mutex m_buildDoneMutex;
+    std::deque<std::unique_ptr<ChunkBuildResult>> m_buildDone;
     std::mutex m_stitchDoneMutex;
-    std::vector<StitchResult> m_stitchDone;
+    std::deque<StitchResult> m_stitchDone;
 
     std::atomic<int> m_pending{ 0 };
 };

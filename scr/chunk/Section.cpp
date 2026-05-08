@@ -1,8 +1,10 @@
 ﻿#include "Section.h"
 #include <algorithm>
 
-Section::Section() {
-    m_blocks.fill(BLOCK_AIR);
+Section::Section()
+    : m_blocks(std::make_unique<BlockArray>())
+{
+    m_blocks->fill(BLOCK_AIR);
 }
 
 void Section::setCoords(int chunkX, int chunkZ, int sectionY) {
@@ -15,12 +17,12 @@ BlockType Section::getBlock(int x, int y, int z) const {
     if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT || z < 0 || z >= DEPTH) {
         return BLOCK_AIR;
     }
-    return m_blocks[idx(x, y, z)];
+    return (*m_blocks)[idx(x, y, z)];
 }
 
 void Section::setBlockRaw(int x, int y, int z, BlockType b) {
     if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT || z < 0 || z >= DEPTH) return;
-    m_blocks[idx(x, y, z)] = b;
+    (*m_blocks)[idx(x, y, z)] = b;
 }
 
 void Section::addFaceLocal(int x, int y, int z, BlockFace face, BlockType type) {
@@ -127,7 +129,7 @@ void Section::rebuildVisibilityInternal(const Section* above, const Section* bel
     for (int z = 0; z < DEPTH; ++z) {
         for (int y = 0; y < HEIGHT; ++y) {
             for (int x = 0; x < WIDTH; ++x) {
-                BlockType block = m_blocks[idx(x, y, z)];
+                BlockType block = (*m_blocks)[idx(x, y, z)];
                 if (block == BLOCK_AIR) continue;
 
                 BlockProperties props = GetBlockProperties(block);
@@ -157,7 +159,7 @@ void Section::rebuildVisibilityInternal(const Section* above, const Section* bel
                     } else if (ny >= HEIGHT) {
                         nb = above ? above->getBlock(x, 0, z) : BLOCK_AIR;
                     } else {
-                        nb = m_blocks[idx(nx, ny, nz)];
+                        nb = (*m_blocks)[idx(nx, ny, nz)];
                     }
 
                     if (nb == BLOCK_AIR) {
@@ -167,6 +169,11 @@ void Section::rebuildVisibilityInternal(const Section* above, const Section* bel
             }
         }
     }
+
+    // 给后续 stitch 阶段预留容量：4 边 × 16×16 边界格上限 = 1024 个新增面。
+    // 在 worker 上下文做这次堆分配，避免主线程 adoptFrom 时的尖峰。
+    m_instanceData.reserve(m_instanceData.size() + 1024);
+    m_PosToInstanceIndex.reserve(m_PosToInstanceIndex.size() + 1024);
 
     m_dirty = true;
 }
@@ -182,7 +189,7 @@ void Section::notifyGpuSlotReleased() {
 }
 
 void Section::adoptFrom(Section&& other) {
-    m_blocks = other.m_blocks;
+    m_blocks = std::move(other.m_blocks);
     m_instanceData = std::move(other.m_instanceData);
     m_PosToInstanceIndex = std::move(other.m_PosToInstanceIndex);
     m_errerCount = other.m_errerCount;
@@ -191,5 +198,5 @@ void Section::adoptFrom(Section&& other) {
     m_dirtyIndices.clear();
     m_freeSlots.clear();
     m_fullRebuildPending = true;
-    // 坐标在 setCoords 时已设置
+    // reserve 由 worker 端在 rebuildVisibilityInternal 内做（避免主线程在 adopt 时的堆分配尖峰）
 }

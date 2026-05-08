@@ -3,6 +3,7 @@
 #include "BlockType.h"
 #include "ChunkDimensions.h"
 #include <array>
+#include <memory>
 #include <vector>
 #include <unordered_map>
 
@@ -34,8 +35,8 @@ public:
     void setBlockRaw(int x, int y, int z, BlockType b);
 
     // 直接拿 raw block buffer 指针，方便 worker 端批量写入
-    BlockType* blockData() { return m_blocks.data(); }
-    const BlockType* blockData() const { return m_blocks.data(); }
+    BlockType* blockData() { return m_blocks->data(); }
+    const BlockType* blockData() const { return m_blocks->data(); }
 
     // mesh
     const std::vector<InstanceData>& getInstanceData() const { return m_instanceData; }
@@ -82,7 +83,9 @@ public:
     void notifyGpuSlotReleased();
 
 private:
-    std::array<BlockType, VOLUME> m_blocks{};
+    using BlockArray = std::array<BlockType, VOLUME>;
+    // 在 Section() 构造时分配；adoptFrom 时和源 Section 交换指针，源被销毁时自然释放它接到的旧块。
+    std::unique_ptr<BlockArray> m_blocks;
     std::vector<InstanceData> m_instanceData;
     std::unordered_map<BlockFaceLocKey, int> m_PosToInstanceIndex;
     int m_errerCount = 0;

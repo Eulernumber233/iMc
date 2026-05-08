@@ -35,6 +35,7 @@ ChunkManager::~ChunkManager() {
 
     m_loadedChunks.clear();
     m_pendingChunks.clear();
+    m_pendingIntegrate.clear();
     m_activeChunks.clear();
     m_sectionSlots.clear();
     m_drawCommands.clear();
@@ -114,6 +115,7 @@ void ChunkManager::update(std::shared_ptr<Camera> camera) {
     // 补投递：初始化或一次性大批量请求时 m_maxInflightRequests 限流会丢一部分；
     // 完成的 chunk 腾出 in-flight 配额后，每帧扫一次半径内缺失的 chunk 把它们补上。
     if ((int)m_inFlight.size() < m_maxInflightRequests) {
+        PROFILE_SCOPE("requestMissingChunks");
         requestMissingChunks();
     }
 
@@ -259,33 +261,54 @@ Chunk* ChunkManager::getPendingChunk(const glm::ivec2& chunkPos) {
 
 void ChunkManager::integrateBuiltChunks() {
     PROFILE_SCOPE("integrateBuiltChunks");
-    auto results = m_workerPool.drainCompleted();
-    for (auto& r : results) {
+    {
+        PROFILE_SCOPE("ibc.drainCompleted");
+        auto results = m_workerPool.drainCompleted();
+        if (!results.empty()) {
+            Profiler::addSample("ibc.resultCount", (int64_t)results.size());
+            for (auto& r : results) m_pendingIntegrate.push_back(std::move(r));
+        }
+    }
+    if (m_pendingIntegrate.empty()) return;
+
+    // 每帧最多消化 MAX_INTEGRATE_PER_FRAME 个，把瞬时尖峰摊到多帧。
+    int budget = MAX_INTEGRATE_PER_FRAME;
+    while (budget > 0 && !m_pendingIntegrate.empty()) {
+        ChunkBuildResult r = std::move(m_pendingIntegrate.front());
+        m_pendingIntegrate.pop_front();
+
         ChunkKey key = chunkPosToKey(r.pos);
         m_inFlight.erase(key);
 
-        // 已存在 → 丢弃（重复投递或竞态）。
+        // 已存在 → 丢弃（重复投递或竞态），不消耗 budget。
         if (m_loadedChunks.find(key) != m_loadedChunks.end()) continue;
         if (m_pendingChunks.find(key) != m_pendingChunks.end()) continue;
 
         auto chunk = std::make_unique<Chunk>(r.pos, this);
-        chunk->adoptSections(std::move(r.sections));
+        {
+            PROFILE_SCOPE("ibc.adoptSections");
+            chunk->adoptSections(std::move(r.sections));
+        }
 
         Chunk* raw = chunk.get();
         m_pendingChunks[key] = std::move(chunk);
-        // 邻居图只在 pending 内部连：worker stitch 任务只能涉及 pending chunk。
-        linkNeighbors(raw);
+        {
+            PROFILE_SCOPE("ibc.linkNeighbors");
+            linkNeighbors(raw);
+        }
 
-        // 投递自己 4 方向能投的 stitch；同时让已存在的邻居重新检查（它们之前可能因为
-        // self 不存在而漏投，self 入场后那条边现在能投了）。trySubmitStitchJobs 内部
-        // 会检查双方 stitch 状态，幂等，不会重复投递。
-        trySubmitStitchJobs(raw);
-        for (int d = 0; d < 4; ++d) {
-            if (Chunk* nb = raw->m_neighbors[d]) {
-                trySubmitStitchJobs(nb);
+        {
+            PROFILE_SCOPE("ibc.trySubmitStitchJobs");
+            trySubmitStitchJobs(raw);
+            for (int d = 0; d < 4; ++d) {
+                if (Chunk* nb = raw->m_neighbors[d]) {
+                    trySubmitStitchJobs(nb);
+                }
             }
         }
+        --budget;
     }
+    Profiler::addSample("ibc.queueDepth", (int64_t)m_pendingIntegrate.size());
 }
 
 void ChunkManager::linkNeighbors(Chunk* newChunk) {
@@ -351,8 +374,13 @@ void ChunkManager::trySubmitStitchJobs(Chunk* chunk) {
 
 void ChunkManager::integrateStitchResults() {
     PROFILE_SCOPE("integrateStitchResults");
-    auto results = m_workerPool.drainStitchResults();
+    std::vector<StitchResult> results;
+    {
+        PROFILE_SCOPE("isr.drainStitch");
+        results = m_workerPool.drainStitchResults();
+    }
     if (results.empty()) return;
+    Profiler::addSample("isr.resultCount", (int64_t)results.size());
 
     static constexpr int faceToDir[6] = { 0, 1, 2, 3, -1, -1 }; // RIGHT/LEFT/FRONT/BACK -> 0..3
 
@@ -372,31 +400,37 @@ void ChunkManager::integrateStitchResults() {
         b->setStitchBusy(false);
     }
 
-    // 推进剩余方向：busy 解除后双方都可能再投一条新边。同时本次涉及的 chunk 还可能
-    // 让它们的"次邻居"具备投递条件（次邻居的某方向曾因为对端 busy 跳过）。
-    for (const auto& sr : results) {
-        Chunk* a = getPendingChunk(sr.posA);
-        Chunk* b = getPendingChunk(sr.posB);
-        if (a) {
-            trySubmitStitchJobs(a);
-            for (int d = 0; d < 4; ++d) if (Chunk* nb = a->m_neighbors[d]) {
-                if (m_pendingChunks.find(chunkPosToKey(nb->getPosition())) != m_pendingChunks.end())
-                    trySubmitStitchJobs(nb);
+    {
+        PROFILE_SCOPE("isr.repush");
+        // 推进剩余方向：busy 解除后双方都可能再投一条新边。同时本次涉及的 chunk 还可能
+        // 让它们的"次邻居"具备投递条件（次邻居的某方向曾因为对端 busy 跳过）。
+        for (const auto& sr : results) {
+            Chunk* a = getPendingChunk(sr.posA);
+            Chunk* b = getPendingChunk(sr.posB);
+            if (a) {
+                trySubmitStitchJobs(a);
+                for (int d = 0; d < 4; ++d) if (Chunk* nb = a->m_neighbors[d]) {
+                    if (m_pendingChunks.find(chunkPosToKey(nb->getPosition())) != m_pendingChunks.end())
+                        trySubmitStitchJobs(nb);
+                }
             }
-        }
-        if (b) {
-            trySubmitStitchJobs(b);
-            for (int d = 0; d < 4; ++d) if (Chunk* nb = b->m_neighbors[d]) {
-                if (m_pendingChunks.find(chunkPosToKey(nb->getPosition())) != m_pendingChunks.end())
-                    trySubmitStitchJobs(nb);
+            if (b) {
+                trySubmitStitchJobs(b);
+                for (int d = 0; d < 4; ++d) if (Chunk* nb = b->m_neighbors[d]) {
+                    if (m_pendingChunks.find(chunkPosToKey(nb->getPosition())) != m_pendingChunks.end())
+                        trySubmitStitchJobs(nb);
+                }
             }
         }
     }
 
-    // 再扫一遍把 4 方向都 done 的 chunk 晋升到 loaded。
-    for (const auto& sr : results) {
-        promoteIfReady(sr.posA);
-        promoteIfReady(sr.posB);
+    {
+        PROFILE_SCOPE("isr.promote");
+        // 再扫一遍把 4 方向都 done 的 chunk 晋升到 loaded。
+        for (const auto& sr : results) {
+            promoteIfReady(sr.posA);
+            promoteIfReady(sr.posB);
+        }
     }
 }
 
@@ -477,27 +511,31 @@ void ChunkManager::rebuildDrawCommands() {
     m_visibleInstanceCount = 0;
 
     int uploadBudget = m_maxUploadsPerFrame;
+    int uploadedCount = 0;
 
-    // 第一遍：evict 半径内（active 半径 + hysteresis）的脏 section 上传。
-    // - 跨 chunk stitch 可能改到 active 半径外 1 格的 chunk mesh，所以扫描范围必须比 active 半径大。
-    // - 走出 evict 半径的 chunk 已经被 evictFarChunkSlots 释放了 GPU slot 并标记为 fullRebuildPending；
-    //   只要它们没回到 evict 半径内，就不上传，避免每帧重新分配 slot。
-    // - 脏 section 可能是"刚被改成空"，也需要走一遍上传以释放 slot —— 所以这里不能用 nonEmptyMask
-    //   提前剪枝，必须按 dirty 标志扫。
-    for (auto& kv : m_loadedChunks) {
-        Chunk* chunk = kv.second.get();
-        if (!chunk->isMeshReady()) continue;
-        glm::ivec2 cp = chunk->getPosition();
-        if (!isWithinEvictRadius(cp, m_currentCenterChunk)) continue;
-        for (int sy = 0; sy < Chunk::SECTION_COUNT; ++sy) {
-            Section& s = chunk->getSection(sy);
-            if (!s.isDirty()) continue;
-            uploadSection(cp.x, cp.y, sy, s, uploadBudget);
+    {
+        PROFILE_SCOPE("rdc.uploadPass");
+        // 第一遍：evict 半径内的脏 section 上传。
+        for (auto& kv : m_loadedChunks) {
+            Chunk* chunk = kv.second.get();
+            if (!chunk->isMeshReady()) continue;
+            glm::ivec2 cp = chunk->getPosition();
+            if (!isWithinEvictRadius(cp, m_currentCenterChunk)) continue;
+            for (int sy = 0; sy < Chunk::SECTION_COUNT; ++sy) {
+                Section& s = chunk->getSection(sy);
+                if (!s.isDirty()) continue;
+                int before = uploadBudget;
+                uploadSection(cp.x, cp.y, sy, s, uploadBudget);
+                if (before != uploadBudget) ++uploadedCount;
+                if (uploadBudget <= 0) break;
+            }
             if (uploadBudget <= 0) break;
         }
-        if (uploadBudget <= 0) break;
     }
+    Profiler::addSample("rdc.uploadCount", uploadedCount); // 计数借 profiler 频道展示
 
+    {
+    PROFILE_SCOPE("rdc.cullPass");
     // 第二遍：按 active chunk -> per-section 视锥/距离剔除生成 indirect 命令
     for (Chunk* chunk : m_activeChunks) {
         if (!chunk->isMeshReady()) continue;
@@ -540,9 +578,15 @@ void ChunkManager::rebuildDrawCommands() {
             m_visibleInstanceCount += slot.count;
         }
     }
+    } // rdc.cullPass
 
-    syncIndirectBuffer();
-    syncSectionBaseSSBO();
+    Profiler::addSample("rdc.drawCmdCount", (int64_t)m_drawCommands.size());
+
+    {
+        PROFILE_SCOPE("rdc.syncGpuBuffers");
+        syncIndirectBuffer();
+        syncSectionBaseSSBO();
+    }
 }
 
 void ChunkManager::syncIndirectBuffer() {

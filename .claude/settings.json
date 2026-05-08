@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"e:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Debug /p:Platform=x64 /m /v:minimal /nologo 2>&1)"
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"e:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Debug /p:Platform=x64 /m /v:minimal /nologo 2>&1)",
+      "PowerShell($f = \"e:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkWorkerPool.cpp\"; $bytes = [System.IO.File]::ReadAllBytes\\($f\\); \"First 3: \" + \\($bytes[0..2] -join \" \"\\); $crlf=0;$lf=0;for\\($i=0;$i -lt $bytes.Length;$i++\\){if\\($bytes[$i] -eq 0x0A\\){if\\($i -gt 0 -and $bytes[$i-1] -eq 0x0D\\){$crlf++}else{$lf++}}}; \"CRLF=$crlf LF=$lf\")",
+      "PowerShell($f = \"e:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkWorkerPool.h\"; $bytes = [System.IO.File]::ReadAllBytes\\($f\\); \"First 3: \" + \\($bytes[0..2] -join \" \"\\); $crlf=0;$lf=0;for\\($i=0;$i -lt $bytes.Length;$i++\\){if\\($bytes[$i] -eq 0x0A\\){if\\($i -gt 0 -and $bytes[$i-1] -eq 0x0D\\){$crlf++}else{$lf++}}}; \"CRLF=$crlf LF=$lf\")"
     ]
   }
 }

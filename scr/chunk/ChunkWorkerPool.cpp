@@ -37,8 +37,8 @@ void ChunkWorkerPool::stop() {
         m_jobs.clear();
     }
     {
-        std::lock_guard<std::mutex> lk(m_doneMutex);
-        m_done.clear();
+        std::lock_guard<std::mutex> lk(m_buildDoneMutex);
+        m_buildDone.clear();
     }
     {
         std::lock_guard<std::mutex> lk(m_stitchDoneMutex);
@@ -50,7 +50,9 @@ void ChunkWorkerPool::stop() {
 void ChunkWorkerPool::submit(const glm::ivec2& pos) {
     {
         std::lock_guard<std::mutex> lk(m_jobMutex);
-        Job j; j.kind = JOB_BUILD; j.pos = pos;
+        Job j; 
+        j.kind = JOB_BUILD; 
+        j.pos = pos;
         m_jobs.push_back(std::move(j));
     }
     m_pending.fetch_add(1, std::memory_order_relaxed);
@@ -60,24 +62,40 @@ void ChunkWorkerPool::submit(const glm::ivec2& pos) {
 void ChunkWorkerPool::submitStitch(Chunk* a, Chunk* b, uint8_t dirAtoB) {
     {
         std::lock_guard<std::mutex> lk(m_jobMutex);
-        Job j; j.kind = JOB_STITCH; j.a = a; j.b = b; j.dirAtoB = dirAtoB;
-        // stitch 任务比 build 短得多 → 放队首，避免被一长串 build 阻塞
-        m_jobs.push_front(std::move(j));
+        Job j; 
+        j.kind = JOB_STITCH; 
+        j.a = a; 
+        j.b = b; 
+        j.dirAtoB = dirAtoB;
+        // 平等排队 —— stitch / build 不抢插队优先级；前面把 stitch push_front 反而会让
+        // build 长期排不到位，玩家高速移动时新区块迟迟不显示。
+        m_jobs.push_back(std::move(j));
     }
     m_jobCV.notify_one();
 }
 
 std::vector<ChunkBuildResult> ChunkWorkerPool::drainCompleted() {
+    // 持锁只做 deque 的 O(1) swap；锁外解 unique_ptr、组装 vector。
+    std::deque<std::unique_ptr<ChunkBuildResult>> tmp;
+    {
+        std::lock_guard<std::mutex> lk(m_buildDoneMutex);
+        tmp.swap(m_buildDone);
+    }
     std::vector<ChunkBuildResult> out;
-    std::lock_guard<std::mutex> lk(m_doneMutex);
-    out.swap(m_done);
+    out.reserve(tmp.size());
+    for (auto& p : tmp) out.push_back(std::move(*p));
     return out;
 }
 
 std::vector<StitchResult> ChunkWorkerPool::drainStitchResults() {
+    std::deque<StitchResult> tmp;
+    {
+        std::lock_guard<std::mutex> lk(m_stitchDoneMutex);
+        tmp.swap(m_stitchDone);
+    }
     std::vector<StitchResult> out;
-    std::lock_guard<std::mutex> lk(m_stitchDoneMutex);
-    out.swap(m_stitchDone);
+    out.reserve(tmp.size());
+    for (auto& r : tmp) out.push_back(r);
     return out;
 }
 
@@ -93,13 +111,15 @@ void ChunkWorkerPool::workerMain() {
         }
 
         if (job.kind == JOB_BUILD) {
-            ChunkBuildResult result;
-            result.pos = job.pos;
-            buildOne(job.pos, result);
+            // 在锁外堆分配 ChunkBuildResult（4×4KB 数据 + hash map 等），
+            // worker 自己的上下文做完整构造；锁内只 push 一个指针。
+            auto result = std::make_unique<ChunkBuildResult>();
+            result->pos = job.pos;
+            buildOne(job.pos, *result);
 
             {
-                std::lock_guard<std::mutex> lk(m_doneMutex);
-                m_done.push_back(std::move(result));
+                std::lock_guard<std::mutex> lk(m_buildDoneMutex);
+                m_buildDone.push_back(std::move(result));
             }
             m_pending.fetch_sub(1, std::memory_order_relaxed);
         } else {

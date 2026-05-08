@@ -42,29 +42,44 @@ iMc is a Minecraft-inspired voxel rendering engine built with modern OpenGL (4.6
 
 - **Player** (`scr/Player.h/.cpp`) — integrates camera, physics, movement (walk/run/crouch/spectator modes), inventory (hotbar), block interaction (place/break via raycasting), and AABB collision detection. Three-speed movement system with double-tap sprint.
 
-- **ChunkManager** (`scr/chunk/ChunkManager.h/.cpp`) — orchestrates chunk lifecycle:
-  - Submits chunk-build jobs to `ChunkWorkerPool`; integrates completed results in `integrateBuiltChunks` on the main thread
-  - Tracks `m_loadedChunks` (all in-memory chunks — CPU-side; no chunk-object eviction yet, awaits save system) vs `m_activeChunks` (chunks within player render radius — used for logic + rendering candidates)
-  - `m_inFlight` set throttles in-flight worker requests to `MAX_INFLIGHT_REQUESTS`
-  - Owns the GPU `ChunkArena` and a `SectionKey → Slot` map (slot per section, not per chunk)
-  - **GPU slot eviction**: chunks outside `renderRadius + EVICT_MARGIN_CHUNKS` have their per-section arena slots freed (`evictFarChunkSlots` runs at the end of `updateActiveChunks`). The chunk's CPU data stays in `m_loadedChunks`; `Section::notifyGpuSlotReleased` clears incremental state and forces a full reupload when the chunk re-enters range.
-  - Each frame: drains worker results → `requestMissingChunks` (refills inflight queue) → `rebuildDrawCommands`. Pass 1 uploads dirty sections (filtered by evict radius — sections outside aren't re-uploaded even if dirty); pass 2 walks `m_activeChunks` to build the indirect command buffer alongside a parallel `m_sectionBases` array (uploaded to an SSBO at `binding=0`, indexed by `gl_DrawID` in-shader).
-  - Issues a single `glMultiDrawElementsIndirect` per pass (geometry / shadow); commands are per-section
+- **ChunkManager** (`scr/chunk/ChunkManager.h/.cpp`) — orchestrates chunk lifecycle. Two-phase chunk pipeline:
+  - **PHASE 1 — `m_pendingChunks`**: chunk has block data + intra-section + vertical-neighbor visible faces (worker output already adopted), but at least one of its 4 horizontal cross-chunk borders is not yet stitched. Not visible to renderer / player interaction. Worker stitch jobs only ever touch chunks in this container — that's the load-bearing invariant for the lock-free design.
+  - **PHASE 2 — `m_loadedChunks`**: chunk has all 4 directions stitched. Renderable, interactable. By invariant, a chunk in `m_loadedChunks` will never become a stitch participant again, so workers never write to its mesh.
+  - **`m_activeChunks`**: subset of `m_loadedChunks` within player render radius — logic update + rendering candidates.
+  - **`m_inFlight`**: in-flight build requests, throttled to `max_inflight_requests`.
+  - **`m_pendingIntegrate`**: build results drained from worker but not yet adopted. `integrateBuiltChunks` consumes at most `MAX_INTEGRATE_PER_FRAME` per frame to avoid 16ms `adoptSections` spikes when many workers complete simultaneously.
+  - Owns the GPU `ChunkArena` and a `SectionKey → Slot` map (slot per section).
+  - **Two job kinds in ChunkWorkerPool**: `JOB_BUILD` (terrain + internal mesh) and `JOB_STITCH` (cross-chunk boundary mesh). Build results integrated via `integrateBuiltChunks`; stitch results via `integrateStitchResults`.
+  - **Stitch radius**: build requests extend to `renderRadius + STITCH_PRELOAD_MARGIN` (= +1). The outer ring is "sparring partners" — they enter `m_pendingChunks` and let the inner-ring chunks complete all 4 directions, but they themselves stay pending forever (one of their own neighbors is outside the radius).
+  - **Stitch state per chunk** (4-bit `m_stitchDone` + 4-bit `m_stitchPending` + bool `m_stitchBusy`): each direction tracks done / in-flight / blocked-on-busy. `m_stitchBusy` enforces "one stitch task per chunk at a time" — without it, two workers could both modify the same chunk's mesh and crash on vector reallocation.
+  - **`promoteIfReady`**: when all 4 stitch directions are done, the chunk is moved from `m_pendingChunks` to `m_loadedChunks` (raw `Chunk*` stays at the same heap address — only the unique_ptr ownership transfers).
+  - **GPU slot eviction**: chunks outside `renderRadius + EVICT_MARGIN_CHUNKS` have their per-section arena slots freed (`evictFarChunkSlots` runs at the end of `updateActiveChunks`, scanning only `m_loadedChunks`). The chunk's CPU data stays; `Section::notifyGpuSlotReleased` clears incremental state and forces a full reupload when the chunk re-enters range.
+  - Each frame: `integrateBuiltChunks` (drain build queue → adopt up to N) → `integrateStitchResults` (drain stitch queue → mark done → repush blocked stitches → promote ready chunks) → `requestMissingChunks` (refill inflight queue from center outward by Chebyshev rings) → `rebuildDrawCommands`. Pass 1 uploads dirty sections (filtered by evict radius); pass 2 walks `m_activeChunks` to build the indirect command buffer alongside a parallel `m_sectionBases` array (uploaded to an SSBO at `binding=0`, indexed by `gl_DrawID` in-shader).
+  - Issues a single `glMultiDrawElementsIndirect` per pass (geometry / shadow); commands are per-section.
 
-- **Chunk** (`scr/chunk/Chunk.h/.cpp`) — container for `SECTION_COUNT` Sections (currently 16 for HEIGHT=256). Holds 4 horizontal neighbor pointers (`m_neighbors[4]` for ±X/±Z) for cross-chunk face stitching. `m_nonEmptyMask` is a bitmask: bit i set means section[i] has visible faces; refreshed after every mesh-mutating operation. `setBlockAndUpdate` routes to the owning section, updates 6 neighbors (handles cross-section + cross-chunk routing). `stitchHorizontalNeighbors` is called after a chunk is built to fix boundary face visibility with already-loaded neighbors.
+- **Chunk** (`scr/chunk/Chunk.h/.cpp`) — container for `SECTION_COUNT` Sections (currently 16 for HEIGHT=256). Holds 4 horizontal neighbor pointers (`m_neighbors[4]` for ±X/±Z) for cross-chunk face stitching and player-interaction routing. `m_nonEmptyMask` is a bitmask: bit i set means section[i] has visible faces; refreshed after every mesh-mutating operation. `setBlockAndUpdate` routes to the owning section, updates 6 neighbors (handles cross-section + cross-chunk routing). `stitchWithNeighbor(other, face)` does the bidirectional boundary mesh update for one direction — called by stitch worker (when both chunks are in pending) directly without locks.
 
-- **Section** (`scr/chunk/Section.h/.cpp`) — the unit of GPU mesh storage. Holds a 16³ block array, an `InstanceData` vector (visible faces), and a `BlockFaceLocKey → index` map for incremental add/remove. `isEmpty()` is the authoritative "no visible faces" signal (queries the index map, not the vector). Incremental upload state machine:
-  - `m_dirty` — section needs upload this frame
-  - `m_dirtyIndices` — indices into `m_instanceData` modified since last upload (consumed by `ChunkArena::patch`)
-  - `m_freeSlots` — `BLOCK_ERRER` placeholder positions; `addFaceLocal` pops one to reuse the slot in-place rather than appending, keeping the array compact and `slot.count` stable for incremental patches
-  - `m_fullRebuildPending` — set by `compact` / `rebuildVisibilityInternal` / `adoptFrom` / `notifyGpuSlotReleased` to force the next upload to take the full-`reupload` path; `addFaceLocal` and `removeFaceLocal` skip pushing to `m_dirtyIndices` while this flag is set
-  - `clearDirty()` resets all of the above; called by `ChunkManager::uploadSection` after a successful upload
+- **Section** (`scr/chunk/Section.h/.cpp`) — the unit of GPU mesh storage. Holds:
+  - `m_blocks: std::unique_ptr<std::array<BlockType, VOLUME>>` — heap-allocated block array. Heap-pointer-on-Section so `adoptFrom` is a pointer move, not a 4KB memcpy (which used to be the dominant cost when many workers completed at once).
+  - `m_instanceData` (visible-face vector) and `m_PosToInstanceIndex` (`BlockFaceLocKey → index` map).
+  - `isEmpty()` is the authoritative "no visible faces" signal (queries the index map, not the vector).
+  - Incremental upload state machine:
+    - `m_dirty` — section needs upload this frame
+    - `m_dirtyIndices` — indices into `m_instanceData` modified since last upload (consumed by `ChunkArena::patch`)
+    - `m_freeSlots` — `BLOCK_ERRER` placeholder positions; `addFaceLocal` pops one to reuse the slot in-place rather than appending, keeping the array compact and `slot.count` stable for incremental patches
+    - `m_fullRebuildPending` — set by `compact` / `rebuildVisibilityInternal` / `adoptFrom` / `notifyGpuSlotReleased` to force the next upload to take the full-`reupload` path; `addFaceLocal` and `removeFaceLocal` skip pushing to `m_dirtyIndices` while this flag is set
+    - `clearDirty()` resets all of the above; called by `ChunkManager::uploadSection` after a successful upload
+  - **Reserve-on-build**: `rebuildVisibilityInternal` reserves an extra 1024 entries for `m_instanceData` and `m_PosToInstanceIndex` at the end. This is done on the worker thread so the stitch phase's `addFaceLocal` calls (up to ~1024 boundary faces per section) hit no heap allocations and no rehashes — heap allocation under contention was a measurable bottleneck via the global malloc lock.
 
 - **ChunkArena** (`scr/chunk/ChunkArena.h/.cpp`) — GPU VBO allocator. Size-class allocator with classes `{64, 256, 768, 1536, 3072, 6144, 12288}` instances; each class has its own free list. New allocations come from the bump cursor first, freed slots stay in their class (no merging — keeps alloc/free O(1)). Allocate uses 1.5× oversize to absorb section growth without reallocation. Backing VBO can grow via `glCopyBufferSubData` while preserving offsets of all live slots. Two upload paths:
   - `reupload(slot, data, count)` — full upload via `glBufferSubData`; reallocates to a larger size class if `count` exceeds capacity
   - `patch(slot, data, dirtyIndices, indexCount, newCount)` — incremental upload. Maps `[minIdx, maxIdx]` once with `GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT` (no `INVALIDATE_RANGE` — untouched bytes keep their old GPU values), writes only the dirty positions, unmaps. Updates `slot.count` to `newCount`. **Caller must guarantee GPU is not currently reading the slot** — `ChunkManager::update` runs at frame start before `RenderSystem::render`, so this holds.
 
-- **ChunkWorkerPool** (`scr/chunk/ChunkWorkerPool.h/.cpp`) — thread pool (2-8 workers) that runs terrain generation + mesh visibility computation off the main thread. Workers produce `ChunkBuildResult` containing 4 already-meshed sections (intra-section + vertical neighbor faces resolved; horizontal cross-chunk boundaries left default-invisible for the main thread to stitch). Drop-on-arrival: results no longer needed are simply discarded by the main thread.
+- **ChunkWorkerPool** (`scr/chunk/ChunkWorkerPool.h/.cpp`) — thread pool (2-8 workers) that runs two job kinds:
+  - `JOB_BUILD`: `TerrainGenerator::fillChunkBuffer` + `Section::rebuildVisibilityInternal` for every section. Produces a `ChunkBuildResult` with 4-section internal meshes; horizontal cross-chunk boundaries are intentionally left default-invisible (the worker doesn't have access to neighbor block data).
+  - `JOB_STITCH`: given two pending chunks `a / b` and a direction, calls `a->stitchWithNeighbor(b, face)` directly, mutating both chunks' boundary meshes. **Lock-free is only safe because the caller (ChunkManager) guarantees both chunks are in `m_pendingChunks` and `m_stitchBusy` enforces "one stitch per chunk".**
+  - Single `m_jobs` deque (FIFO, both job kinds equal priority) + condition variable. Two completion queues: `m_buildDone` is `std::deque<std::unique_ptr<ChunkBuildResult>>` (the unique_ptr matters — keeps the heavy `ChunkBuildResult` construction outside the lock, so the lock-held window is just a pointer push); `m_stitchDone` is a small POD `std::deque<StitchResult>`.
+  - Three locks total: `m_jobMutex` (job queue), `m_buildDoneMutex`, `m_stitchDoneMutex`. Drains via `swap`, O(1).
 
 - **RenderSystem** (`scr/render/RenderSystem.h/.cpp`) — deferred rendering pipeline:
   1. G-Buffer pass (position, normal, albedo, properties) — single `glMultiDrawElementsIndirect` for all visible sections
@@ -91,6 +106,8 @@ iMc is a Minecraft-inspired voxel rendering engine built with modern OpenGL (4.6
 
 - **Chunk geometry** (`scr/chunk/ChunkDimensions.h`): `CHUNK_WIDTH=16`, `CHUNK_HEIGHT=256`, `CHUNK_DEPTH=16`, `SECTION_HEIGHT=16`, `SECTION_COUNT = CHUNK_HEIGHT / SECTION_HEIGHT`. **This header is intentionally separate from `core.h` to minimize recompile footprint** when chunk dimensions change — only files that explicitly include it are affected.
 - **Eviction**: `ChunkManager::EVICT_MARGIN_CHUNKS = 2` — chunks farther than `renderRadius + 2` from the camera have their GPU slots freed (CPU data retained).
+- **Stitch preload**: `ChunkManager::STITCH_PRELOAD_MARGIN = 1` — build requests extend one ring beyond `renderRadius` so edge chunks can complete all 4 stitch directions.
+- **Integrate budget**: `ChunkManager::MAX_INTEGRATE_PER_FRAME = 8` — at most this many build results are adopted into pending per frame; the rest wait in `m_pendingIntegrate`. Prevents 16ms `adoptSections` spikes when many workers complete simultaneously.
 - **Render**: `MAX_INSTANCES = 1,000,000` (in `scr/core.h` under `RenderConstants`)
 - **World**: `WORLD_SEED = 114514`, `RENDER_RADIUS = 8` (default; runtime override via `RuntimeConfig`) — both in `core.h`'s `WorldConstants`
 - **Screen / shadow map**: `1200x900` / `4096x4096` (`scr/Data.h`)
@@ -104,9 +121,15 @@ All GLSL shaders are in `shader/`. The deferred pipeline uses `g_buffer.*`, `ssa
 
 ### Threading Model
 
-- **Main thread**: GL calls, all `setBlockAndUpdate` / raycast / collision / `stitchHorizontalNeighbors` / arena uploads.
-- **Worker threads** (ChunkWorkerPool): `TerrainGenerator::fillChunkBuffer` + `Section::rebuildVisibilityInternal`. Workers don't see any `Chunk` object — they produce a self-contained `ChunkBuildResult` whose sections are then move-adopted by a freshly constructed `Chunk` on the main thread.
-- **No locks needed** between worker output and main thread: results are pushed into a mutex-guarded queue once per chunk, then drained in bulk.
+- **Main thread**: GL calls, all `setBlockAndUpdate` / raycast / collision / arena uploads / `m_loadedChunks` and `m_pendingChunks` mutation / stitch state-bit reads & writes / chunk pipeline scheduling.
+- **Worker threads** (ChunkWorkerPool):
+  - `JOB_BUILD`: `TerrainGenerator::fillChunkBuffer` + `Section::rebuildVisibilityInternal`. Workers don't see any `Chunk` object — they produce a self-contained `ChunkBuildResult`.
+  - `JOB_STITCH`: directly calls `Chunk::stitchWithNeighbor` on two `Chunk*` (both must be in `m_pendingChunks`, both must have `m_stitchBusy = true` set by the main thread before submission).
+- **Lock-free invariants** (the whole reason this design is fast):
+  - Workers only ever write to chunks in `m_pendingChunks`. Player interaction and rendering only ever touch `m_loadedChunks`. No code path reads from one container while a worker writes to a chunk in the other.
+  - `m_stitchBusy` enforces "one stitch task per chunk at a time" — without it two stitch jobs that share a chunk would both mutate its `m_instanceData` and crash on vector reallocation.
+  - When a chunk is promoted from pending to loaded, its raw `Chunk*` heap address doesn't change (only the `unique_ptr` ownership transfers between maps), so any in-flight raw pointers held by neighbors stay valid.
+- **Lock contention budget**: profiler-tuned. The expensive things — mesh data allocation, `Section` move construction — happen outside any lock. The locks themselves protect O(1) pointer / size operations only.
 
 ### Frame Ordering Invariant
 
@@ -120,3 +143,28 @@ All GLSL shaders are in `shader/`. The deferred pipeline uses `g_buffer.*`, `ssa
 ## Language
 
 The codebase comments and commit messages are in Chinese (Simplified). Follow this convention.
+
+## Current Focus
+
+**异步化跨 chunk stitch + 多线程性能调优**
+
+边界面缝合 (`stitchWithNeighbor`) 原本在主线程执行,每个新 chunk 入场要双向遍历 `HEIGHT × DEPTH × 4` 边界格,大视距高速移动时是肉眼可见的卡顿源。已经把 stitch 移到 worker:
+
+- 引入 PHASE 1 / PHASE 2 双容器 (`m_pendingChunks` / `m_loadedChunks`),保证 worker stitch 任务接触的 chunk 主线程不会读写,无锁。
+- 通过 `m_stitchBusy` 互斥位防止两个 worker 同时改同一 chunk 导致 vector 扩容时崩溃。
+- `STITCH_PRELOAD_MARGIN = 1` 让外圈一格的"陪练"chunk 也生成,边缘 chunk 才能凑齐 4 邻居晋升到 loaded。
+
+**已知性能现象**:多 worker 时主线程消化产出本身成为瓶颈(profiler 实测 `adoptSections` 单次 ~2ms,8 worker 同时完成会让单帧 `integrateBuiltChunks` 飙到 16ms+)。已采取:
+
+1. `MAX_INTEGRATE_PER_FRAME = 8` 配额 + `m_pendingIntegrate` 队列把消化量摊到多帧。
+2. `Section::m_blocks` 改 `std::unique_ptr<std::array<...>>` —— `adoptFrom` 从 4KB memcpy 降为指针交换。
+3. `m_buildDone` 用 `std::deque<std::unique_ptr<ChunkBuildResult>>`,worker 在锁外完整构造,锁内只 push 指针。
+4. Stitch 阶段的容量 reserve 从主线程 `adoptFrom` 移到 worker 端 `rebuildVisibilityInternal` 末尾。
+
+**遗留**:  `m_jobMutex` 在多 worker 时仍有取任务竞争;`requestMissingChunks` 频繁 submit 也抢这把锁。如果还要进一步压榨多线程吞吐,下一步候选是无锁 MPMC 任务队列 / 分离 build / stitch 任务队列。当前 2-worker 体感最均衡,4-worker 已可接受但还能再优化。
+
+**关键 profile 频道**(`print_profile_every_second = true` 时每秒输出):
+- `ChunkManager::update` (顶级) / `integrateBuiltChunks` / `integrateStitchResults` / `requestMissingChunks` / `rebuildDrawCommands`
+- `ibc.drainCompleted` / `ibc.adoptSections` / `ibc.linkNeighbors` / `ibc.trySubmitStitchJobs` / `ibc.queueDepth`
+- `isr.drainStitch` / `isr.repush` / `isr.promote`
+- `rdc.uploadPass` / `rdc.cullPass` / `rdc.syncGpuBuffers` / `rdc.uploadCount` / `rdc.drawCmdCount`
