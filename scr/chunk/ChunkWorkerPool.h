@@ -1,6 +1,7 @@
 ﻿#pragma once
 #include "../core.h"
 #include "BlockType.h"
+#include "ChunkDimensions.h"
 #include "Section.h"
 #include <array>
 #include <atomic>

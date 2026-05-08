@@ -2,9 +2,27 @@
 #include "Chunk.h"
 #include "Section.h"
 #include "../generate/TerrainGenerator.h"
+#include "../RuntimeConfig.h"
+#include "../Profiler.h"
 #include <iostream>
 #include <algorithm>
 #include <thread>
+#ifdef _MSC_VER
+#include <intrin.h>
+#endif
+
+namespace {
+    // 找到 v 中最低位的 1 的索引（v 必须非零）
+    inline int lowestBitIndex(uint32_t v) {
+#ifdef _MSC_VER
+        unsigned long idx;
+        _BitScanForward(&idx, v);
+        return (int)idx;
+#else
+        return __builtin_ctz(v);
+#endif
+    }
+}
 
 ChunkManager::ChunkManager(unsigned int seed)
     : m_renderRadius(8) {
@@ -37,6 +55,8 @@ SectionKey ChunkManager::makeSectionKey(int chunkX, int chunkZ, int sectionY) {
 
 void ChunkManager::initialize(int renderRadius, const glm::vec3& cameraPos) {
     m_renderRadius = renderRadius;
+    m_maxUploadsPerFrame = RuntimeConfig::get().maxUploadsPerFrame;
+    m_maxInflightRequests = RuntimeConfig::get().maxInflightRequests;
     m_currentCenterChunk = glm::ivec2(
         (int)std::floor(cameraPos.x / Chunk::WIDTH),
         (int)std::floor(cameraPos.z / Chunk::DEPTH)
@@ -52,14 +72,18 @@ void ChunkManager::initialize(int renderRadius, const glm::vec3& cameraPos) {
     glBufferData(GL_DRAW_INDIRECT_BUFFER, m_indirectBufferCapacityBytes, nullptr, GL_DYNAMIC_DRAW);
     glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
 
-    int hw = (int)std::thread::hardware_concurrency();
-    int n = std::max(2, std::min(8, hw - 2));
+    int n = RuntimeConfig::get().workerThreads;
+    if (n <= 0) {
+        int hw = (int)std::thread::hardware_concurrency();
+        n = std::max(2, std::min(8, hw - 2));
+    }
     m_workerPool.start(m_generator.get(), n);
 
     updateActiveChunks(cameraPos);
 }
 
 void ChunkManager::update(std::shared_ptr<Camera> camera) {
+    PROFILE_SCOPE("ChunkManager::update");
     m_camera = camera;
     glm::ivec2 cameraChunk(
         (int)std::floor(m_camera->Position.x / Chunk::WIDTH),
@@ -73,9 +97,9 @@ void ChunkManager::update(std::shared_ptr<Camera> camera) {
     // 把已完成的 worker result 接管进来（push 进 m_activeChunks）
     integrateBuiltChunks();
 
-    // 补投递：初始化或一次性大批量请求时 MAX_INFLIGHT_REQUESTS 限流会丢一部分；
+    // 补投递：初始化或一次性大批量请求时 m_maxInflightRequests 限流会丢一部分；
     // 完成的 chunk 腾出 in-flight 配额后，每帧扫一次半径内缺失的 chunk 把它们补上。
-    if ((int)m_inFlight.size() < MAX_INFLIGHT_REQUESTS) {
+    if ((int)m_inFlight.size() < m_maxInflightRequests) {
         requestMissingChunks();
     }
 
@@ -145,7 +169,7 @@ void ChunkManager::updateActiveChunks(const glm::vec3& cameraPos) {
             if (chunk) {
                 m_activeChunks.push_back(chunk);
             } else {
-                if ((int)m_inFlight.size() < MAX_INFLIGHT_REQUESTS) {
+                if ((int)m_inFlight.size() < m_maxInflightRequests) {
                     requestChunkLoad(chunkPos);
                 }
             }
@@ -156,7 +180,7 @@ void ChunkManager::updateActiveChunks(const glm::vec3& cameraPos) {
 void ChunkManager::requestMissingChunks() {
     // 优先靠近相机中心：用曼哈顿距离逐圈扩散
     for (int r = 0; r <= m_renderRadius; ++r) {
-        if ((int)m_inFlight.size() >= MAX_INFLIGHT_REQUESTS) return;
+        if ((int)m_inFlight.size() >= m_maxInflightRequests) return;
         for (int dx = -r; dx <= r; ++dx) {
             int absDx = std::abs(dx);
             for (int dz = -r; dz <= r; ++dz) {
@@ -164,7 +188,7 @@ void ChunkManager::requestMissingChunks() {
                 glm::ivec2 chunkPos(m_currentCenterChunk.x + dx, m_currentCenterChunk.y + dz);
                 if (getChunk(chunkPos)) continue;
                 if (m_inFlight.find(chunkPosToKey(chunkPos)) != m_inFlight.end()) continue;
-                if ((int)m_inFlight.size() >= MAX_INFLIGHT_REQUESTS) return;
+                if ((int)m_inFlight.size() >= m_maxInflightRequests) return;
                 requestChunkLoad(chunkPos);
             }
         }
@@ -180,6 +204,7 @@ void ChunkManager::requestChunkLoad(const glm::ivec2& chunkPos) {
 }
 
 void ChunkManager::integrateBuiltChunks() {
+    PROFILE_SCOPE("integrateBuiltChunks");
     auto results = m_workerPool.drainCompleted();
     for (auto& r : results) {
         ChunkKey key = chunkPosToKey(r.pos);
@@ -252,23 +277,25 @@ void ChunkManager::uploadSection(int chunkX, int chunkZ, int sectionY,
 }
 
 void ChunkManager::rebuildDrawCommands() {
+    PROFILE_SCOPE("rebuildDrawCommands");
     m_drawCommands.clear();
     m_visibleInstanceCount = 0;
 
-    int uploadBudget = MAX_UPLOADS_PER_FRAME;
+    int uploadBudget = m_maxUploadsPerFrame;
 
     // 第一遍：所有已加载 chunk 的脏 section 都尝试上传。
     // 跨 chunk stitch 可能改到当前不渲染的 chunk 的 mesh，必须先把数据传上去。
+    // 注意：脏 section 可能是"刚被改成空"，也需要走一遍上传以释放 slot —— 所以这里
+    // 不能用 nonEmptyMask 提前剪枝，必须按 dirty 标志扫。
     for (auto& kv : m_loadedChunks) {
         Chunk* chunk = kv.second.get();
         if (!chunk->isMeshReady()) continue;
         for (int sy = 0; sy < Chunk::SECTION_COUNT; ++sy) {
             Section& s = chunk->getSection(sy);
-            if (s.isDirty()) {
-                glm::ivec2 cp = chunk->getPosition();
-                uploadSection(cp.x, cp.y, sy, s, uploadBudget);
-                if (uploadBudget <= 0) break;
-            }
+            if (!s.isDirty()) continue;
+            glm::ivec2 cp = chunk->getPosition();
+            uploadSection(cp.x, cp.y, sy, s, uploadBudget);
+            if (uploadBudget <= 0) break;
         }
         if (uploadBudget <= 0) break;
     }
@@ -276,9 +303,17 @@ void ChunkManager::rebuildDrawCommands() {
     // 第二遍：按 active chunk -> per-section 视锥/距离剔除生成 indirect 命令
     for (Chunk* chunk : m_activeChunks) {
         if (!chunk->isMeshReady()) continue;
+
+        uint32_t mask = chunk->getNonEmptyMask();
+        if (mask == 0) continue;   // 整 chunk 没有任何可见面
+
         if (!chunk->isChunkPotentiallyVisible(m_camera)) continue;
 
-        for (int sy = 0; sy < Chunk::SECTION_COUNT; ++sy) {
+        // 只遍历 mask 置位的 section
+        while (mask) {
+            int sy = lowestBitIndex(mask);
+            mask &= mask - 1u;   // 清掉最低置位
+
             if (!chunk->isSectionVisible(sy, m_camera)) continue;
 
             SectionKey key = makeSectionKey(chunk->getPosition().x,

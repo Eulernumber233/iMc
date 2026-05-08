@@ -6,6 +6,7 @@
 #include "../UI/UIHotbar.h"
 #include "../Player.h"
 #include "../mode/PlayerModel.h"
+#include "../Profiler.h"
 #include <random>
 BlockRenderer::BlockRenderer()
     : VAO(0), VBO(0), EBO(0) {
@@ -674,29 +675,36 @@ void RenderSystem::render(const ChunkManager& chunkManager,
       //renderModel(camera);
       //return;
 
+    PROFILE_SCOPE("RenderSystem::render");
     m_currentTime += deltaTime;
 
     // 更新光源位置（含日出/日落平滑过渡强度 m_sunIntensity）
     move_DirLight(deltaTime);
 
     // 粒子系统按 active chunk 范围限制采样
-    std::vector<glm::ivec2> activeChunkPositions = chunkManager.getActiveChunkPositions();
-    m_particleManager.update(deltaTime, camera, activeChunkPositions);
+    {
+        PROFILE_SCOPE("particles.update");
+        std::vector<glm::ivec2> activeChunkPositions = chunkManager.getActiveChunkPositions();
+        m_particleManager.update(deltaTime, camera, activeChunkPositions);
+    }
 
     // 几何通道：渲染方块到 G-Buffer
-    geometryPass(chunkManager, view, projection);
-    
+    { PROFILE_SCOPE("geometryPass"); geometryPass(chunkManager, view, projection); }
+
     // SSAO 通道
-    ssaoPass(view, projection);
-    ssaoBlurPass();
-    
+    { PROFILE_SCOPE("ssaoPass"); ssaoPass(view, projection); }
+    { PROFILE_SCOPE("ssaoBlurPass"); ssaoBlurPass(); }
+
     // 阴影映射
     float sunShine_near, sunShine_far;
     glm::mat4 lightSpaceMatrix;
-    sunShineShadowMap(chunkManager, camera, sunShine_near, sunShine_far, lightSpaceMatrix);
-    
+    {
+        PROFILE_SCOPE("sunShineShadowMap");
+        sunShineShadowMap(chunkManager, camera, sunShine_near, sunShine_far, lightSpaceMatrix);
+    }
+
     // 4. 光照通道：计算结果到 lightingFBO
-    lightingPass(camera, sunShine_near, sunShine_far, lightSpaceMatrix);
+    { PROFILE_SCOPE("lightingPass"); lightingPass(camera, sunShine_near, sunShine_far, lightSpaceMatrix); }
 
     // 5. 将光照颜色复制到合成 FBO
     //    深度无需 blit：compositeFBO 直接共享 G-Buffer 的深度纹理

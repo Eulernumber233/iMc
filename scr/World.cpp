@@ -1,6 +1,9 @@
 ﻿#include "World.h"
 #include "UI/UIManager.h"
 #include "Data.h"
+#include "chunk/ChunkDimensions.h"
+#include "RuntimeConfig.h"
+#include "Profiler.h"
 #include <iostream>
 
 World::World(GLFWwindow* window_, unsigned int seed)
@@ -51,9 +54,9 @@ int World::run() {
     renderSystem.setLightIntensity(1.0f);
     renderSystem.setAmbientColor(glm::vec3(0.1f, 0.1f, 0.1f));
 
-    // 初始化区块管理器
+    // 初始化区块管理器（半径从 runtime config 读，方便不重编调参）
     m_chunkManager = std::make_shared<ChunkManager>(m_seed);
-    m_chunkManager->initialize(WorldConstants::RENDER_RADIUS, m_player->getCamera()->Position);
+    m_chunkManager->initialize(RuntimeConfig::get().renderRadius, m_player->getCamera()->Position);
     m_chunkManager->printStats();
 
     // 初始化玩家
@@ -98,8 +101,14 @@ int World::run() {
         // 渲染帧
         renderSystem.render(*m_chunkManager, view, projection, camera, deltaTime, m_player.get());
 
-        glfwSwapBuffers(m_window);
+        {
+            PROFILE_SCOPE("swapBuffers");
+            glfwSwapBuffers(m_window);
+        }
         glfwPollEvents();
+
+        // 每秒打印一次 profiler（如 RuntimeConfig 启用）
+        Profiler::frame();
     }
 
     glfwTerminate();

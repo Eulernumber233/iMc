@@ -90,6 +90,12 @@
     <ClCompile Include="scr\Item.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="scr\RuntimeConfig.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\Profiler.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="scr\particle\ParticleManager.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
@@ -114,6 +120,9 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="scr\chunk\Section.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\chunk\ChunkDimensions.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="scr\chunk\ChunkWorkerPool.h">
@@ -180,6 +189,12 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="scr\Item.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\RuntimeConfig.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\Profiler.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="scr\particle\ECSParticleSystem.h">

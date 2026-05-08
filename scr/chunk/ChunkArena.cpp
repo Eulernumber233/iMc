@@ -1,7 +1,7 @@
 ﻿#include "ChunkArena.h"
 #include <iostream>
 #include <algorithm>
-#include <cstring>
+#include <ostream>
 
 ChunkArena::ChunkArena() = default;
 
@@ -9,14 +9,18 @@ ChunkArena::~ChunkArena() {
     shutdown();
 }
 
-static uint32_t alignUp(uint32_t v, uint32_t a) {
-    return (v + a - 1) / a * a;
+int ChunkArena::classFor(uint32_t needed) {
+    // oversize 1.5x，再选最小的够用 class
+    uint32_t target = needed + needed / 2;
+    for (int i = 0; i < CLASS_COUNT; ++i) {
+        if (SIZE_CLASSES[i] >= target) return i;
+    }
+    return -1;   // 超过最大 class
 }
 
 bool ChunkArena::initialize(uint32_t initialInstances) {
     if (m_vbo != 0) return true;
-    if (initialInstances == 0) initialInstances = 1 << 16;
-    initialInstances = alignUp(initialInstances, SLOT_ALIGN);
+    if (initialInstances == 0) initialInstances = 1u << 16;
 
     glGenBuffers(1, &m_vbo);
     glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
@@ -25,9 +29,9 @@ bool ChunkArena::initialize(uint32_t initialInstances) {
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
     m_capacity = initialInstances;
+    m_cursor = 0;
     m_inUse = 0;
-    m_freeBlocks.clear();
-    m_freeBlocks.push_back({ 0, m_capacity });
+    for (auto& fl : m_freeLists) fl.clear();
     return true;
 }
 
@@ -37,66 +41,59 @@ void ChunkArena::shutdown() {
         m_vbo = 0;
     }
     m_capacity = 0;
+    m_cursor = 0;
     m_inUse = 0;
-    m_freeBlocks.clear();
+    for (auto& fl : m_freeLists) fl.clear();
 }
 
 ChunkArena::Slot ChunkArena::allocate(uint32_t requestedInstances) {
     Slot slot{};
     if (requestedInstances == 0) return slot;
 
-    uint32_t need = alignUp(requestedInstances, SLOT_ALIGN);
+    int c = classFor(requestedInstances);
+    if (c < 0) {
+        std::cerr << "ChunkArena::allocate: request " << requestedInstances
+                  << " exceeds MAX_SLOT_INSTANCES " << MAX_SLOT_INSTANCES << std::endl;
+        return slot;
+    }
+    uint32_t cls = SIZE_CLASSES[c];
 
-    // first-fit
-    for (auto it = m_freeBlocks.begin(); it != m_freeBlocks.end(); ++it) {
-        if (it->capacity >= need) {
-            slot.offset = it->offset;
-            slot.capacity = need;
-            slot.count = 0;
+    // 1. 优先从对应 class 的 free list 取
+    auto& fl = m_freeLists[c];
+    if (!fl.empty()) {
+        slot.offset = fl.back();
+        fl.pop_back();
+        slot.capacity = cls;
+        slot.count = 0;
+        slot.sizeClass = (int8_t)c;
+        m_inUse += cls;
+        return slot;
+    }
 
-            it->offset += need;
-            it->capacity -= need;
-            if (it->capacity == 0) m_freeBlocks.erase(it);
-
-            m_inUse += need;
-            return slot;
+    // 2. 从未切区 cursor 切一块
+    if (m_cursor + cls > m_capacity) {
+        // grow 到至少能容下当前请求的两倍
+        uint32_t newCap = std::max(m_capacity * 2, m_capacity + cls);
+        if (!grow(newCap)) {
+            std::cerr << "ChunkArena: grow failed (cap=" << m_capacity << ", need=" << cls << ")\n";
+            return Slot{};
         }
     }
-
-    // 没有合适块 —— 扩容到 max(2*cap, cap+need)
-    uint32_t newCap = std::max(m_capacity * 2, m_capacity + need);
-    if (!grow(newCap)) {
-        std::cerr << "ChunkArena: grow failed (cap=" << m_capacity << ", need=" << need << ")\n";
-        return Slot{};
-    }
-    return allocate(requestedInstances); // grow 后重试
+    slot.offset = m_cursor;
+    slot.capacity = cls;
+    slot.count = 0;
+    slot.sizeClass = (int8_t)c;
+    m_cursor += cls;
+    m_inUse += cls;
+    return slot;
 }
 
 void ChunkArena::free(const Slot& slot) {
     if (!slot.valid()) return;
-
-    FreeBlock fb{ slot.offset, slot.capacity };
-    m_inUse = (m_inUse >= slot.capacity) ? (m_inUse - slot.capacity) : 0;
-
-    // 按 offset 升序插入并尝试合并相邻块
-    auto it = m_freeBlocks.begin();
-    while (it != m_freeBlocks.end() && it->offset < fb.offset) ++it;
-    auto inserted = m_freeBlocks.insert(it, fb);
-
-    // 与后继合并
-    auto next = std::next(inserted);
-    if (next != m_freeBlocks.end() && inserted->offset + inserted->capacity == next->offset) {
-        inserted->capacity += next->capacity;
-        m_freeBlocks.erase(next);
-    }
-    // 与前驱合并
-    if (inserted != m_freeBlocks.begin()) {
-        auto prev = std::prev(inserted);
-        if (prev->offset + prev->capacity == inserted->offset) {
-            prev->capacity += inserted->capacity;
-            m_freeBlocks.erase(inserted);
-        }
-    }
+    if (slot.sizeClass < 0 || slot.sizeClass >= CLASS_COUNT) return;
+    m_freeLists[slot.sizeClass].push_back(slot.offset);
+    if (m_inUse >= slot.capacity) m_inUse -= slot.capacity;
+    else m_inUse = 0;
 }
 
 void ChunkArena::upload(Slot& slot, const InstanceData* data, uint32_t count) {
@@ -117,19 +114,11 @@ void ChunkArena::upload(Slot& slot, const InstanceData* data, uint32_t count) {
     slot.count = count;
 }
 
-uint32_t ChunkArena::getLargestFreeBlock() const {
-    uint32_t best = 0;
-    for (const auto& fb : m_freeBlocks) if (fb.capacity > best) best = fb.capacity;
-    return best;
-}
-
 ChunkArena::Slot ChunkArena::reupload(Slot oldSlot, const InstanceData* data, uint32_t count) {
-    // 容量足够就原地覆盖
     if (oldSlot.valid() && count <= oldSlot.capacity) {
         upload(oldSlot, data, count);
         return oldSlot;
     }
-    // 否则换一段
     if (oldSlot.valid()) free(oldSlot);
     Slot s = allocate(count);
     if (s.valid()) upload(s, data, count);
@@ -137,7 +126,6 @@ ChunkArena::Slot ChunkArena::reupload(Slot oldSlot, const InstanceData* data, ui
 }
 
 bool ChunkArena::grow(uint32_t newCapacity) {
-    newCapacity = alignUp(newCapacity, SLOT_ALIGN);
     if (newCapacity <= m_capacity) return true;
 
     GLuint newVBO = 0;
@@ -147,7 +135,7 @@ bool ChunkArena::grow(uint32_t newCapacity) {
         nullptr, GL_DYNAMIC_DRAW);
 
     if (m_vbo && m_capacity > 0) {
-        // 把旧 VBO 内容拷贝过来，所有现存 slot 的 offset 保持不变
+        // 已使用的部分（[0, m_cursor)）拷贝过来。free list 的 offset 在 cursor 之前都还有效。
         glBindBuffer(GL_COPY_READ_BUFFER, m_vbo);
         glBindBuffer(GL_COPY_WRITE_BUFFER, newVBO);
         glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER,
@@ -158,20 +146,33 @@ bool ChunkArena::grow(uint32_t newCapacity) {
     }
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-    // 把多出来的尾部加进 free list（与最后一个空闲块合并）
-    uint32_t tailOffset = m_capacity;
-    uint32_t tailSize = newCapacity - m_capacity;
-
     m_vbo = newVBO;
     m_capacity = newCapacity;
+    return true;
+}
 
-    if (!m_freeBlocks.empty()) {
-        auto& back = m_freeBlocks.back();
-        if (back.offset + back.capacity == tailOffset) {
-            back.capacity += tailSize;
-            return true;
+int ChunkArena::getFreeBlockCount() const {
+    int total = 0;
+    for (const auto& fl : m_freeLists) total += (int)fl.size();
+    return total;
+}
+
+uint32_t ChunkArena::getLargestFreeBlock() const {
+    // 最大空闲块 = 最大有空闲条目的 class 的 size，或 cursor 之后的连续空白
+    uint32_t best = (m_cursor < m_capacity) ? (m_capacity - m_cursor) : 0;
+    for (int i = CLASS_COUNT - 1; i >= 0; --i) {
+        if (!m_freeLists[i].empty()) {
+            best = std::max(best, SIZE_CLASSES[i]);
+            break;   // 只看最大的有空闲的 class
         }
     }
-    m_freeBlocks.push_back({ tailOffset, tailSize });
-    return true;
+    return best;
+}
+
+void ChunkArena::dumpClassStats(std::ostream& os) const {
+    os << "Arena classes:";
+    for (int i = 0; i < CLASS_COUNT; ++i) {
+        os << " [" << SIZE_CLASSES[i] << "]=" << m_freeLists[i].size();
+    }
+    os << " cursor=" << m_cursor << "/" << m_capacity;
 }

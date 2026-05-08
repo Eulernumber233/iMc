@@ -1,6 +1,7 @@
 ﻿#pragma once
 #include "../core.h"
 #include "BlockType.h"
+#include "ChunkDimensions.h"
 #include "Section.h"
 #include "ChunkManager.h"
 #include <array>
@@ -54,6 +55,17 @@ public:
     // 把所有 section 标脏（用于 stitch 之后整体重传）
     void markAllDirty();
 
+    // 非空 section 的 bitmask：bit i 置位表示 section[i] 有可见面。
+    // ChunkManager 在每帧 rebuildDrawCommands 前主动 refresh 一次。
+    uint32_t getNonEmptyMask() const { return m_nonEmptyMask; }
+    void refreshNonEmptyMask() {
+        uint32_t m = 0;
+        for (int sy = 0; sy < SECTION_COUNT; ++sy) {
+            if (!m_sections[sy].isEmpty()) m |= (1u << sy);
+        }
+        m_nonEmptyMask = m;
+    }
+
     // 渲染层可见性 —— 粗剔（chunk 整体 AABB + 距离），每帧/每相机状态变化时重算并缓存
     bool isChunkPotentiallyVisible(std::shared_ptr<Camera> camera);
     // 渲染层可见性 —— 精剔（section AABB），调用前应先确认 isChunkPotentiallyVisible
@@ -75,6 +87,7 @@ private:
 
     bool m_isLoaded = false;
     bool m_meshReady = false;
+    uint32_t m_nonEmptyMask = 0;   // bit i = section[i].isEmpty() ? 0 : 1
 
     // 4 横向邻居（z+/z-/x+/x-，与原 NeighborChunk 顺序一致：0:+X 1:-X 2:+Z 3:-Z）
     std::array<Chunk*, 4> m_neighbors{ {nullptr, nullptr, nullptr, nullptr} };

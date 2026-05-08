@@ -83,8 +83,9 @@ private:
     int m_renderRadius;
     glm::ivec2 m_currentCenterChunk;
 
-    static constexpr int MAX_UPLOADS_PER_FRAME = 8;
-    static constexpr int MAX_INFLIGHT_REQUESTS = 64;
+    // 从 RuntimeConfig 读，运行时可调
+    int m_maxUploadsPerFrame = 8;
+    int m_maxInflightRequests = 64;
 
     ChunkKey chunkPosToKey(const glm::ivec2& pos) const;
 

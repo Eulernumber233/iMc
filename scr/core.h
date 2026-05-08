@@ -24,12 +24,9 @@
 #include <unordered_map>
 #include <memory>
 
-namespace ChunkConstants {
-    constexpr int CHUNK_WIDTH = 16;
-    constexpr int CHUNK_HEIGHT = 64;
-    constexpr int CHUNK_DEPTH = 16;
-    constexpr int CHUNK_VOLUME = CHUNK_WIDTH * CHUNK_HEIGHT * CHUNK_DEPTH;
-}
+// 注意：ChunkConstants 已迁移到 scr/chunk/ChunkDimensions.h，
+// 减少 chunk 几何参数变更时的编译影响面。
+// 真正用到 chunk 尺寸的文件请显式 #include "../chunk/ChunkDimensions.h"。
 
 namespace RenderConstants {
     constexpr int MAX_INSTANCES = 1000000;
@@ -38,8 +35,8 @@ namespace RenderConstants {
 
 namespace WorldConstants {
     constexpr unsigned int WORLD_SEED = 114514;
-
-    constexpr unsigned int RENDER_RADIUS = 4;
+    // 渲染半径：默认值。运行时由 config（启动参数 / config 文件）覆盖
+    constexpr unsigned int RENDER_RADIUS = 8;
 }
 
 

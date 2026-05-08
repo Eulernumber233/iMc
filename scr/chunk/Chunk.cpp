@@ -51,6 +51,7 @@ void Chunk::adoptSections(std::array<Section, SECTION_COUNT>&& sections) {
     }
     m_isLoaded = true;
     m_meshReady = true;
+    refreshNonEmptyMask();
     markAllDirty();
 }
 
@@ -149,7 +150,9 @@ void Chunk::stitchHorizontalNeighbors() {
         Chunk* nc = m_neighbors[slots[i]];
         if (!nc) continue;
         stitchWithNeighbor(nc, dirs[i]);
+        nc->refreshNonEmptyMask();
     }
+    refreshNonEmptyMask();
 }
 
 
@@ -190,6 +193,8 @@ BlockType Chunk::setBlockAndUpdate(int x, int y, int z, BlockType newType) {
         {x + 1,y,z}, {x - 1,y,z}, {x,y,z + 1}, {x,y,z - 1}, {x,y + 1,z}, {x,y - 1,z}
     };
     BlockFace neighborFaces[6] = { LEFT, RIGHT, BACK, FRONT, DOWN, UP };
+    Chunk* touchedNeighbors[2] = { nullptr, nullptr };  // 至多 2 个跨 chunk 邻居 (X 向 + Z 向)
+    int tnCount = 0;
     for (int i = 0; i < 6; ++i) {
         int nx = dirs[i].x, ny = dirs[i].y, nz = dirs[i].z;
         if (ny < 0 || ny >= HEIGHT) continue;
@@ -199,16 +204,22 @@ BlockType Chunk::setBlockAndUpdate(int x, int y, int z, BlockType newType) {
             int lx = (nx + WIDTH) % WIDTH;
             int lz = (nz + DEPTH) % DEPTH;
             nc->updateFaceAt(lx, ny, lz, neighborFaces[i]);
+            // 记录被动邻居以便循环外刷新它的 mask
+            if (tnCount < 2 && touchedNeighbors[0] != nc && touchedNeighbors[1] != nc) {
+                touchedNeighbors[tnCount++] = nc;
+            }
         } else {
             updateFaceAt(nx, ny, nz, neighborFaces[i]);
         }
     }
+    for (int i = 0; i < tnCount; ++i) touchedNeighbors[i]->refreshNonEmptyMask();
 
     // 4. 阈值压缩自己这个 section
     if (s.getErrerCount() > (int)s.getInstanceCount() / 4) {
         s.compact();
     }
 
+    refreshNonEmptyMask();
     return oldType;
 }
 

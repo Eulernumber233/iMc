@@ -1,5 +1,6 @@
 ﻿// [file name]: TerrainGenerator.cpp
 #include "TerrainGenerator.h"
+#include "../chunk/ChunkDimensions.h"
 #include <cmath>
 #include <algorithm>
 #include <cstring>

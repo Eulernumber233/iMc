@@ -96,14 +96,6 @@ struct InstanceData {
         : position(position), faceIndex(faceIndex), blockType(blockType), textureLayer(textureLayer)
     {
     }
-    static BlockFaceLocKey ChangeToBlockFaceLocKey(const InstanceData& data) {
-        return BlockFaceLocKey(
-            static_cast<uint8_t>(data.position.x - 0.5f)% ChunkConstants::CHUNK_WIDTH, // 转回方块坐标
-            static_cast<uint8_t>(data.position.y - 0.5f),
-            static_cast<uint8_t>(data.position.z - 0.5f)%ChunkConstants::CHUNK_DEPTH,
-            static_cast<BlockFace>(data.faceIndex)
-        );
-	}
 };
 
 // 获取方块名称

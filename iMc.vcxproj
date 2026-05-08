@@ -145,6 +145,8 @@
     <ClCompile Include="scr\particle\GPUParticleSystem.cpp" />
     <ClCompile Include="scr\particle\ParticleManager.cpp" />
     <ClCompile Include="scr\Player.cpp" />
+    <ClCompile Include="scr\RuntimeConfig.cpp" />
+    <ClCompile Include="scr\Profiler.cpp" />
     <ClCompile Include="scr\render\BlockOutlineRenderer.cpp" />
     <ClCompile Include="scr\render\RenderSystem.cpp" />
     <ClCompile Include="scr\Shader.cpp" />
@@ -157,11 +159,14 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="scr\Camera.h" />
+    <ClInclude Include="scr\RuntimeConfig.h" />
+    <ClInclude Include="scr\Profiler.h" />
     <ClInclude Include="scr\chunk\BlockType.h" />
     <ClInclude Include="scr\chunk\Chunk.h" />
     <ClInclude Include="scr\chunk\ChunkManager.h" />
     <ClInclude Include="scr\chunk\ChunkArena.h" />
     <ClInclude Include="scr\chunk\Section.h" />
+    <ClInclude Include="scr\chunk\ChunkDimensions.h" />
     <ClInclude Include="scr\chunk\ChunkWorkerPool.h" />
     <ClInclude Include="scr\collision\Ray.h" />
     <ClInclude Include="scr\collision\AABB.h" />
