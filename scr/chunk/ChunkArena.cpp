@@ -2,6 +2,7 @@
 #include <iostream>
 #include <algorithm>
 #include <ostream>
+#include <cstring>
 
 ChunkArena::ChunkArena() = default;
 
@@ -112,6 +113,61 @@ void ChunkArena::upload(Slot& slot, const InstanceData* data, uint32_t count) {
         data);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     slot.count = count;
+}
+
+void ChunkArena::patch(Slot& slot, const InstanceData* data,
+                       const uint32_t* indices, uint32_t indexCount,
+                       uint32_t newCount) {
+    if (!slot.valid() || indexCount == 0 || data == nullptr || indices == nullptr) return;
+    if (newCount > slot.capacity) {
+        // 容量不够 —— 调用方应该在上层 fallback 到全量 reupload，不该走到这里
+        std::cerr << "ChunkArena::patch newCount " << newCount
+                  << " > capacity " << slot.capacity << std::endl;
+        return;
+    }
+
+    // 找出 dirty index 的 [minIdx, maxIdx]，map 这段范围一次写完
+    uint32_t minIdx = indices[0];
+    uint32_t maxIdx = indices[0];
+    for (uint32_t i = 1; i < indexCount; ++i) {
+        uint32_t v = indices[i];
+        if (v < minIdx) minIdx = v;
+        if (v > maxIdx) maxIdx = v;
+    }
+    if (maxIdx >= slot.capacity) {
+        std::cerr << "ChunkArena::patch index " << maxIdx
+                  << " >= capacity " << slot.capacity << std::endl;
+        return;
+    }
+
+    GLintptr off = (GLintptr(slot.offset) + GLintptr(minIdx)) * (GLintptr)sizeof(InstanceData);
+    GLsizeiptr len = (GLsizeiptr)(maxIdx - minIdx + 1) * (GLsizeiptr)sizeof(InstanceData);
+
+    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+    // 不带 INVALIDATE_RANGE：未触及的位置保留旧数据；只写 dirty index 处的 8 字节。
+    // UNSYNCHRONIZED：跳过驱动的隐式同步等待，调用方需保证 GPU 当前不在读这段
+    // （ChunkManager::update 在帧首调用，上一帧已经画完，安全）。
+    void* ptr = glMapBufferRange(GL_ARRAY_BUFFER, off, len,
+        GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT);
+    if (!ptr) {
+        std::cerr << "ChunkArena::patch glMapBufferRange failed (off=" << off
+                  << " len=" << len << ")\n";
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        return;
+    }
+
+    InstanceData* dst = reinterpret_cast<InstanceData*>(ptr);
+    // 仅写 dirty index 对应的位置；映射的相对偏移 = idx - minIdx
+    for (uint32_t i = 0; i < indexCount; ++i) {
+        uint32_t idx = indices[i];
+        if (idx >= slot.capacity) continue;          // 越界防御
+        dst[idx - minIdx] = data[idx];
+    }
+
+    glUnmapBuffer(GL_ARRAY_BUFFER);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    slot.count = newCount;
 }
 
 ChunkArena::Slot ChunkArena::reupload(Slot oldSlot, const InstanceData* data, uint32_t count) {

@@ -31,9 +31,10 @@ bool setWindowIcon(GLFWwindow* window, const char* iconPath) {
 GLFWwindow* initAll() {
     // 1. 初始化GLFW
     glfwInit();
-    // 4.3 core：方块渲染走 glMultiDrawElementsIndirect + baseInstance（4.2 起进核心）
+    // 4.6 core：方块渲染走 glMultiDrawElementsIndirect + baseInstance（4.2 起进核心），
+    // 顶点着色器需要 gl_DrawID（4.6 内置）以从 SSBO 读 sectionBase 还原世界坐标。
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_DEPTH_BITS, 24);  // 确保默认帧缓冲有深度缓冲区
     GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "Open Window", NULL, NULL);

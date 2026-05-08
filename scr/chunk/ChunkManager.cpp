@@ -43,6 +43,10 @@ ChunkManager::~ChunkManager() {
         glDeleteBuffers(1, &m_indirectBuffer);
         m_indirectBuffer = 0;
     }
+    if (m_sectionBaseSSBO) {
+        glDeleteBuffers(1, &m_sectionBaseSSBO);
+        m_sectionBaseSSBO = 0;
+    }
     m_arena.shutdown();
 }
 
@@ -71,6 +75,13 @@ void ChunkManager::initialize(int renderRadius, const glm::vec3& cameraPos) {
     m_indirectBufferCapacityBytes = sizeof(DrawElementsIndirectCommand) * 256;
     glBufferData(GL_DRAW_INDIRECT_BUFFER, m_indirectBufferCapacityBytes, nullptr, GL_DYNAMIC_DRAW);
     glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
+
+    // SectionBases SSBO：与 indirect buffer 命令一一对应，shader 用 gl_DrawID 索引
+    glGenBuffers(1, &m_sectionBaseSSBO);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_sectionBaseSSBO);
+    m_sectionBaseCapacityBytes = sizeof(glm::vec4) * 256;
+    glBufferData(GL_SHADER_STORAGE_BUFFER, m_sectionBaseCapacityBytes, nullptr, GL_DYNAMIC_DRAW);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
     int n = RuntimeConfig::get().workerThreads;
     if (n <= 0) {
@@ -158,6 +169,14 @@ bool ChunkManager::isWithinActiveRadius(const glm::ivec2& chunkPos,
     return dx <= m_renderRadius && dz <= m_renderRadius;
 }
 
+bool ChunkManager::isWithinEvictRadius(const glm::ivec2& chunkPos,
+                                       const glm::ivec2& centerChunk) const {
+    int dx = std::abs(chunkPos.x - centerChunk.x);
+    int dz = std::abs(chunkPos.y - centerChunk.y);
+    int r = m_renderRadius + EVICT_MARGIN_CHUNKS;
+    return dx <= r && dz <= r;
+}
+
 void ChunkManager::updateActiveChunks(const glm::vec3& cameraPos) {
     m_activeChunks.clear();
 
@@ -173,6 +192,30 @@ void ChunkManager::updateActiveChunks(const glm::vec3& cameraPos) {
                     requestChunkLoad(chunkPos);
                 }
             }
+        }
+    }
+
+    // 把走出 evict 半径的 chunk 的 GPU slot 释放掉（CPU 数据保留）
+    evictFarChunkSlots();
+}
+
+void ChunkManager::evictFarChunkSlots() {
+    PROFILE_SCOPE("evictFarChunkSlots");
+    for (auto& kv : m_loadedChunks) {
+        Chunk* chunk = kv.second.get();
+        if (!chunk) continue;
+        glm::ivec2 cp = chunk->getPosition();
+        if (isWithinEvictRadius(cp, m_currentCenterChunk)) continue;
+
+        // 走出 evict 半径 → 释放该 chunk 所有 section 的 GPU slot
+        for (int sy = 0; sy < Chunk::SECTION_COUNT; ++sy) {
+            SectionKey key = makeSectionKey(cp.x, cp.y, sy);
+            auto it = m_sectionSlots.find(key);
+            if (it == m_sectionSlots.end()) continue;
+            m_arena.free(it->second);
+            m_sectionSlots.erase(it);
+            // 清掉 section 的增量状态：再次入活跃半径时下次 upload 自动走全量 reupload 重建 slot
+            chunk->getSection(sy).notifyGpuSlotReleased();
         }
     }
 }
@@ -259,17 +302,39 @@ void ChunkManager::uploadSection(int chunkX, int chunkZ, int sectionY,
 
     SectionKey key = makeSectionKey(chunkX, chunkZ, sectionY);
     const auto& data = section.getInstanceData();
+    const auto& dirtyIdx = section.getDirtyIndices();
 
     auto it = m_sectionSlots.find(key);
     ChunkArena::Slot oldSlot = (it != m_sectionSlots.end()) ? it->second : ChunkArena::Slot{};
-    ChunkArena::Slot newSlot = m_arena.reupload(oldSlot,
-        data.empty() ? nullptr : data.data(),
-        (uint32_t)data.size());
 
-    if (data.empty()) {
-        if (oldSlot.valid()) m_sectionSlots.erase(key);
-    } else if (newSlot.valid()) {
-        m_sectionSlots[key] = newSlot;
+    // 增量上传条件：
+    //   1) 已有有效 slot
+    //   2) section 没有发出全量重建信号（rebuild / compact / adopt 不走增量）
+    //   3) 有脏 index 可写
+    //   4) 新的 instanceData 长度仍 <= slot.capacity（即不需要升 size class）
+    bool canIncremental =
+        oldSlot.valid()
+        && !section.fullRebuildPending()
+        && !dirtyIdx.empty()
+        && (uint32_t)data.size() <= oldSlot.capacity;
+
+    if (canIncremental) {
+        ChunkArena::Slot s = oldSlot;
+        m_arena.patch(s, data.data(),
+                      dirtyIdx.data(), (uint32_t)dirtyIdx.size(),
+                      (uint32_t)data.size());
+        // patch 内部会更新 s.count 到 newCount，回写 map
+        m_sectionSlots[key] = s;
+    } else {
+        ChunkArena::Slot newSlot = m_arena.reupload(oldSlot,
+            data.empty() ? nullptr : data.data(),
+            (uint32_t)data.size());
+
+        if (data.empty()) {
+            if (oldSlot.valid()) m_sectionSlots.erase(key);
+        } else if (newSlot.valid()) {
+            m_sectionSlots[key] = newSlot;
+        }
     }
 
     section.clearDirty();
@@ -279,21 +344,25 @@ void ChunkManager::uploadSection(int chunkX, int chunkZ, int sectionY,
 void ChunkManager::rebuildDrawCommands() {
     PROFILE_SCOPE("rebuildDrawCommands");
     m_drawCommands.clear();
+    m_sectionBases.clear();
     m_visibleInstanceCount = 0;
 
     int uploadBudget = m_maxUploadsPerFrame;
 
-    // 第一遍：所有已加载 chunk 的脏 section 都尝试上传。
-    // 跨 chunk stitch 可能改到当前不渲染的 chunk 的 mesh，必须先把数据传上去。
-    // 注意：脏 section 可能是"刚被改成空"，也需要走一遍上传以释放 slot —— 所以这里
-    // 不能用 nonEmptyMask 提前剪枝，必须按 dirty 标志扫。
+    // 第一遍：evict 半径内（active 半径 + hysteresis）的脏 section 上传。
+    // - 跨 chunk stitch 可能改到 active 半径外 1 格的 chunk mesh，所以扫描范围必须比 active 半径大。
+    // - 走出 evict 半径的 chunk 已经被 evictFarChunkSlots 释放了 GPU slot 并标记为 fullRebuildPending；
+    //   只要它们没回到 evict 半径内，就不上传，避免每帧重新分配 slot。
+    // - 脏 section 可能是"刚被改成空"，也需要走一遍上传以释放 slot —— 所以这里不能用 nonEmptyMask
+    //   提前剪枝，必须按 dirty 标志扫。
     for (auto& kv : m_loadedChunks) {
         Chunk* chunk = kv.second.get();
         if (!chunk->isMeshReady()) continue;
+        glm::ivec2 cp = chunk->getPosition();
+        if (!isWithinEvictRadius(cp, m_currentCenterChunk)) continue;
         for (int sy = 0; sy < Chunk::SECTION_COUNT; ++sy) {
             Section& s = chunk->getSection(sy);
             if (!s.isDirty()) continue;
-            glm::ivec2 cp = chunk->getPosition();
             uploadSection(cp.x, cp.y, sy, s, uploadBudget);
             if (uploadBudget <= 0) break;
         }
@@ -330,11 +399,21 @@ void ChunkManager::rebuildDrawCommands() {
             cmd.baseVertex = 0;
             cmd.baseInstance = slot.offset;
             m_drawCommands.push_back(cmd);
+
+            // 与命令同序追加 section base：shader 通过 gl_DrawID 拿到 (chunkX*16, sectionY*16, chunkZ*16)
+            glm::ivec2 cp = chunk->getPosition();
+            m_sectionBases.emplace_back(
+                float(cp.x * Chunk::WIDTH),
+                float(sy * Section::HEIGHT),
+                float(cp.y * Chunk::DEPTH),
+                0.0f);
+
             m_visibleInstanceCount += slot.count;
         }
     }
 
     syncIndirectBuffer();
+    syncSectionBaseSSBO();
 }
 
 void ChunkManager::syncIndirectBuffer() {
@@ -347,6 +426,18 @@ void ChunkManager::syncIndirectBuffer() {
     }
     glBufferSubData(GL_DRAW_INDIRECT_BUFFER, 0, needed, m_drawCommands.data());
     glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
+}
+
+void ChunkManager::syncSectionBaseSSBO() {
+    if (!m_sectionBaseSSBO || m_sectionBases.empty()) return;
+    GLsizeiptr needed = (GLsizeiptr)m_sectionBases.size() * sizeof(glm::vec4);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_sectionBaseSSBO);
+    if (needed > m_sectionBaseCapacityBytes) {
+        m_sectionBaseCapacityBytes = needed * 2;
+        glBufferData(GL_SHADER_STORAGE_BUFFER, m_sectionBaseCapacityBytes, nullptr, GL_DYNAMIC_DRAW);
+    }
+    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, needed, m_sectionBases.data());
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 }
 
 bool ChunkManager::setBlock(const glm::ivec3& worldPos, BlockType type) {

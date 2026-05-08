@@ -41,6 +41,18 @@ public:
     // count <= slot.capacity 时原地 upload；否则 free 旧 slot，分配新 slot。
     Slot reupload(Slot oldSlot, const InstanceData* data, uint32_t count);
 
+    // 增量 patch：对 slot 内若干位置做小段更新。
+    // - data 指向完整 instance 数组（长度 ≥ max(indices)+1，但实际只读 indices 指定的位置）
+    // - indices 是相对 slot 内（0-based）的下标列表
+    // - newCount 表示更新后 slot 的有效实例数（必须 <= slot.capacity）
+    //
+    // 实现策略：单次 glMapBufferRange 覆盖 [minIdx, maxIdx] 范围，
+    // 配 GL_MAP_INVALIDATE_RANGE_BIT | GL_MAP_UNSYNCHRONIZED_BIT，跳过驱动同步等待。
+    // 调用方需保证：上一帧 GPU 已经画完这些位置（每帧帧首调用即可满足）。
+    void patch(Slot& slot, const InstanceData* data,
+               const uint32_t* indices, uint32_t indexCount,
+               uint32_t newCount);
+
     GLuint getVBO() const { return m_vbo; }
     uint32_t getCapacity() const { return m_capacity; }
     uint32_t getInUse() const { return m_inUse; }

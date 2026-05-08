@@ -56,20 +56,20 @@ bool BlockRenderer::initialize() {
 
 void BlockRenderer::bindInstanceAttribs() {
     // 调用前需保证 VAO 已绑定且 GL_ARRAY_BUFFER 已绑定到 arena VBO
+    // 8 字节 InstanceData 布局：packed32 + blockType16 + textureLayer16
+    // location 5: packed (uint, 含 x/y/z/face/orient)
     glEnableVertexAttribArray(5);
-    glVertexAttribPointer(5, 3, GL_FLOAT, GL_FALSE, sizeof(InstanceData), (void*)offsetof(InstanceData, position));
+    glVertexAttribIPointer(5, 1, GL_UNSIGNED_INT, sizeof(InstanceData), (void*)offsetof(InstanceData, packed));
     glVertexAttribDivisor(5, 1);
 
-    glEnableVertexAttribArray(6);
-    glVertexAttribIPointer(6, 1, GL_INT, sizeof(InstanceData), (void*)offsetof(InstanceData, faceIndex));
-    glVertexAttribDivisor(6, 1);
-
+    // location 7: blockType (ushort)
     glEnableVertexAttribArray(7);
-    glVertexAttribIPointer(7, 1, GL_INT, sizeof(InstanceData), (void*)offsetof(InstanceData, blockType));
+    glVertexAttribIPointer(7, 1, GL_UNSIGNED_SHORT, sizeof(InstanceData), (void*)offsetof(InstanceData, blockType));
     glVertexAttribDivisor(7, 1);
 
+    // location 8: textureLayer (ushort)
     glEnableVertexAttribArray(8);
-    glVertexAttribIPointer(8, 1, GL_INT, sizeof(InstanceData), (void*)offsetof(InstanceData, textureLayer));
+    glVertexAttribIPointer(8, 1, GL_UNSIGNED_SHORT, sizeof(InstanceData), (void*)offsetof(InstanceData, textureLayer));
     glVertexAttribDivisor(8, 1);
 }
 
@@ -788,6 +788,9 @@ void RenderSystem::geometryPass(const ChunkManager& chunkManager,
     // arena 可能因扩容换了底层 VBO，每帧重绑（内部已做相等短路）
     m_blockRenderer.bindArenaVBO(chunkManager.getArenaVBO());
 
+    // section base SSBO 绑到 binding=0，shader 用 gl_DrawID 索引还原方块世界坐标
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, chunkManager.getSectionBaseSSBO());
+
     const auto& cmds = chunkManager.getDrawCommands();
     if (!cmds.empty()) {
         m_blockRenderer.render(chunkManager.getIndirectBuffer(), (int)cmds.size(), view, projection);
@@ -894,6 +897,7 @@ void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std
     glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
     glCullFace(GL_BACK);
     m_blockRenderer.bindArenaVBO(chunkManager.getArenaVBO());
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, chunkManager.getSectionBaseSSBO());
     const auto& cmds = chunkManager.getDrawCommands();
     if (!cmds.empty()) {
         m_blockRenderer.renderDepth(chunkManager.getIndirectBuffer(), (int)cmds.size(),

@@ -23,24 +23,31 @@ void Section::setBlockRaw(int x, int y, int z, BlockType b) {
     m_blocks[idx(x, y, z)] = b;
 }
 
-glm::vec3 Section::worldCenterFor(int x, int y, int z) const {
-    // y 是 section 局部 y，叠加 section 起始 worldY
-    int worldY = m_sectionY * HEIGHT + y;
-    float wx = m_chunkX * WIDTH + x + 0.5f;
-    float wy = worldY + 0.5f;
-    float wz = m_chunkZ * DEPTH + z + 0.5f;
-    return glm::vec3(wx, wy, wz);
-}
-
 void Section::addFaceLocal(int x, int y, int z, BlockFace face, BlockType type) {
     BlockFaceLocKey key{ (uint8_t)x, (uint8_t)y, (uint8_t)z, face };
     if (m_PosToInstanceIndex.find(key) != m_PosToInstanceIndex.end()) {
         return;
     }
-    glm::vec3 wc = worldCenterFor(x, y, z);
-    m_instanceData.push_back({ wc, face, type, BlockFaceType::getTextureLayer({type, face}) });
-    m_PosToInstanceIndex[key] = (int)m_instanceData.size() - 1;
+    int textureLayer = BlockFaceType::getTextureLayer({ type, face });
+    uint32_t packed = InstanceData::makePacked(
+        (uint8_t)x, (uint8_t)y, (uint8_t)z, face, /*orient*/ 0u);
+
+    int idx;
+    if (!m_freeSlots.empty()) {
+        // 复用一个 ERRER 占位槽：原地写入，不增长数组长度
+        idx = (int)m_freeSlots.back();
+        m_freeSlots.pop_back();
+        m_instanceData[idx] = InstanceData(packed, (uint16_t)type, (uint16_t)textureLayer);
+        if (m_errerCount > 0) m_errerCount--;
+    } else {
+        // 没有可复用槽 → 数组尾部追加；slot.count 在上传时由 ChunkManager 同步
+        idx = (int)m_instanceData.size();
+        m_instanceData.emplace_back(packed, (uint16_t)type, (uint16_t)textureLayer);
+    }
+    m_PosToInstanceIndex[key] = idx;
     m_dirty = true;
+    // 已标记全量重建时无需累积增量 index（最终会全量传）
+    if (!m_fullRebuildPending) m_dirtyIndices.push_back((uint32_t)idx);
 }
 
 void Section::removeFaceLocal(int x, int y, int z, BlockFace face) {
@@ -49,10 +56,14 @@ void Section::removeFaceLocal(int x, int y, int z, BlockFace face) {
     if (it == m_PosToInstanceIndex.end()) return;
 
     int index = it->second;
+    // 占位：g_buffer.frag 见到 BLOCK_ERRER 直接 discard。位置上仍占一格，slot.count 不变。
+    // 同时把 index 收进 free list，下次 addFaceLocal 优先复用此槽，避免数组无限膨胀。
     m_instanceData[index].blockType = BLOCK_ERRER;
     m_PosToInstanceIndex.erase(it);
     m_errerCount++;
     m_dirty = true;
+    if (!m_fullRebuildPending) m_dirtyIndices.push_back((uint32_t)index);
+    m_freeSlots.push_back((uint32_t)index);
 }
 
 void Section::updateFaceWithNeighbor(int x, int y, int z, BlockFace face, BlockType neighborBlock) {
@@ -82,14 +93,12 @@ void Section::compact() {
         const auto& d = m_instanceData[i];
         if (d.blockType == BLOCK_ERRER) continue;
 
-        // 反推局部坐标。InstanceData.position 是世界坐标 + 0.5。
-        int wx = (int)std::floor(d.position.x);
-        int wy = (int)std::floor(d.position.y);
-        int wz = (int)std::floor(d.position.z);
-        int lx = wx - m_chunkX * WIDTH;
-        int ly = wy - m_sectionY * HEIGHT;
-        int lz = wz - m_chunkZ * DEPTH;
-        BlockFaceLocKey key{ (uint8_t)lx, (uint8_t)ly, (uint8_t)lz, (BlockFace)d.faceIndex };
+        // 局部坐标直接从 packed 字段拆出（不再需要从世界坐标反推）
+        uint8_t lx = InstanceData::unpackX(d.packed);
+        uint8_t ly = InstanceData::unpackY(d.packed);
+        uint8_t lz = InstanceData::unpackZ(d.packed);
+        BlockFace face = InstanceData::unpackFace(d.packed);
+        BlockFaceLocKey key{ lx, ly, lz, face };
         nm[key] = (int)nd.size();
         nd.push_back(d);
     }
@@ -98,12 +107,20 @@ void Section::compact() {
     m_PosToInstanceIndex.swap(nm);
     m_errerCount = 0;
     m_dirty = true;
+    // compact 改变了 instanceData 整体布局 → 走全量
+    m_fullRebuildPending = true;
+    m_dirtyIndices.clear();
+    m_freeSlots.clear();
 }
 
 void Section::rebuildVisibilityInternal(const Section* above, const Section* below) {
     m_instanceData.clear();
     m_PosToInstanceIndex.clear();
     m_errerCount = 0;
+    // rebuild 是大幅替换 → 不能走增量
+    m_dirtyIndices.clear();
+    m_freeSlots.clear();
+    m_fullRebuildPending = true;
 
     BlockFace allFaces[6] = { RIGHT, LEFT, FRONT, BACK, UP, DOWN };
 
@@ -154,11 +171,25 @@ void Section::rebuildVisibilityInternal(const Section* above, const Section* bel
     m_dirty = true;
 }
 
+void Section::notifyGpuSlotReleased() {
+    // GPU slot 清空，之前累计的 dirty index 全部失效
+    // free list 里的 ERRER 槽下一次全量上传会被一并写回 GPU，但正确
+    // m_dirty 必须为 true：下次该 section 重新进入活跃半径时，rebuildDrawCommands 才会触发 uploadSection
+    // → 找不到 oldSlot → 走 reupload 全量分支，重新分配 slot 并完整上传。
+    m_dirty = true;
+    m_dirtyIndices.clear();
+    m_fullRebuildPending = true;
+}
+
 void Section::adoptFrom(Section&& other) {
     m_blocks = other.m_blocks;
     m_instanceData = std::move(other.m_instanceData);
     m_PosToInstanceIndex = std::move(other.m_PosToInstanceIndex);
     m_errerCount = other.m_errerCount;
     m_dirty = true;
+    // worker 产出的整段都是新的 → 首次上传必然是全量
+    m_dirtyIndices.clear();
+    m_freeSlots.clear();
+    m_fullRebuildPending = true;
     // 坐标在 setCoords 时已设置
 }

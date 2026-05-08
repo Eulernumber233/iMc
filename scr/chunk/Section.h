@@ -47,7 +47,13 @@ public:
 
     bool isDirty() const { return m_dirty; }
     void markDirty() { m_dirty = true; }
-    void clearDirty() { m_dirty = false; }
+    void clearDirty() { m_dirty = false; m_dirtyIndices.clear(); m_fullRebuildPending = false; }
+
+    // 增量上传支持
+    const std::vector<uint32_t>& getDirtyIndices() const { return m_dirtyIndices; }
+    // 是否要求走全量上传（rebuild / compact / adopt 这类大幅替换语义）。
+    // 平常的 add / remove 都走增量，capacity 是否够由 ChunkManager 比对 newCount vs slot.capacity 决定。
+    bool fullRebuildPending() const { return m_fullRebuildPending; }
 
     // 全量重算：仅在 worker 线程或主线程做完整重建时使用。
     // 不处理跨 section/跨 chunk 边界面 —— 调用方需另行 stitch。
@@ -72,12 +78,25 @@ public:
     // 接管另一个 Section 的数据（move 语义，用于把 worker 生产的 result 装入主线程 chunk）
     void adoptFrom(Section&& other);
 
+    // GPU slot 已被 ChunkManager 释放：抹掉所有增量状态，下次进入活跃半径时强制走全量上传。
+    // 不动 m_blocks / m_instanceData / m_PosToInstanceIndex —— 这些是 CPU 端 mesh，仍然有效。
+    void notifyGpuSlotReleased();
+
 private:
     std::array<BlockType, VOLUME> m_blocks{};
     std::vector<InstanceData> m_instanceData;
     std::unordered_map<BlockFaceLocKey, int> m_PosToInstanceIndex;
     int m_errerCount = 0;
     bool m_dirty = true;
+
+    // 增量上传辅助：
+    //   m_dirtyIndices: 自上次 upload 起被修改/新增的 instance 在数组中的下标
+    //   m_freeSlots:    被 remove 留下的 ERRER 占位槽 free list；下次 add 优先复用这些槽，避免数组无限增长
+    //   m_fullRebuildPending: rebuild / compact / adopt 这类大幅替换 → 强制走全量
+    // 注意：add/remove 一律走增量。slot.capacity 不够时由 ChunkManager 在上传前判定并 fallback 到全量。
+    std::vector<uint32_t> m_dirtyIndices;
+    std::vector<uint32_t> m_freeSlots;
+    bool m_fullRebuildPending = false;
 
     // section 在世界中的位置信息（由 Chunk 设置）
     int m_chunkX = 0;
@@ -86,5 +105,4 @@ private:
 
     // 内部辅助
     static int idx(int x, int y, int z) { return (y * DEPTH + z) * WIDTH + x; }
-    glm::vec3 worldCenterFor(int x, int y, int z) const;
 };

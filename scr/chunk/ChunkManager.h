@@ -39,6 +39,7 @@ public:
     }
     GLuint getArenaVBO() const { return m_arena.getVBO(); }
     GLuint getIndirectBuffer() const { return m_indirectBuffer; }
+    GLuint getSectionBaseSSBO() const { return m_sectionBaseSSBO; }
     int getVisibleInstanceCount() const { return m_visibleInstanceCount; }
 
     Chunk* getChunk(const glm::ivec2& chunkPos);
@@ -80,8 +81,19 @@ private:
     GLsizeiptr m_indirectBufferCapacityBytes = 0;
     int m_visibleInstanceCount = 0;
 
+    // 与 m_drawCommands 同序：第 i 条命令对应的 section base 世界坐标
+    // GPU 端布局为 vec4[]，xyz = (chunkX*16, sectionY*16, chunkZ*16)，w 保留。
+    // shader 通过 gl_DrawID 索引此数组还原方块世界坐标。
+    std::vector<glm::vec4> m_sectionBases;
+    GLuint m_sectionBaseSSBO = 0;
+    GLsizeiptr m_sectionBaseCapacityBytes = 0;
+
     int m_renderRadius;
     glm::ivec2 m_currentCenterChunk;
+
+    // 走出 renderRadius + EVICT_MARGIN_CHUNKS 的 chunk 释放 GPU slot（CPU 数据保留，等后续存档系统接入再彻底卸载）。
+    // hysteresis 避免边界来回走时反复释放/重传。
+    static constexpr int EVICT_MARGIN_CHUNKS = 2;
 
     // 从 RuntimeConfig 读，运行时可调
     int m_maxUploadsPerFrame = 8;
@@ -101,9 +113,15 @@ private:
     void uploadSection(int chunkX, int chunkZ, int sectionY, Section& section, int& uploadBudget);
     void releaseSectionSlot(SectionKey key);
     void syncIndirectBuffer();
+    void syncSectionBaseSSBO();
 
     bool isWithinActiveRadius(const glm::ivec2& chunkPos,
         const glm::ivec2& centerChunk) const;
+    bool isWithinEvictRadius(const glm::ivec2& chunkPos,
+        const glm::ivec2& centerChunk) const;
+
+    // 释放走出 evict 半径的 chunk 的所有 section GPU slot；CPU 数据保留。
+    void evictFarChunkSlots();
 
     void linkNeighbors(Chunk* newChunk);
 };

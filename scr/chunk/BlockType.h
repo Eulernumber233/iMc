@@ -85,18 +85,48 @@ namespace std {
     };
 }
 
-// 绘制是需将 DrawFaceKey 转化为 InstanceData 进行实例化渲染
+// 将 DrawFaceKey 转化为 InstanceData 进行实例化渲染。
+//
+// GPU 端 8 字节布局：
+//   packed (32-bit):
+//     bit  0   localX (0..15)
+//     bit  4   localY (0..15, section 局部 y)
+//     bit  8  localZ (0..15)
+//     bit 12  faceIndex (0..5)
+//     bit 15  orient (方块朝向)
+//     bit 19  reserved (13 bit)
+//   blockType    (16-bit)
+//   textureLayer (16-bit)
+//
+// 世界坐标在着色器里用 sectionBase[gl_DrawID].xyz + (localX,localY,localZ) + 0.5 还原。
+// CPU 不再保留 vec3 position，节省 16 字节并把整个结构降到 24B → 8B (3x)。
 struct InstanceData {
-    glm::vec3 position;   // 方块中心世界坐标 (x+0.5, y+0.5, z+0.5)
-    int faceIndex;        // 面索引 (0-5)
-    int blockType;        // 方块类型枚举值
-    int textureLayer;     // 纹理数组层索引（由CPU预先计算）
+    uint32_t packed;
+    uint16_t blockType;
+    uint16_t textureLayer;
 
-    InstanceData(const glm::vec3& position, BlockFace faceIndex, BlockType blockType, int textureLayer)
-        : position(position), faceIndex(faceIndex), blockType(blockType), textureLayer(textureLayer)
+    InstanceData() = default;
+    InstanceData(uint32_t packed_, uint16_t blockType_, uint16_t textureLayer_)
+        : packed(packed_), blockType(blockType_), textureLayer(textureLayer_)
     {
     }
+
+    static constexpr uint32_t makePacked(uint8_t lx, uint8_t ly, uint8_t lz,
+                                         BlockFace face, uint8_t orient = 0) noexcept
+    {
+        return  (uint32_t(lx & 0xFu))
+              | (uint32_t(ly & 0xFu) << 4)
+              | (uint32_t(lz & 0xFu) << 8)
+              | (uint32_t(face & 0x7u) << 12)
+              | (uint32_t(orient & 0xFu) << 15);
+    }
+
+    static constexpr uint8_t   unpackX(uint32_t p)     noexcept { return  uint8_t(p        & 0xFu); }
+    static constexpr uint8_t   unpackY(uint32_t p)     noexcept { return  uint8_t((p >> 4) & 0xFu); }
+    static constexpr uint8_t   unpackZ(uint32_t p)     noexcept { return  uint8_t((p >> 8) & 0xFu); }
+    static constexpr BlockFace unpackFace(uint32_t p)  noexcept { return BlockFace((p >> 12) & 0x7u); }
 };
+static_assert(sizeof(InstanceData) == 8, "InstanceData must be 8 bytes for tight GPU packing");
 
 // 获取方块名称
 inline const char* GetBlockName(BlockType type) {
