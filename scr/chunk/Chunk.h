@@ -70,6 +70,12 @@ public:
     // 渲染层可见性 —— 精剔（section AABB），调用前应先确认 isChunkPotentiallyVisible
     bool isSectionVisible(int sectionY, std::shared_ptr<Camera> camera) const;
 
+    // 组合剔除：非空 mask + 视锥 + 距离 + 纵向（下方 section 限制）。
+    // cameraSectionY = 玩家所在 section 索引，maxDownSections = 下方最多渲染几个 section。
+    // 返回应渲染的 section bitmask；调用前应已通过 isChunkPotentiallyVisible 粗剔。
+    uint32_t getVisibleSectionMask(std::shared_ptr<Camera> camera,
+                                    int cameraSectionY, int maxDownSections) const;
+
     // 给 ChunkManager / worker 调用：把本 chunk 在 face 方向的边界面与 other 缝合（双向）。
     // face: 本 chunk 视角的方向（RIGHT/LEFT/FRONT/BACK 之一）
     void stitchWithNeighbor(Chunk* other, BlockFace faceFromSelf);
@@ -93,6 +99,11 @@ public:
     bool isStitchBusy() const { return m_stitchBusy; }
     void setStitchBusy(bool b) { m_stitchBusy = b; }
 
+    // 区块数据是否被玩家修改过（新建 / 放置 / 破坏 → true，写入磁盘后 → false）
+    bool isSaveDirty() const { return m_saveDirty; }
+    void markSaveDirty() { m_saveDirty = true; }
+    void clearSaveDirty() { m_saveDirty = false; }
+
 private:
     ChunkManager* m_chunkManager = nullptr;
     glm::ivec2 m_position;
@@ -112,6 +123,7 @@ private:
     uint8_t m_stitchDone = 0;
     uint8_t m_stitchPending = 0;
     bool m_stitchBusy = false;
+    bool m_saveDirty = true; // 新生成/修改过的区块需要存档；写入磁盘后清零
 
     // 可见性缓存（chunk 粗剔结果）
     mutable bool m_cachedVisibility = true;

@@ -69,6 +69,12 @@
     <ClCompile Include="scr\TextureMgr.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="scr\save\ChunkSaveManager.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\save\RegionFile.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="scr\World.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
@@ -162,6 +168,12 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="scr\TextureMgr.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\save\ChunkSaveManager.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\save\RegionFile.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="scr\World.h">

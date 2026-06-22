@@ -61,6 +61,9 @@ public:
     // 当前队列待处理 + 正在跑的总数（仅 build 任务计数，stitch 由 chunk 状态隐式跟踪）
     int pendingCount() const { return m_pending.load(std::memory_order_relaxed); }
 
+    // 设置存档管理器指针（用于 buildOne 中尝试从磁盘加载）
+    void setSaveManager(const class ChunkSaveManager* sm) { m_saveManager = sm; }
+
 private:
     void workerMain();
     void buildOne(const glm::ivec2& pos, ChunkBuildResult& out) const;
@@ -78,6 +81,7 @@ private:
     };
 
     const TerrainGenerator* m_generator = nullptr;
+    const class ChunkSaveManager* m_saveManager = nullptr;
     std::vector<std::thread> m_workers;
     std::atomic<bool> m_stop{ false };
 

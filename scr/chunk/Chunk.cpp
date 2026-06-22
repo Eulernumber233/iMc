@@ -1,6 +1,9 @@
 ﻿#include "Chunk.h"
 #include <iostream>
 #include <algorithm>
+#ifdef _MSC_VER
+#include <intrin.h>
+#endif
 
 Chunk::Chunk(const glm::ivec2& position, ChunkManager* chunkManager)
     : m_chunkManager(chunkManager), m_position(position) {
@@ -51,6 +54,7 @@ void Chunk::adoptSections(std::array<Section, SECTION_COUNT>&& sections) {
     }
     m_isLoaded = true;
     m_meshReady = true;
+    m_saveDirty = true;  // 新数据进入，标记需要存档
     refreshNonEmptyMask();
     markAllDirty();
 }
@@ -206,6 +210,7 @@ BlockState Chunk::setBlockAndUpdate(int x, int y, int z, BlockState newState) {
         s.compact();
     }
 
+    m_saveDirty = true;  // 方块变更，标记需要存档
     refreshNonEmptyMask();
     return oldState;
 }
@@ -271,4 +276,58 @@ bool Chunk::isSectionVisible(int sectionY, std::shared_ptr<Camera> camera) const
     glm::vec3 center = (smin + smax) * 0.5f;
     const float MAX_RENDER_DISTANCE = 300.0f;
     return glm::distance(center, camera->Position) <= MAX_RENDER_DISTANCE;
+}
+
+uint32_t Chunk::getVisibleSectionMask(std::shared_ptr<Camera> camera,
+                                       int cameraSectionY, int maxDownSections) const {
+    uint32_t mask = m_nonEmptyMask;
+    if (mask == 0) return 0;
+    if (!camera) return mask;
+
+    const bool frustumEnabled = camera->FrustumCullingEnabled;
+    std::array<glm::vec4, 6> planes;
+    if (frustumEnabled) {
+        planes = camera->GetFrustumPlanes();
+    }
+
+    const int minSectionY = (maxDownSections > 0)
+        ? cameraSectionY - maxDownSections
+        : 0; // 0 或负值：不限制下方
+
+    const float chunkBaseX = m_position.x * (float)WIDTH;
+    const float chunkBaseZ = m_position.y * (float)DEPTH;
+    const float MAX_RENDER_DISTANCE = 300.0f;
+
+    uint32_t result = 0;
+    while (mask) {
+        int sy = 0;
+#ifdef _MSC_VER
+        unsigned long idx;
+        _BitScanForward(&idx, mask);
+        sy = (int)idx;
+#else
+        sy = __builtin_ctz(mask);
+#endif
+        mask &= mask - 1u;
+
+        // 纵向剔除：太靠下的 section 不渲染
+        if (sy < minSectionY) continue;
+
+        // 视锥 + 距离剔除（内联 isSectionVisible 逻辑，避免每 section 重算视锥平面）
+        if (frustumEnabled) {
+            glm::vec3 smin(chunkBaseX, sy * (float)Section::HEIGHT, chunkBaseZ);
+            glm::vec3 smax = smin + glm::vec3((float)Section::WIDTH, (float)Section::HEIGHT, (float)Section::DEPTH);
+            if (!aabbInFrustum(smin, smax, planes)) continue;
+        }
+
+        glm::vec3 center(
+            chunkBaseX + WIDTH * 0.5f,
+            sy * (float)Section::HEIGHT + Section::HEIGHT * 0.5f,
+            chunkBaseZ + DEPTH * 0.5f
+        );
+        if (glm::distance(center, camera->Position) > MAX_RENDER_DISTANCE) continue;
+
+        result |= (1u << sy);
+    }
+    return result;
 }

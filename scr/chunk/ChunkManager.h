@@ -26,6 +26,7 @@ struct DrawElementsIndirectCommand {
 class Chunk;
 class TerrainGenerator;
 class Section;
+class ChunkSaveManager;
 
 class ChunkManager {
 public:
@@ -45,6 +46,8 @@ public:
 
     Chunk* getChunk(const glm::ivec2& chunkPos);
     Chunk* getChunk(const int x, const int z);
+    // 查找 pending 或 loaded 中的区块（用于出生点计算等只需 block 数据的场景）
+    Chunk* getChunkAnyState(const glm::ivec2& chunkPos);
     const std::vector<Chunk*>& getActiveChunks() const { return m_activeChunks; }
     std::vector<glm::ivec2> getActiveChunkPositions() const;
     void setRenderRadius(int radius);
@@ -63,6 +66,10 @@ public:
 
     static SectionKey makeSectionKey(int chunkX, int chunkZ, int sectionY);
 
+    // 存档管理
+    void setSaveManager(ChunkSaveManager* sm);
+    void saveAllDirtyChunks();
+
 private:
     std::shared_ptr<TerrainGenerator> m_generator;
 
@@ -76,7 +83,7 @@ private:
     std::unordered_map<ChunkKey, std::unique_ptr<Chunk>> m_pendingChunks;
 
     // "活跃" chunk：玩家附近、需要逻辑更新与渲染候选的 chunk。
-    // 与渲染层 frustum/距离剔除无关，那部分由 Chunk::isSectionVisible 决定。
+    // 渲染层剔除（空section + 视锥 + 距离 + 纵向）由 Chunk::getVisibleSectionMask 统一完成。
     std::vector<Chunk*> m_activeChunks;
 
     // 投递加载区块任务 load及 stitch
@@ -115,6 +122,10 @@ private:
     // 不会被晋升到 m_loadedChunks（它们自己缺一个外侧邻居）。
     static constexpr int STITCH_PRELOAD_MARGIN = 1;
 
+    // 超出 renderRadius + UNLOAD_MARGIN_CHUNKS 的 chunk 会被保存并从内存彻底卸载。
+    // 必须 > EVICT_MARGIN_CHUNKS，形成 hysteresis 避免来回加载卸载。
+    static constexpr int UNLOAD_MARGIN_CHUNKS = 6;
+
     // 每帧最多接管多少个 build 结果。多 worker 时一帧 drain 出 8+ 个 chunk 的尖峰
     // 会导致 adoptSections 串行 ~16ms（profiler 实测），把帧率打回原形。把消化量摊到多帧，
     // 总吞吐不变（worker 已经做完了，只是结果在 m_buildDone 队列里多等几帧）。
@@ -123,6 +134,12 @@ private:
     // 从 RuntimeConfig 读
     int m_maxUploadsPerFrame = 8;
     int m_maxInflightRequests = 64;
+    int m_autoSaveIntervalSec = 60;
+
+    // 存档
+    ChunkSaveManager* m_saveManager = nullptr;
+    double m_lastSaveCheckTime = 0.0;
+    float  m_autoSaveTimer = 0.0f;
 
     ChunkKey chunkPosToKey(const glm::ivec2& pos) const;
 
@@ -155,9 +172,20 @@ private:
         const glm::ivec2& centerChunk) const;
     bool isWithinEvictRadius(const glm::ivec2& chunkPos,
         const glm::ivec2& centerChunk) const;
+    bool isWithinUnloadRadius(const glm::ivec2& chunkPos,
+        const glm::ivec2& centerChunk) const;
 
     // 释放走出 evict 半径的 chunk 的所有 section GPU slot；CPU 数据保留。
     void evictFarChunkSlots();
+
+    // 卸载走出 unload 半径的 chunk：先保存，再从 m_loadedChunks 移除
+    void unloadDistantChunks();
+
+    // 将单个 chunk 的方块数据写入存档
+    void saveChunkToDisk(Chunk* chunk);
+
+    // 定时自动保存：遍历 m_loadedChunks，保存所有 m_saveDirty 的 chunk
+    void doAutoSave();
 
     void linkNeighbors(Chunk* newChunk);
 };

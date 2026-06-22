@@ -1,6 +1,7 @@
 ﻿#include "ChunkWorkerPool.h"
 #include "Chunk.h"
 #include "../generate/TerrainGenerator.h"
+#include "../save/ChunkSaveManager.h"
 #include <iostream>
 
 ChunkWorkerPool::ChunkWorkerPool() = default;
@@ -111,8 +112,6 @@ void ChunkWorkerPool::workerMain() {
         }
 
         if (job.kind == JOB_BUILD) {
-            // 在锁外堆分配 ChunkBuildResult（4×4KB 数据 + hash map 等），
-            // worker 自己的上下文做完整构造；锁内只 push 一个指针。
             auto result = std::make_unique<ChunkBuildResult>();
             result->pos = job.pos;
             buildOne(job.pos, *result);
@@ -144,7 +143,15 @@ void ChunkWorkerPool::buildOne(const glm::ivec2& pos, ChunkBuildResult& out) con
     // 上的舒适范围，升级到 BlockState 后稳妥起见走堆分配（worker 上下文 new 一次即可）。
     auto bufPtr = std::make_unique<BlockState[]>(VOL);
     BlockState* buf = bufPtr.get();
-    m_generator->fillChunkBuffer(buf, pos);
+
+    // 先尝试从存档加载，失败则走地形生成
+    bool loadedFromDisk = false;
+    if (m_saveManager) {
+        loadedFromDisk = m_saveManager->loadChunk(pos, buf);
+    }
+    if (!loadedFromDisk) {
+        m_generator->fillChunkBuffer(buf, pos);
+    }
 
     // 把 buffer 切到 4 个 section
     for (int sy = 0; sy < ChunkBuildResult::SECTION_COUNT; ++sy) {

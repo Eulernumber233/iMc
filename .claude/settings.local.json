@@ -8,7 +8,24 @@
       "Bash(dir \"e:\\\\opengl\\\\iMc\\\\assert\\\\mode\\\\spyglass_in_hand_obj\")",
       "WebFetch(domain:raw.githubusercontent.com)",
       "Bash(g++ --version)",
-      "Bash(git -C \"e:\\\\opengl\\\\iMc\" log --oneline -15)"
+      "Bash(git -C \"e:\\\\opengl\\\\iMc\" log --oneline -15)",
+      "Bash(msbuild iMc.sln /p:Configuration=Debug /p:Platform=x64 /t:Build /m /v:minimal)",
+      "Bash(Select-Object -Last 30)",
+      "PowerShell(msbuild iMc.sln /p:Configuration=Debug /p:Platform=x64 /t:Build /m /v:minimal 2>&1)",
+      "Bash(Get-ChildItem -Path \"e:\\\\opengl\\\\iMc\\\\assert\" -Directory)",
+      "PowerShell(git add assert/runtime_config.json scr/RuntimeConfig.h scr/RuntimeConfig.cpp scr/chunk/Chunk.h scr/chunk/Chunk.cpp scr/chunk/ChunkManager.cpp scr/chunk/ChunkManager.h)",
+      "PowerShell($msbuild = Get-Command msbuild -ErrorAction SilentlyContinue; if \\($msbuild\\) { Write-Output \"Found msbuild: $\\($msbuild.Source\\)\" } else { Write-Output \"msbuild not found directly, checking VS paths...\" })",
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"e:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Debug /p:Platform=x64 /t:Build /m /v:minimal 2>&1)",
+      "Bash(msbuild iMc.vcxproj /p:Configuration=Debug /p:Platform=x64 /t:Build /m /nologo)",
+      "PowerShell(msbuild iMc.vcxproj /p:Configuration=Debug /p:Platform=x64 /t:Build /m /nologo 2>&1)",
+      "PowerShell(& \"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" iMc.vcxproj /p:Configuration=Debug /p:Platform=x64 /t:Build /m /nologo 2>&1)",
+      "Bash(where msbuild *)",
+      "Bash(where MSBuild)",
+      "Bash(find /mnt/c -maxdepth 5 -name \"vcvarsall.bat\" -type f 2>/dev/null | head -3)",
+      "Read(//mnt/**)",
+      "Bash(where g++)",
+      "Bash(where clang++)",
+      "Bash(clang++ --version)"
     ],
     "additionalDirectories": [
       "e:\\opengl\\iMc\\scr"

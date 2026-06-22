@@ -3,10 +3,12 @@
 #include "Section.h"
 #include "../generate/TerrainGenerator.h"
 #include "../RuntimeConfig.h"
+#include "../save/ChunkSaveManager.h"
 #include "../Profiler.h"
 #include <iostream>
 #include <algorithm>
 #include <thread>
+#include <GLFW/glfw3.h>
 #ifdef _MSC_VER
 #include <intrin.h>
 #endif
@@ -63,6 +65,8 @@ void ChunkManager::initialize(int renderRadius, const glm::vec3& cameraPos) {
     m_renderRadius = renderRadius;
     m_maxUploadsPerFrame = RuntimeConfig::get().maxUploadsPerFrame;
     m_maxInflightRequests = RuntimeConfig::get().maxInflightRequests;
+    m_autoSaveIntervalSec = RuntimeConfig::get().autoSaveIntervalSec;
+    m_lastSaveCheckTime = glfwGetTime();
     m_currentCenterChunk = glm::ivec2(
         (int)std::floor(cameraPos.x / Chunk::WIDTH),
         (int)std::floor(cameraPos.z / Chunk::DEPTH)
@@ -120,6 +124,21 @@ void ChunkManager::update(std::shared_ptr<Camera> camera) {
     }
 
     rebuildDrawCommands();
+
+    // 自动保存定时器 + 远距离区块卸载
+    if (m_saveManager) {
+        double now = glfwGetTime();
+        float dt = (float)(now - m_lastSaveCheckTime);
+        m_lastSaveCheckTime = now;
+
+        m_autoSaveTimer += dt;
+        if (m_autoSaveTimer >= (float)m_autoSaveIntervalSec) {
+            doAutoSave();
+            m_autoSaveTimer = 0.0f;
+        }
+
+        unloadDistantChunks();
+    }
 }
 
 Chunk* ChunkManager::getChunk(const glm::ivec2& chunkPos) {
@@ -129,6 +148,15 @@ Chunk* ChunkManager::getChunk(const glm::ivec2& chunkPos) {
 
 Chunk* ChunkManager::getChunk(int x, int z) {
     return getChunk(glm::ivec2(x, z));
+}
+
+Chunk* ChunkManager::getChunkAnyState(const glm::ivec2& chunkPos) {
+    ChunkKey key = chunkPosToKey(chunkPos);
+    auto it = m_loadedChunks.find(key);
+    if (it != m_loadedChunks.end()) return it->second.get();
+    auto it2 = m_pendingChunks.find(key);
+    if (it2 != m_pendingChunks.end()) return it2->second.get();
+    return nullptr;
 }
 
 std::vector<glm::ivec2> ChunkManager::getActiveChunkPositions() const {
@@ -271,7 +299,6 @@ void ChunkManager::integrateBuiltChunks() {
     }
     if (m_pendingIntegrate.empty()) return;
 
-    // 每帧最多消化 MAX_INTEGRATE_PER_FRAME 个，把瞬时尖峰摊到多帧。
     int budget = MAX_INTEGRATE_PER_FRAME;
     while (budget > 0 && !m_pendingIntegrate.empty()) {
         ChunkBuildResult r = std::move(m_pendingIntegrate.front());
@@ -440,10 +467,7 @@ void ChunkManager::promoteIfReady(const glm::ivec2& chunkPos) {
     Chunk* raw = it->second.get();
     if (!raw->allStitchDone()) return;
 
-    // 4 方向都 stitch 完毕 → 晋升。邻居指针保留不动（它们指向的 pending chunk 在它们
-    // 各自晋升时也不会改 m_neighbors，所以 loaded chunk 之间的邻居图不连续是允许的：
-    // loaded chunk 不再使用 m_neighbors 做 stitch；玩家交互路径会通过 ChunkManager
-    // 的 setBlock/getBlockAt 主动按坐标查 loaded map 找邻居）。
+    // 4 方向都 stitch 完毕 → 晋升。
     auto node = m_pendingChunks.extract(it);
     ChunkKey key = chunkPosToKey(chunkPos);
     m_loadedChunks[key] = std::move(node.mapped());
@@ -536,21 +560,23 @@ void ChunkManager::rebuildDrawCommands() {
 
     {
     PROFILE_SCOPE("rdc.cullPass");
-    // 第二遍：按 active chunk -> per-section 视锥/距离剔除生成 indirect 命令
+    // 第二遍：按 active chunk → 组合剔除（空section + 视锥 + 距离 + 纵向）生成 indirect 命令
+    const auto& cfg = RuntimeConfig::get();
+    int cameraSectionY = (int)(m_camera->Position.y / Section::HEIGHT);
+    int maxDownSections = cfg.verticalCullRatio > 0.0f
+        ? (int)(m_renderRadius * cfg.verticalCullRatio)
+        : 0;
+
     for (Chunk* chunk : m_activeChunks) {
         if (!chunk->isMeshReady()) continue;
-
-        uint32_t mask = chunk->getNonEmptyMask();
-        if (mask == 0) continue;   // 整 chunk 没有任何可见面
-
         if (!chunk->isChunkPotentiallyVisible(m_camera)) continue;
+
+        uint32_t mask = chunk->getVisibleSectionMask(m_camera, cameraSectionY, maxDownSections);
 
         // 只遍历 mask 置位的 section
         while (mask) {
             int sy = lowestBitIndex(mask);
             mask &= mask - 1u;   // 清掉最低置位
-
-            if (!chunk->isSectionVisible(sy, m_camera)) continue;
 
             SectionKey key = makeSectionKey(chunk->getPosition().x,
                                             chunk->getPosition().y, sy);
@@ -646,4 +672,98 @@ BlockState ChunkManager::getBlockAt(const glm::ivec3& worldPos) {
     );
     if (localPos.y < 0 || localPos.y >= Chunk::HEIGHT) return BlockState{};
     return chunk->getBlock(localPos.x, localPos.y, localPos.z);
+}
+
+void ChunkManager::setSaveManager(ChunkSaveManager* sm) {
+    m_saveManager = sm;
+    m_workerPool.setSaveManager(sm);
+}
+
+// ====================== 存档 ======================
+
+bool ChunkManager::isWithinUnloadRadius(const glm::ivec2& chunkPos,
+                                        const glm::ivec2& centerChunk) const {
+    int dx = std::abs(chunkPos.x - centerChunk.x);
+    int dz = std::abs(chunkPos.y - centerChunk.y);
+    int r = m_renderRadius + UNLOAD_MARGIN_CHUNKS;
+    return dx <= r && dz <= r;
+}
+
+void ChunkManager::saveChunkToDisk(Chunk* chunk) {
+    if (!m_saveManager || !chunk) return;
+
+    constexpr int VOL = ChunkConstants::CHUNK_VOLUME;
+    constexpr int W = Chunk::WIDTH;
+    constexpr int D = Chunk::DEPTH;
+
+    // 拼装 flat buffer：(y * D + z) * W + x
+    auto buf = std::make_unique<BlockState[]>(VOL);
+    BlockState* dst = buf.get();
+    for (int sy = 0; sy < Chunk::SECTION_COUNT; ++sy) {
+        const Section& sec = chunk->getSection(sy);
+        const BlockState* src = sec.stateData();
+        int baseY = sy * Section::HEIGHT;
+        for (int y = 0; y < Section::HEIGHT; ++y) {
+            for (int z = 0; z < D; ++z) {
+                for (int x = 0; x < W; ++x) {
+                    dst[(baseY + y) * D * W + z * W + x] =
+                        src[(y * Section::DEPTH + z) * Section::WIDTH + x];
+                }
+            }
+        }
+    }
+
+    m_saveManager->saveChunk(chunk->getPosition(), dst);
+    chunk->clearSaveDirty();
+}
+
+void ChunkManager::doAutoSave() {
+    if (!m_saveManager) return;
+    PROFILE_SCOPE("doAutoSave");
+    int saved = 0;
+    for (auto& kv : m_loadedChunks) {
+        Chunk* c = kv.second.get();
+        if (c && c->isSaveDirty()) {
+            saveChunkToDisk(c);
+            ++saved;
+        }
+    }
+}
+
+void ChunkManager::unloadDistantChunks() {
+    if (!m_saveManager) return;
+    PROFILE_SCOPE("unloadDistantChunks");
+
+    std::vector<glm::ivec2> toRemove;
+    for (auto& kv : m_loadedChunks) {
+        Chunk* chunk = kv.second.get();
+        if (!chunk) continue;
+        glm::ivec2 cp = chunk->getPosition();
+        if (!isWithinUnloadRadius(cp, m_currentCenterChunk)) {
+            if (chunk->isSaveDirty()) {
+                saveChunkToDisk(chunk);
+            }
+            toRemove.push_back(cp);
+        }
+    }
+
+    for (auto& cp : toRemove) {
+        ChunkKey key = chunkPosToKey(cp);
+        auto it = m_loadedChunks.find(key);
+        if (it == m_loadedChunks.end()) continue;
+        it->second->unload();  // 清理邻居指针
+        m_loadedChunks.erase(it);
+    }
+}
+
+void ChunkManager::saveAllDirtyChunks() {
+    if (!m_saveManager) return;
+    doAutoSave();
+    // 也保存 pending 中的脏 chunk
+    for (auto& kv : m_pendingChunks) {
+        Chunk* c = kv.second.get();
+        if (c && c->isSaveDirty()) {
+            saveChunkToDisk(c);
+        }
+    }
 }

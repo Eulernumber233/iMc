@@ -14,6 +14,7 @@
 // 前向声明
 class ChunkManager;
 class RenderSystem;
+struct PlayerSaveData;
 
 // 玩家类 - 集成摄像机、物品栏、输入管理和物理系统
 class Player {
@@ -64,6 +65,10 @@ public:
 
     // 设置玩家位置（用于传送等）
     void setPosition(const glm::vec3& position);
+
+    // 存档数据（定义在 ChunkSaveManager.h）
+    PlayerSaveData getSaveData() const;
+    void loadSaveData(const PlayerSaveData& data);
 
     // 将玩家放置在地面上
     void placeOnGround(ChunkManager& chunkManager);

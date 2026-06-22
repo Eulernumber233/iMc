@@ -9,10 +9,13 @@
 #include <memory>
 #include <sstream>
 
+class ChunkSaveManager;
+
 class World
 {
 public:
-    World(GLFWwindow* window_, unsigned int seed = 42);
+    World(GLFWwindow* window_, const std::string& worldName,
+          uint32_t seed, bool isNewWorld);
     ~World();
 
     int run();
@@ -34,6 +37,12 @@ public:
 private:
     GLFWwindow* m_window;
     unsigned int m_seed;
+    std::string m_worldName;
+    bool m_isNewWorld;
+
+    // 存档管理器
+    std::unique_ptr<ChunkSaveManager> m_saveManager;
+    bool m_spawnFound = false; // 出生点是否已计算（新世界需等区块(0,0)加载）
 
     // 玩家对象
     std::shared_ptr<Player> m_player;

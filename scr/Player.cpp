@@ -1,5 +1,6 @@
 ﻿#include "Player.h"
 #include "chunk/ChunkManager.h"
+#include "save/ChunkSaveManager.h"
 #include "render/RenderSystem.h"
 #include "UI/UIManager.h"
 #include "collision/PhysicsConstants.h"
@@ -75,6 +76,25 @@ void Player::initialize() {
 void Player::setPosition(const glm::vec3& position) {
     m_position = position;
     updateCameraPosition();
+}
+
+PlayerSaveData Player::getSaveData() const {
+    PlayerSaveData d;
+    d.posX = m_position.x;
+    d.posY = m_position.y;
+    d.posZ = m_position.z;
+    d.yaw = m_camera->Yaw;
+    d.pitch = m_camera->Pitch;
+    return d;
+}
+
+void Player::loadSaveData(const PlayerSaveData& data) {
+    m_position = glm::vec3(data.posX, data.posY, data.posZ);
+    m_camera->Yaw = data.yaw;
+    m_camera->Pitch = data.pitch;
+    m_camera->UpdateCameraVectors();
+    updateCameraPosition();
+    m_velocity = glm::vec3(0.0f);
 }
 
 AABB Player::getAABB() const {

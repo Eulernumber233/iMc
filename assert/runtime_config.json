@@ -1,7 +1,28 @@
 {
+  // ── 渲染 ──────────────────────────────────────────
   "render_radius": 8,
-  "max_inflight_requests": 32,
-  "max_uploads_per_frame": 16,
+  //   视野半径（chunk），实际加载 (2r+1)^2 个 chunk
+
+  "vertical_cull_ratio": 0.5,
+  //   下方 section 剔除比例：maxDownSections = render_radius × 此值
+  //   例 8×0.5=4 → 相机所在 section 向下 4 个以外不渲染。0 或负值 = 不限制
+
+  // ── 多线程 ────────────────────────────────────────
   "worker_threads": 4,
-  "print_profile_every_second": true
+  //   0 = 自动（hardware_concurrency）；正数 = 指定线程数
+
+  "max_inflight_requests": 32,
+  //   同时投递的最大 build 任务数，超过则暂停请求新 chunk
+
+  // ── GPU 上传 ──────────────────────────────────────
+  "max_uploads_per_frame": 16,
+  //   每帧最多上传多少个脏 section 到 GPU arena
+
+  // ── 存档 ──────────────────────────────────────────
+  "auto_save_interval_sec": 60,
+  //   自动保存间隔（秒）；设为 0 禁用定时自动保存，区块卸载时仍会保存
+
+  // ── 调试 ──────────────────────────────────────────
+  "print_profile_every_second": false
+  //   每秒打印一次 profiler 汇总（各函数耗时 + 频道指标）
 }

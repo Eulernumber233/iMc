@@ -10,13 +10,19 @@ class RuntimeConfig {
 public:
     static const RuntimeConfig& get();
 
-    int renderRadius = 8;
-    int maxInflightRequests = 32;
-    int maxUploadsPerFrame = 8;
-    int workerThreads = 0;     // 0 = 由 hardware_concurrency 自动决定
+    int renderRadius = 8;                // 渲染半径（chunk），视野内加载 (2r+1)^2 个 chunk
+    int maxInflightRequests = 32;        // 同时投递的最大 build 任务数，超过则暂停请求新 chunk
+    int maxUploadsPerFrame = 8;          // 每帧最多上传多少个脏 section 到 GPU
+    int workerThreads = 0;               // 0 = 由 hardware_concurrency 自动决定
 
-    // 调试输出：每秒一次的 profiler 总结
-    bool printProfileEverySecond = false;
+    // 下方 section 剔除：maxDownSections = renderRadius × verticalCullRatio
+    // 例：8×0.5=4 → 相机所在 section 向下 4 个以外的不渲染。0 或负值 = 不限制
+    float verticalCullRatio = 0.5f;
+
+    bool printProfileEverySecond = false; // 每秒输出 profiler 汇总
+
+    // 存档：自动保存间隔（秒）。设为 0 禁用定时自动保存（区块卸载时仍会保存）
+    int autoSaveIntervalSec = 60;
 
 private:
     RuntimeConfig() = default;

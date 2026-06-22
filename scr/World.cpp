@@ -1,17 +1,36 @@
 ﻿#include "World.h"
 #include "UI/UIManager.h"
 #include "Data.h"
+#include "chunk/Chunk.h"
 #include "chunk/ChunkDimensions.h"
+#include "collision/PhysicsConstants.h"
+#include "save/ChunkSaveManager.h"
 #include "RuntimeConfig.h"
 #include "Profiler.h"
 #include <iostream>
+#include <thread>
+#include <chrono>
 
-World::World(GLFWwindow* window_, unsigned int seed)
-    : m_window(window_), m_seed(seed)
+World::World(GLFWwindow* window_, const std::string& worldName,
+             uint32_t seed, bool isNewWorld)
+    : m_window(window_), m_seed(seed), m_worldName(worldName), m_isNewWorld(isNewWorld)
 {
-    // 创建摄像机
+    // 初始化存档管理器
+    m_saveManager = std::make_unique<ChunkSaveManager>();
+    if (isNewWorld) {
+        m_saveManager->createWorld(worldName, seed);
+    } else {
+        if (!m_saveManager->openWorld(worldName)) {
+            std::cerr << "[World] 加载存档失败，将创建新世界\n";
+            m_saveManager->createWorld(worldName, seed);
+        } else {
+            m_seed = m_saveManager->getSeed();
+        }
+    }
+
+    // 创建摄像机 (临时高空位置，新世界出生点会在区块(0,0)生成后重新计算)
     auto camera = std::make_shared<Camera>();
-    camera->Position = glm::vec3(0.0f, ChunkConstants::CHUNK_HEIGHT * 0.85, 0.0f);
+    camera->Position = glm::vec3(0.0f, 500.0f, 0.0f);
 
     // 创建玩家对象
     m_player = std::make_shared<Player>(camera, m_window);
@@ -56,8 +75,18 @@ int World::run() {
 
     // 初始化区块管理器（半径从 runtime config 读，方便不重编调参）
     m_chunkManager = std::make_shared<ChunkManager>(m_seed);
+    m_chunkManager->setSaveManager(m_saveManager.get());
     m_chunkManager->initialize(RuntimeConfig::get().renderRadius, m_player->getCamera()->Position);
     m_chunkManager->printStats();
+
+    // 读档：加载玩家位置（存档已有出生点，无需重新计算）
+    if (!m_isNewWorld) {
+        PlayerSaveData pd;
+        if (m_saveManager->loadPlayerState(pd)) {
+            m_player->loadSaveData(pd);
+        }
+        m_spawnFound = true;
+    }
 
     // 初始化玩家
     m_player->initialize();
@@ -93,6 +122,32 @@ int World::run() {
         // 更新区块管理器（根据玩家位置更新可见区块）
         m_chunkManager->update(camera);
 
+        // 新世界：等待区块(0,0)生成后，计算出生点（柱顶最高非空气方块上方）
+        if (!m_spawnFound && m_isNewWorld) {
+            Chunk* spawnChunk = m_chunkManager->getChunkAnyState(glm::ivec2(0, 0));
+            if (spawnChunk && spawnChunk->isMeshReady()) {
+                bool placed = false;
+                for (int y = ChunkConstants::CHUNK_HEIGHT - 1; y >= 0; --y) {
+                    if (spawnChunk->getBlock(0, y, 0).type() != BLOCK_AIR) {
+                        float groundTop = (float)(y + 1);
+                        float playerY = groundTop + PhysicsConstants::PLAYER_HEIGHT_STANDING * 0.5f;
+                        m_player->setPosition(glm::vec3(0.5f, playerY, 0.5f));
+                        m_spawnFound = true;
+                        placed = true;
+                        std::cout << "[World] 出生点: y=" << playerY
+                                  << " (方块顶=" << groundTop << ")" << std::endl;
+                        break;
+                    }
+                }
+                if (!placed) {
+                    // 全空气柱（不太可能），用默认高度
+                    m_player->setPosition(glm::vec3(0.5f,
+                        (float)ChunkConstants::CHUNK_HEIGHT * 0.5f, 0.5f));
+                    m_spawnFound = true;
+                }
+            }
+        }
+
         // 获取视图和投影矩阵
         glm::mat4 view = camera->GetViewMatrix();
         glm::mat4 projection = glm::perspective(glm::radians(45.0f),
@@ -109,6 +164,14 @@ int World::run() {
 
         // 每秒打印一次 profiler（如 RuntimeConfig 启用）
         Profiler::frame();
+    }
+
+    // 退出保存
+    if (m_saveManager && m_saveManager->isWorldOpen()) {
+        PlayerSaveData pd = m_player->getSaveData();
+        m_saveManager->savePlayerState(pd);
+        m_chunkManager->saveAllDirtyChunks();
+        m_saveManager->closeWorld();
     }
 
     glfwTerminate();
