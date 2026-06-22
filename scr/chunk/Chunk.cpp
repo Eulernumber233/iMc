@@ -24,20 +24,20 @@ glm::vec3 Chunk::getCenter() const {
     );
 }
 
-BlockType Chunk::getBlock(int x, int y, int z) const {
+BlockState Chunk::getBlock(int x, int y, int z) const {
     if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT || z < 0 || z >= DEPTH) {
-        return BLOCK_AIR;
+        return BlockState{};
     }
     int sy = y / Section::HEIGHT;
     int ly = y % Section::HEIGHT;
     return m_sections[sy].getBlock(x, ly, z);
 }
 
-void Chunk::setBlock(int x, int y, int z, BlockType b) {
+void Chunk::setBlock(int x, int y, int z, BlockState s) {
     if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT || z < 0 || z >= DEPTH) return;
     int sy = y / Section::HEIGHT;
     int ly = y % Section::HEIGHT;
-    m_sections[sy].setBlockRaw(x, ly, z, b);
+    m_sections[sy].setBlock(x, ly, z, s);
 }
 
 void Chunk::markAllDirty() {
@@ -78,7 +78,7 @@ Chunk* Chunk::getNeighborChunk(int nx, int nz) const {
     return nullptr;
 }
 
-BlockType Chunk::neighborBlock(int x, int y, int z, BlockFace face) const {
+BlockState Chunk::neighborBlock(int x, int y, int z, BlockFace face) const {
     int nx = x, ny = y, nz = z;
     switch (face) {
     case RIGHT: nx++; break;
@@ -88,10 +88,10 @@ BlockType Chunk::neighborBlock(int x, int y, int z, BlockFace face) const {
     case FRONT: nz++; break;
     case BACK:  nz--; break;
     }
-    if (ny < 0 || ny >= HEIGHT) return BLOCK_AIR; // 顶/底视为透空
+    if (ny < 0 || ny >= HEIGHT) return BlockState{}; // 顶/底视为透空
     if (nx < 0 || nx >= WIDTH || nz < 0 || nz >= DEPTH) {
         Chunk* nc = getNeighborChunk(nx, nz);
-        if (!nc) return BLOCK_AIR;
+        if (!nc) return BlockState{};
         int lx = (nx + WIDTH) % WIDTH;
         int lz = (nz + DEPTH) % DEPTH;
         return nc->getBlock(lx, ny, lz);
@@ -103,7 +103,7 @@ void Chunk::updateFaceAt(int x, int y, int z, BlockFace face) {
     if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT || z < 0 || z >= DEPTH) return;
     int sy = y / Section::HEIGHT;
     int ly = y % Section::HEIGHT;
-    BlockType nb = neighborBlock(x, y, z, face);
+    BlockState nb = neighborBlock(x, y, z, face);
     m_sections[sy].updateFaceWithNeighbor(x, ly, z, face, nb);
 }
 
@@ -145,11 +145,14 @@ void Chunk::stitchWithNeighbor(Chunk* other, BlockFace faceFromSelf) {
 // 未来进一步优化：TODO
 // 持久映射（GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT）
 // addFaceLocal/removeFaceLocal 直接写映射内存，省掉 staging vector。
-BlockType Chunk::setBlockAndUpdate(int x, int y, int z, BlockType newType) {
-    BlockType oldType = getBlock(x, y, z);
-    if (oldType == newType) return oldType;
+BlockState Chunk::setBlockAndUpdate(int x, int y, int z, BlockState newState) {
+    BlockState oldState = getBlock(x, y, z);
+    if (oldState == newState) return oldState;
 
-    setBlock(x, y, z, newType);
+    BlockType oldType = oldState.type();
+    BlockType newType = newState.type();
+
+    setBlock(x, y, z, newState);
 
     int sy = y / Section::HEIGHT;
     int ly = y % Section::HEIGHT;
@@ -165,9 +168,9 @@ BlockType Chunk::setBlockAndUpdate(int x, int y, int z, BlockType newType) {
     if (newType != BLOCK_AIR) {
         BlockFace allFaces[6] = { RIGHT, LEFT, FRONT, BACK, UP, DOWN };
         for (int f = 0; f < 6; ++f) {
-            BlockType nb = neighborBlock(x, y, z, allFaces[f]);
-            if (nb == BLOCK_AIR) {
-                s.addFaceLocal(x, ly, z, allFaces[f], newType);
+            BlockState nb = neighborBlock(x, y, z, allFaces[f]);
+            if (nb.type() == BLOCK_AIR) {
+                s.addFaceLocal(x, ly, z, allFaces[f], newState);
             }
         }
     }
@@ -204,7 +207,7 @@ BlockType Chunk::setBlockAndUpdate(int x, int y, int z, BlockType newType) {
     }
 
     refreshNonEmptyMask();
-    return oldType;
+    return oldState;
 }
 
 bool Chunk::aabbInFrustum(const glm::vec3& min, const glm::vec3& max,

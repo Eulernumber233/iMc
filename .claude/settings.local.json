@@ -7,7 +7,8 @@
       "Bash(dir \"e:\\\\opengl\\\\iMc\\\\assert\\\\mode\")",
       "Bash(dir \"e:\\\\opengl\\\\iMc\\\\assert\\\\mode\\\\spyglass_in_hand_obj\")",
       "WebFetch(domain:raw.githubusercontent.com)",
-      "Bash(g++ --version)"
+      "Bash(g++ --version)",
+      "Bash(git -C \"e:\\\\opengl\\\\iMc\" log --oneline -15)"
     ],
     "additionalDirectories": [
       "e:\\opengl\\iMc\\scr"

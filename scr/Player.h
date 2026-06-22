@@ -205,7 +205,8 @@ private:
         bool hasSelected = false;
         glm::ivec3 blockPos;
         glm::ivec3 adjacentPos;
-        BlockType blockType = BLOCK_AIR;
+        BlockFace  hitFace = BlockFace::UP;     // 玩家视线击中目标方块的面
+        BlockState blockState;                  // 被选中方块的完整状态
     } m_selection;
 
     // 交互距离

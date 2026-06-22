@@ -613,7 +613,7 @@ void ChunkManager::syncSectionBaseSSBO() {
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 }
 
-bool ChunkManager::setBlock(const glm::ivec3& worldPos, BlockType type) {
+bool ChunkManager::setBlock(const glm::ivec3& worldPos, BlockState state) {
     glm::ivec2 chunkPos(
         (int)std::floor(worldPos.x / (float)Chunk::WIDTH),
         (int)std::floor(worldPos.z / (float)Chunk::DEPTH)
@@ -628,22 +628,22 @@ bool ChunkManager::setBlock(const glm::ivec3& worldPos, BlockType type) {
     );
     if (localPos.y < 0 || localPos.y >= Chunk::HEIGHT) return false;
 
-    chunk->setBlockAndUpdate(localPos.x, localPos.y, localPos.z, type);
+    chunk->setBlockAndUpdate(localPos.x, localPos.y, localPos.z, state);
     return true;
 }
 
-BlockType ChunkManager::getBlockAt(const glm::ivec3& worldPos) {
+BlockState ChunkManager::getBlockAt(const glm::ivec3& worldPos) {
     glm::ivec2 chunkPos(
         (int)std::floor(worldPos.x / (float)Chunk::WIDTH),
         (int)std::floor(worldPos.z / (float)Chunk::DEPTH)
     );
     Chunk* chunk = getChunk(chunkPos);
-    if (!chunk) return BLOCK_AIR;
+    if (!chunk) return BlockState{};
     glm::ivec3 localPos(
         ((worldPos.x % Chunk::WIDTH) + Chunk::WIDTH) % Chunk::WIDTH,
         worldPos.y,
         ((worldPos.z % Chunk::DEPTH) + Chunk::DEPTH) % Chunk::DEPTH
     );
-    if (localPos.y < 0 || localPos.y >= Chunk::HEIGHT) return BLOCK_AIR;
+    if (localPos.y < 0 || localPos.y >= Chunk::HEIGHT) return BlockState{};
     return chunk->getBlock(localPos.x, localPos.y, localPos.z);
 }

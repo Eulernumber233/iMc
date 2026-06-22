@@ -31,7 +31,8 @@ public:
     // dst 大小必须为 ChunkConstants::CHUNK_VOLUME，
     // 索引同 Chunk 内部布局：(y * DEPTH + z) * WIDTH + x
     // 该接口只读 noise + seed，不依赖 generator 实例的可变状态，可在 worker 线程并发调用。
-    void fillChunkBuffer(BlockType* dst, const glm::ivec2& chunkPos) const;
+    // 地形生成只输出无轴向方块，orient 字段统一写 ORIENT_NONE。
+    void fillChunkBuffer(BlockState* dst, const glm::ivec2& chunkPos) const;
 
     // 获取世界位置的高度（用于区块间连续）
     float getHeightAt(int worldX, int worldZ) const;

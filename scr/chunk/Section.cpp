@@ -4,7 +4,9 @@
 Section::Section()
     : m_blocks(std::make_unique<BlockArray>())
 {
-    m_blocks->fill(BLOCK_AIR);
+    // 整段写 0，即 type=BLOCK_AIR, orient=ORIENT_PX (0)。
+    // 空气不参与可见性 / 旋转，orient 字段对它没有语义，所以无需特地写成 NONE。
+    m_blocks->fill(BlockState{});
 }
 
 void Section::setCoords(int chunkX, int chunkZ, int sectionY) {
@@ -13,26 +15,35 @@ void Section::setCoords(int chunkX, int chunkZ, int sectionY) {
     m_sectionY = sectionY;
 }
 
-BlockType Section::getBlock(int x, int y, int z) const {
+BlockState Section::getBlock(int x, int y, int z) const {
     if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT || z < 0 || z >= DEPTH) {
-        return BLOCK_AIR;
+        return BlockState{};
     }
     return (*m_blocks)[idx(x, y, z)];
 }
 
-void Section::setBlockRaw(int x, int y, int z, BlockType b) {
+void Section::setBlock(int x, int y, int z, BlockState s) {
     if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT || z < 0 || z >= DEPTH) return;
-    (*m_blocks)[idx(x, y, z)] = b;
+    (*m_blocks)[idx(x, y, z)] = s;
 }
 
-void Section::addFaceLocal(int x, int y, int z, BlockFace face, BlockType type) {
+void Section::addFaceLocal(int x, int y, int z, BlockFace face, BlockState state) {
     BlockFaceLocKey key{ (uint8_t)x, (uint8_t)y, (uint8_t)z, face };
     if (m_PosToInstanceIndex.find(key) != m_PosToInstanceIndex.end()) {
         return;
     }
-    int textureLayer = BlockFaceType::getTextureLayer({ type, face });
+    BlockType type = state.type();
+    // 纹理层选择：
+    //   - 带轴方块（hasAxis，如原木）：CPU 端固定写"侧面层"（不看 face），shader 拿到后按
+    //     orient 决定哪两个面切换到 endLayer。这样无论 orient 是 PY/PX/PZ，无论这个面在
+    //     默认放置下叫什么名字，shader 都能正确选层。
+    //   - 其他方块：按 face 查 type_to_texture 表（草方块顶面 grass_top、底面 dirt 等）。
+    int sideLayer = BlockFaceType::getSideLayer(type);
+    int textureLayer = (sideLayer >= 0)
+        ? sideLayer
+        : BlockFaceType::getTextureLayer({ type, face });
     uint32_t packed = InstanceData::makePacked(
-        (uint8_t)x, (uint8_t)y, (uint8_t)z, face, /*orient*/ 0u);
+        (uint8_t)x, (uint8_t)y, (uint8_t)z, face, state.orient());
 
     int idx;
     if (!m_freeSlots.empty()) {
@@ -68,17 +79,17 @@ void Section::removeFaceLocal(int x, int y, int z, BlockFace face) {
     m_freeSlots.push_back((uint32_t)index);
 }
 
-void Section::updateFaceWithNeighbor(int x, int y, int z, BlockFace face, BlockType neighborBlock) {
-    BlockType block = getBlock(x, y, z);
-    if (block == BLOCK_AIR) {
+void Section::updateFaceWithNeighbor(int x, int y, int z, BlockFace face, BlockState neighbor) {
+    BlockState state = getBlock(x, y, z);
+    if (state.type() == BLOCK_AIR) {
         removeFaceLocal(x, y, z, face);
         return;
     }
-    bool visible = (neighborBlock == BLOCK_AIR);
+    bool visible = (neighbor.type() == BLOCK_AIR);
     BlockFaceLocKey key{ (uint8_t)x, (uint8_t)y, (uint8_t)z, face };
     bool exists = m_PosToInstanceIndex.find(key) != m_PosToInstanceIndex.end();
     if (visible && !exists) {
-        addFaceLocal(x, y, z, face, block);
+        addFaceLocal(x, y, z, face, state);
     } else if (!visible && exists) {
         removeFaceLocal(x, y, z, face);
     }
@@ -129,12 +140,13 @@ void Section::rebuildVisibilityInternal(const Section* above, const Section* bel
     for (int z = 0; z < DEPTH; ++z) {
         for (int y = 0; y < HEIGHT; ++y) {
             for (int x = 0; x < WIDTH; ++x) {
-                BlockType block = (*m_blocks)[idx(x, y, z)];
+                BlockState state = (*m_blocks)[idx(x, y, z)];
+                BlockType block = state.type();
                 if (block == BLOCK_AIR) continue;
 
                 BlockProperties props = GetBlockProperties(block);
                 if (props.isTransparent) {
-                    for (int f = 0; f < 6; ++f) addFaceLocal(x, y, z, allFaces[f], block);
+                    for (int f = 0; f < 6; ++f) addFaceLocal(x, y, z, allFaces[f], state);
                     continue;
                 }
                 if (!props.isSolid) continue;
@@ -155,15 +167,15 @@ void Section::rebuildVisibilityInternal(const Section* above, const Section* bel
                         // 横向跨 chunk：worker 不知道，默认不可见，主线程 stitch 时再补
                         continue;
                     } else if (ny < 0) {
-                        nb = below ? below->getBlock(x, HEIGHT - 1, z) : BLOCK_AIR;
+                        nb = below ? below->getBlock(x, HEIGHT - 1, z).type() : BLOCK_AIR;
                     } else if (ny >= HEIGHT) {
-                        nb = above ? above->getBlock(x, 0, z) : BLOCK_AIR;
+                        nb = above ? above->getBlock(x, 0, z).type() : BLOCK_AIR;
                     } else {
-                        nb = (*m_blocks)[idx(nx, ny, nz)];
+                        nb = (*m_blocks)[idx(nx, ny, nz)].type();
                     }
 
                     if (nb == BLOCK_AIR) {
-                        addFaceLocal(x, y, z, allFaces[f], block);
+                        addFaceLocal(x, y, z, allFaces[f], state);
                     }
                 }
             }

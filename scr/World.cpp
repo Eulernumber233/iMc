@@ -11,7 +11,7 @@ World::World(GLFWwindow* window_, unsigned int seed)
 {
     // 创建摄像机
     auto camera = std::make_shared<Camera>();
-    camera->Position = glm::vec3(0.0f, ChunkConstants::CHUNK_HEIGHT * 0.95, 0.0f);
+    camera->Position = glm::vec3(0.0f, ChunkConstants::CHUNK_HEIGHT * 0.85, 0.0f);
 
     // 创建玩家对象
     m_player = std::make_shared<Player>(camera, m_window);

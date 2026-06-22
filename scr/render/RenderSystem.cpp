@@ -54,6 +54,17 @@ bool BlockRenderer::initialize() {
     return true;
 }
 
+void BlockRenderer::uploadEndLayerLookup() {
+    // BlockFaceType::end_layer_by_type 是 int[256]，shader 端 uniform 用 int 数组接收。
+    // glUniform1iv 一次性上传所有 256 个值。
+    m_shader.use();
+    const int* lookup = BlockFaceType::getEndLayerLookup();
+    GLint loc = glGetUniformLocation(m_shader.programID, "uEndLayerLookup");
+    if (loc >= 0) {
+        glUniform1iv(loc, BlockFaceType::kEndLayerLookupSize, lookup);
+    }
+}
+
 void BlockRenderer::bindInstanceAttribs() {
     // 调用前需保证 VAO 已绑定且 GL_ARRAY_BUFFER 已绑定到 arena VBO
     // 8 字节 InstanceData 布局：packed32 + blockType16 + textureLayer16
@@ -201,6 +212,9 @@ bool RenderSystem::initialize() {
     // 从 TextureMgr 获取纹理数组并设置给 BlockRenderer
     auto texMgr = TextureMgr::GetInstance();
     m_blockRenderer.setTextureArray(texMgr->GetTextureArray());
+    // 上传"端面纹理层"查表给 g_buffer shader（带轴方块如原木横躺时朝向主轴的两面用它）。
+    // 仅需上传一次：BlockFaceType 已在 World::run 启动早期调用 init_type_map 填好。
+    m_blockRenderer.uploadEndLayerLookup();
 
 
     // 初始化边框渲染器

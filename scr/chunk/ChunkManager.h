@@ -56,8 +56,10 @@ public:
 
     std::shared_ptr<TerrainGenerator> getTerrainGenerator() { return m_generator; }
 
-    bool setBlock(const glm::ivec3& worldPos, BlockType type);
-    BlockType getBlockAt(const glm::ivec3& worldPos);
+    // 放置方块。state 包含 type + orient + 预留位；对带轴向方块（hasAxis == true）
+    // 上层（Item 等）应当根据放置方向算出 orient 后塞进 state。
+    bool setBlock(const glm::ivec3& worldPos, BlockState state);
+    BlockState getBlockAt(const glm::ivec3& worldPos);
 
     static SectionKey makeSectionKey(int chunkX, int chunkZ, int sectionY);
 

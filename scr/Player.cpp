@@ -93,7 +93,7 @@ void Player::placeOnGround(ChunkManager& chunkManager) {
     for (float y = playerBottom.y; y > playerBottom.y - searchDistance; y -= 0.1f) {
         // 检查玩家脚底位置的方块
         glm::ivec3 blockPos = worldToBlockCoord(glm::vec3(m_position.x, y, m_position.z));
-        BlockType blockType = chunkManager.getBlockAt(blockPos);
+        BlockType blockType = chunkManager.getBlockAt(blockPos).type();
 
         if (blockType != BLOCK_AIR) {
             // 找到地面，将玩家放置在地面上方
@@ -153,8 +153,7 @@ void Player::getAllCollisions(ChunkManager& chunkManager, std::vector<CollisionR
         for (int y = minBlock.y; y <= maxBlock.y; y++) {
             for (int z = minBlock.z; z <= maxBlock.z; z++) {
                 glm::ivec3 blockPos(x, y, z);
-                BlockType blockType = chunkManager.getBlockAt(blockPos);
-                if (blockType == BLOCK_AIR) continue;
+                if (chunkManager.getBlockAt(blockPos).type() == BLOCK_AIR) continue;
 
                 CollisionResult collision = calculateBlockCollision(playerAABB, blockPos);
                 if (collision.collided) {
@@ -182,8 +181,7 @@ void Player::moveAxis(int axis, float displacement, ChunkManager& chunkManager) 
         for (int by = minBlock.y; by <= maxBlock.y; by++) {
             for (int bz = minBlock.z; bz <= maxBlock.z; bz++) {
                 glm::ivec3 blockPos(bx, by, bz);
-                BlockType blockType = chunkManager.getBlockAt(blockPos);
-                if (blockType == BLOCK_AIR) continue;
+                if (chunkManager.getBlockAt(blockPos).type() == BLOCK_AIR) continue;
 
                 AABB blockAABB = getBlockAABB(blockPos);
                 // 重新获取当前玩家AABB（位置可能已被之前的block修正）
@@ -642,19 +640,21 @@ void Player::handleBlockInteraction(ChunkManager& chunkManager) {
 }
 
 bool Player::tryBreakBlock(ChunkManager& chunkManager) {
-    if (!m_selection.hasSelected || m_selection.blockType == BLOCK_AIR) {
+    if (!m_selection.hasSelected || m_selection.blockState.type() == BLOCK_AIR) {
         return false;
     }
 
+    PlacementContext ctx{ m_selection.blockPos, m_selection.hitFace, m_camera->Front };
+
     // 获取当前选中的物品
     auto selectedItem = getSelectedItem();
-    if (selectedItem && selectedItem->onLeftClick(m_selection.blockPos, &chunkManager)) {
+    if (selectedItem && selectedItem->onLeftClick(ctx, &chunkManager)) {
         // 物品处理了左键点击（如工具加速破坏）
         return true;
     }
 
-    // 默认破坏行为
-    chunkManager.setBlock(m_selection.blockPos, BLOCK_AIR);
+    // 默认破坏行为：写入空气
+    chunkManager.setBlock(m_selection.blockPos, BlockState(BLOCK_AIR));
     return true;
 }
 
@@ -664,16 +664,16 @@ bool Player::tryPlaceBlock(ChunkManager& chunkManager) {
     }
 
     glm::ivec3 placePos = m_selection.adjacentPos;
-    BlockType blockAtPlace = chunkManager.getBlockAt(placePos);
-    if (blockAtPlace != BLOCK_AIR) {
+    if (chunkManager.getBlockAt(placePos).type() != BLOCK_AIR) {
         return false; // 位置已被占用
     }
 
-    // 获取当前选中的物品
+    // 获取当前选中的物品。adjacentPos = 放置位置；hitFace 是玩家点中的那一面，
+    // 带轴方块（如原木）据此决定 orient。
     auto selectedItem = getSelectedItem();
     if (selectedItem) {
-        // 调用物品的右键行为
-        return selectedItem->onRightClick(placePos, &chunkManager);
+        PlacementContext ctx{ placePos, m_selection.hitFace, m_camera->Front };
+        return selectedItem->onRightClick(ctx, &chunkManager);
     }
 
     return false;
@@ -728,7 +728,8 @@ void Player::updateBlockSelection(ChunkManager& chunkManager, RenderSystem& rend
     if (m_selection.hasSelected) {
         m_selection.blockPos = hitResult.blockPos;
         m_selection.adjacentPos = hitResult.adjacentPos;
-        m_selection.blockType = hitResult.blockType;
+        m_selection.hitFace    = hitResult.face;
+        m_selection.blockState = hitResult.blockState;
 
         // 通知渲染系统
         renderSystem.setSelectedBlock(m_selection.blockPos);

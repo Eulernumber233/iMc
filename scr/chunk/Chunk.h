@@ -38,9 +38,12 @@ public:
     const glm::vec3& getMaxPos() const { return m_maxPos; }
 
     // 全局（chunk 局部）坐标，y ∈ [0, HEIGHT)
-    BlockType getBlock(int x, int y, int z) const;
-    void setBlock(int x, int y, int z, BlockType b);
-    BlockType setBlockAndUpdate(int x, int y, int z, BlockType newType);
+    // 接口对外只用 BlockState；调用方需要类型时取 state.type()。
+    BlockState getBlock(int x, int y, int z) const;
+    void       setBlock(int x, int y, int z, BlockState s);
+    // 放置方块。状态里的 orient 直接落到底层 Section，并参与可见面生成。
+    // 返回值：放置前该格的 state（调用方可以用 .type() 比较 BLOCK_AIR）。
+    BlockState setBlockAndUpdate(int x, int y, int z, BlockState newState);
 
     // section 访问
     Section& getSection(int sy) { return m_sections[sy]; }
@@ -127,8 +130,9 @@ private:
     // 会自动跨 section 路由以及跨 chunk 路由邻居
     void updateFaceAt(int x, int y, int z, BlockFace face);
 
-    // 给定 (x,y,z) 处的方块在 face 方向的邻居方块（自动跨 section / 跨 chunk）
-    BlockType neighborBlock(int x, int y, int z, BlockFace face) const;
+    // 给定 (x,y,z) 处的方块在 face 方向的邻居方块（自动跨 section / 跨 chunk）。
+    // 返回完整 BlockState；判可见性时调用方拿 .type() 比较 BLOCK_AIR。
+    BlockState neighborBlock(int x, int y, int z, BlockFace face) const;
 
     friend class ChunkManager;
 };

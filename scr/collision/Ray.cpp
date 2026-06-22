@@ -127,11 +127,11 @@ bool Ray::ddaCast(ChunkManager* chunkManager, HitResult& result, float maxDistan
         // 获取局部坐标
         glm::ivec3 localPos = worldToLocal(currentBlock);
 
-        // 获取方块类型
-        BlockType blockType = chunk->getBlock(localPos.x, localPos.y, localPos.z);
+        // 获取方块状态（含朝向）
+        BlockState blockState = chunk->getBlock(localPos.x, localPos.y, localPos.z);
 
         // 跳过空气方块
-        if (blockType == BLOCK_AIR) {
+        if (blockState.type() == BLOCK_AIR) {
             continue;
         }
 
@@ -154,7 +154,7 @@ bool Ray::ddaCast(ChunkManager* chunkManager, HitResult& result, float maxDistan
         result.normal = normal;
         result.face = face;
         result.distance = distance;
-        result.blockType = blockType;
+        result.blockState = blockState;
 
         return true;
     }

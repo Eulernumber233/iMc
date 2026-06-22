@@ -3,6 +3,19 @@
 #include <string>
 #include <memory>
 
+// 放置 / 交互上下文。
+//   adjacentPos  ：要交互的目标格子（右键放置时是相邻空气格的世界坐标；
+//                  左键破坏时由调用方传选中方块的位置）。
+//   hitFace      ：玩家视线击中被选中方块的面（RIGHT/LEFT/FRONT/BACK/UP/DOWN）。
+//                  对带轴向方块（如原木）放置时用来决定 orient。
+//   playerForward：玩家朝向单位向量；某些方块（楼梯 / 半砖）需要它来选朝向。
+//                  当前实现只用 hitFace，但接口先留好。
+struct PlacementContext {
+    glm::ivec3 adjacentPos;
+    BlockFace  hitFace;
+    glm::vec3  playerForward;
+};
+
 // 物品基类
 class Item {
 public:
@@ -15,13 +28,12 @@ public:
     virtual std::string getIconTextureName() const = 0;
 
     // 右键点击行为
-    // 参数：世界坐标（相邻位置），ChunkManager指针
     // 返回值：是否消耗了这次点击（例如放置方块返回true，望远镜观察返回false）
-    virtual bool onRightClick(const glm::ivec3& adjacentPos, class ChunkManager* chunkManager) = 0;
+    virtual bool onRightClick(const PlacementContext& ctx, class ChunkManager* chunkManager) = 0;
 
     // 左键点击行为（破坏方块） - 默认返回false，表示不改变默认破坏行为
     // 可以用于工具类物品（如斧头加速破坏），但普通物品不需要
-    virtual bool onLeftClick(const glm::ivec3& blockPos, class ChunkManager* chunkManager) { return false; }
+    virtual bool onLeftClick(const PlacementContext& ctx, class ChunkManager* chunkManager) { (void)ctx; (void)chunkManager; return false; }
 
     // 是否为方块物品
     virtual bool isBlockItem() const { return false; }
@@ -44,7 +56,7 @@ public:
     std::string getName() const override { return m_name; }
     std::string getIconTextureName() const override { return m_iconTextureName; }
 
-    bool onRightClick(const glm::ivec3& adjacentPos, class ChunkManager* chunkManager) override;
+    bool onRightClick(const PlacementContext& ctx, class ChunkManager* chunkManager) override;
 
     bool isBlockItem() const override { return true; }
     BlockType getBlockType() const override { return m_blockType; }
@@ -63,7 +75,7 @@ public:
     std::string getName() const override { return m_name; }
     std::string getIconTextureName() const override { return m_iconTextureName; }
 
-    bool onRightClick(const glm::ivec3& adjacentPos, class ChunkManager* chunkManager) override;
+    bool onRightClick(const PlacementContext& ctx, class ChunkManager* chunkManager) override;
 
     // 望远镜使用接口（预留）
     void useSpyglass();

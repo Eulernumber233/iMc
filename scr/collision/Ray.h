@@ -16,7 +16,7 @@ public:
         glm::vec3 normal;         // 被击中的面法线（从被击中方块指向外部）
         BlockFace face;           // 被击中的面
         float distance;           // 击中距离
-        BlockType blockType;      // 方块类型
+        BlockState blockState;    // 完整方块状态（type + orient + 预留位）
     };
 
     Ray(const glm::vec3& origin, const glm::vec3& direction);

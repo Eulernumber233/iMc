@@ -34,6 +34,9 @@ public:
         const glm::mat4& lightSpaceMatrix, float near, float far);
     GLuint getVAO() const { return VAO; }
     void setTextureArray(GLuint texArray) { m_textureArray = texArray; }
+    // 一次性上传"每种 BlockType 的端面纹理层"查表给 g_buffer shader。
+    // 调用前提：BlockFaceType::init_type_map() 已执行（即纹理已加载）。
+    void uploadEndLayerLookup();
 
 private:
     void createFaceVertices();

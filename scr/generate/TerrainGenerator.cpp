@@ -52,7 +52,7 @@ void TerrainGenerator::setSeed(unsigned int seed) {
     m_impl->seed = seed;
 }
 
-void TerrainGenerator::fillChunkBuffer(BlockType* dst, const glm::ivec2& chunkPos) const {
+void TerrainGenerator::fillChunkBuffer(BlockState* dst, const glm::ivec2& chunkPos) const {
     if (!dst) return;
 
     const int W = ChunkConstants::CHUNK_WIDTH;
@@ -78,7 +78,8 @@ void TerrainGenerator::fillChunkBuffer(BlockType* dst, const glm::ivec2& chunkPo
                     else if (y == groundHeight)        block = (y >= 50) ? BLOCK_GRASS : BLOCK_DIRT;
                     else                               block = BLOCK_DIRT;
                 }
-                dst[(y * D + localZ) * W + localX] = block;
+                // 地形生成全部写无轴向。带朝向的方块（橡树原木等）由放置流程负责。
+                dst[(y * D + localZ) * W + localX] = BlockState(block, ORIENT_NONE);
             }
         }
     }

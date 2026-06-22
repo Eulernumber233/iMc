@@ -15,7 +15,7 @@ enum BlockType : uint8_t {
     BLOCK_SAND = 5,
     BLOCK_WOOD = 6,
     BLOCK_LEAVES = 7,
-    BLOCK_COUNT  // 方块类型总数 
+    BLOCK_COUNT  // 方块类型总数
 };
 enum BlockFace :uint8_t {
     RIGHT = 0,
@@ -25,6 +25,51 @@ enum BlockFace :uint8_t {
     UP = 4,
     DOWN = 5,
 };
+
+// 方块朝向：4 bit 编码，与 InstanceData::packed 的 orient 字段直接对应。
+//   ORIENT_PX..ORIENT_NZ —— 6 面朝向，与 BlockFace 数值一致（RIGHT/LEFT/FRONT/BACK/UP/DOWN）。
+//   ORIENT_NONE = 0xF    —— 无轴向方块（泥土/草/石头等），渲染时按面独立采样。
+//   剩余编码（6..14）保留给未来扩展。
+enum BlockOrient : uint8_t {
+    ORIENT_PX = 0,   // +X
+    ORIENT_NX = 1,   // -X
+    ORIENT_PZ = 2,   // +Z
+    ORIENT_NZ = 3,   // -Z
+    ORIENT_PY = 4,   // +Y
+    ORIENT_NY = 5,   // -Y
+    ORIENT_NONE = 0xF
+};
+
+
+// 方块状态：CPU 端 16 bit 紧凑布局，Section 的 m_blocks 单元格用它。
+//   bits  0..7  type     (BlockType)
+//   bits  8..11 orient   (BlockOrient，4 bit；0xF 表示无轴向)
+//   bits 12..15 reserved (水位/生长阶段/亮度等，后续扩展)
+//
+// 区块层（Section / Chunk / ChunkManager / Ray::HitResult 等）对外接口
+// 统一传 BlockState；调用方拿到后用 state.type() / state.orient() 自取。
+struct BlockState {
+    uint16_t bits;
+
+    constexpr BlockState() noexcept : bits(0) {}
+    constexpr BlockState(uint16_t b) noexcept : bits(b) {}
+    constexpr BlockState(BlockType t, uint8_t o = ORIENT_NONE) noexcept
+        : bits(uint16_t(uint16_t(t) | (uint16_t(o & 0xFu) << 8))) {}
+
+    constexpr BlockType type() const noexcept { return BlockType(bits & 0xFFu); }
+    constexpr uint8_t   orient() const noexcept { return uint8_t((bits >> 8) & 0xFu); }
+
+    void setType(BlockType t) noexcept {
+        bits = uint16_t((bits & 0xFF00u) | uint16_t(t));
+    }
+    void setOrient(uint8_t o) noexcept {
+        bits = uint16_t((bits & 0xF0FFu) | (uint16_t(o & 0xFu) << 8));
+    }
+
+    bool operator==(const BlockState& other) const noexcept { return bits == other.bits; }
+    bool operator!=(const BlockState& other) const noexcept { return bits != other.bits; }
+};
+static_assert(sizeof(BlockState) == 2, "BlockState must be 2 bytes");
 struct BlockFaceLocKey
 {
     uint8_t x;
@@ -68,6 +113,23 @@ struct BlockFaceType
     static void init_type_map();
     static int getTextureLayer(BlockFaceType key);
 
+    // 带轴方块（hasAxis）的"侧面层"和"端面层"。约定：
+    //   - 侧面层 side_layer_by_type[t]：t 不是 hasAxis 时为 -1；hasAxis 时是侧面图。
+    //   - 端面层 end_layer_by_type[t] ：同上。
+    // 这两个表的作用：CPU 端在 addFaceLocal 时如果发现某方块有 side_layer 注册，
+    // 就把侧面层填到 InstanceData.textureLayer（忽略 face），让所有面默认拿侧面图；
+    // shader 端再按 orient 决定哪两个面切换到 endLayer。无注册（-1）的方块走"按 face 查
+    // BlockFaceType::type_to_texture"的老路径——这样草方块这种"6 面 3 张图但不带轴"的方块
+    // 不受影响。
+    static constexpr int kLayerLookupSize = 256;
+    static int side_layer_by_type[kLayerLookupSize];
+    static int end_layer_by_type[kLayerLookupSize];
+    static const int* getSideLayerLookup() { return side_layer_by_type; }
+    static const int* getEndLayerLookup()  { return end_layer_by_type;  }
+    static int getSideLayer(BlockType t) { return side_layer_by_type[uint8_t(t)]; }
+    // 旧接口名（仅 RenderSystem 用，保持兼容）
+    static constexpr int kEndLayerLookupSize = kLayerLookupSize;
+
     BlockFaceType(const BlockType& type, const BlockFace& face_id)
         : type(type), face_id(face_id)
     {
@@ -92,11 +154,16 @@ namespace std {
 //     bit  0   localX (0..15)
 //     bit  4   localY (0..15, section 局部 y)
 //     bit  8  localZ (0..15)
-//     bit 12  faceIndex (0..5)
-//     bit 15  orient (方块朝向)
+//     bit 12  faceIndex (0..5)        —— 世界空间的面
+//     bit 15  orient (方块朝向)        —— 来自 BlockState.orient
 //     bit 19  reserved (13 bit)
 //   blockType    (16-bit)
 //   textureLayer (16-bit)
+//
+// orient 当前 shader 不读：Section::addFaceLocal 已经在 CPU 端按 orient 把面映射成
+// "方块本地坐标系下的逻辑面"再去查 textureLayer，因此端面/侧面的纹理选择已经正确。
+// 保留 orient 字段（4 bit 几乎零成本）是为了将来在 frag 里旋转 UV，让横躺原木的
+// 侧面木纹方向也跟着轴转 —— 那时无需再改 InstanceData 二进制布局。
 //
 // 世界坐标在着色器里用 sectionBase[gl_DrawID].xyz + (localX,localY,localZ) + 0.5 还原。
 // CPU 不再保留 vec3 position，节省 16 字节并把整个结构降到 24B → 8B (3x)。
@@ -112,7 +179,7 @@ struct InstanceData {
     }
 
     static constexpr uint32_t makePacked(uint8_t lx, uint8_t ly, uint8_t lz,
-                                         BlockFace face, uint8_t orient = 0) noexcept
+                                         BlockFace face, uint8_t orient = ORIENT_NONE) noexcept
     {
         return  (uint32_t(lx & 0xFu))
               | (uint32_t(ly & 0xFu) << 4)
@@ -147,36 +214,31 @@ inline const char* GetBlockName(BlockType type) {
 struct BlockProperties {
     bool isTransparent;   // 是否透明
     bool isSolid;         // 是否是固体
+    bool hasAxis;         // 是否记录朝向（如原木需要按放置方向旋转纹理；泥土/石头等无轴向）
     glm::vec3 color;      // 基础颜色
     float emissive;       // 自发光强度
-
-
-    //BlockProperties(bool isTransparent, bool isSolid, const glm::vec3& color, float emissive)
-    //    : isTransparent(isTransparent), isSolid(isSolid), color(color), emissive(emissive)
-    //{
-    //}
 };
 
 // 获取方块属性
 inline BlockProperties GetBlockProperties(BlockType type) {
     switch (type) {
     case BLOCK_AIR:
-        return { true, false, glm::vec3(0.0f), 0.0f };
+        return { true,  false, false, glm::vec3(0.0f), 0.0f };
     case BLOCK_STONE:
-        return { false, true, glm::vec3(0.5f, 0.5f, 0.5f), 0.0f };
+        return { false, true,  false, glm::vec3(0.5f, 0.5f, 0.5f), 0.0f };
     case BLOCK_DIRT:
-        return { false, true, glm::vec3(0.4f, 0.3f, 0.2f), 0.0f };
+        return { false, true,  false, glm::vec3(0.4f, 0.3f, 0.2f), 0.0f };
     case BLOCK_GRASS:
-        return { false, true, glm::vec3(0.2f, 0.6f, 0.3f), 0.0f };
+        return { false, true,  false, glm::vec3(0.2f, 0.6f, 0.3f), 0.0f };
     case BLOCK_WATER:
-        return { true, false, glm::vec3(0.0f, 0.3f, 0.8f), 0.1f };
+        return { true,  false, false, glm::vec3(0.0f, 0.3f, 0.8f), 0.1f };
     case BLOCK_SAND:
-        return { false, true, glm::vec3(0.9f, 0.8f, 0.6f), 0.0f };
+        return { false, true,  false, glm::vec3(0.9f, 0.8f, 0.6f), 0.0f };
     case BLOCK_WOOD:
-        return { false, true, glm::vec3(0.5f, 0.35f, 0.2f), 0.0f };
+        return { false, true,  true,  glm::vec3(0.5f, 0.35f, 0.2f), 0.0f };
     case BLOCK_LEAVES:
-        return { true, true, glm::vec3(0.2f, 0.5f, 0.2f), 0.0f };
+        return { true,  true,  false, glm::vec3(0.2f, 0.5f, 0.2f), 0.0f };
     default:
-        return { false, true, glm::vec3(1.0f, 0.0f, 1.0f), 0.0f }; // 错误颜色
+        return { false, true,  false, glm::vec3(1.0f, 0.0f, 1.0f), 0.0f }; // 错误颜色
     }
 }

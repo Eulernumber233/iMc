@@ -30,13 +30,15 @@ public:
     int getChunkZ() const { return m_chunkZ; }
     int getSectionY() const { return m_sectionY; }
 
-    // section 局部坐标
-    BlockType getBlock(int x, int y, int z) const;
-    void setBlockRaw(int x, int y, int z, BlockType b);
+    // section 局部坐标。整套对外接口统一用 BlockState；
+    // 调用方需要类型时拿 state.type() 自己取，需要朝向时拿 state.orient()。
+    // 越界返回 BlockState{} == (AIR, orient=0)。
+    BlockState getBlock(int x, int y, int z) const;
+    void       setBlock(int x, int y, int z, BlockState s);
 
-    // 直接拿 raw block buffer 指针，方便 worker 端批量写入
-    BlockType* blockData() { return m_blocks->data(); }
-    const BlockType* blockData() const { return m_blocks->data(); }
+    // 直接拿 raw state buffer 指针，方便 worker 端批量写入（地形生成器写入这里）。
+    BlockState* stateData() { return m_blocks->data(); }
+    const BlockState* stateData() const { return m_blocks->data(); }
 
     // mesh
     const std::vector<InstanceData>& getInstanceData() const { return m_instanceData; }
@@ -62,15 +64,17 @@ public:
 
     // 增量：插入/删除/更新单个面（局部坐标）
     // 把它们设为 public 是为了 Chunk 在做"邻居 section 跨 16-边界面更新"时可以直接调。
-    void addFaceLocal(int x, int y, int z, BlockFace face, BlockType type);
+    // state 给定该格当前的 BlockState（type + orient）；如果调用方手头没有，可以传
+    // getBlock(x,y,z) 重新读一遍。
+    void addFaceLocal(int x, int y, int z, BlockFace face, BlockState state);
     void removeFaceLocal(int x, int y, int z, BlockFace face);
 
     // 压缩 BLOCK_ERRER 占位面
     void compact();
 
     // 给定局部坐标 + 面，根据当前 block 状态和给定的"邻居方块"重新计算该面是否可见。
-    // 邻居方块 neighborBlock = BLOCK_AIR 表示透空，否则不可见。
-    void updateFaceWithNeighbor(int x, int y, int z, BlockFace face, BlockType neighborBlock);
+    // 邻居方块 neighbor.type() == BLOCK_AIR 表示透空，否则不可见。
+    void updateFaceWithNeighbor(int x, int y, int z, BlockFace face, BlockState neighbor);
 
     // 当前内部 errer 计数
     int getErrerCount() const { return m_errerCount; }
@@ -83,8 +87,9 @@ public:
     void notifyGpuSlotReleased();
 
 private:
-    using BlockArray = std::array<BlockType, VOLUME>;
+    using BlockArray = std::array<BlockState, VOLUME>;
     // 在 Section() 构造时分配；adoptFrom 时和源 Section 交换指针，源被销毁时自然释放它接到的旧块。
+    // 16 bit / 格：低 8 位是 BlockType，高 8 位含 orient 等状态（见 BlockState 注释）。
     std::unique_ptr<BlockArray> m_blocks;
     std::vector<InstanceData> m_instanceData;
     std::unordered_map<BlockFaceLocKey, int> m_PosToInstanceIndex;

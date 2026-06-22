@@ -140,13 +140,16 @@ void ChunkWorkerPool::buildOne(const glm::ivec2& pos, ChunkBuildResult& out) con
     constexpr int H = ChunkConstants::CHUNK_HEIGHT;
     constexpr int D = ChunkConstants::CHUNK_DEPTH;
 
-    BlockType buf[VOL];
+    // 16 bit / 格 × 16×16×256 = 128KB。原 BlockType[VOL] = 64KB 已经接近 Windows 默认栈 1MB
+    // 上的舒适范围，升级到 BlockState 后稳妥起见走堆分配（worker 上下文 new 一次即可）。
+    auto bufPtr = std::make_unique<BlockState[]>(VOL);
+    BlockState* buf = bufPtr.get();
     m_generator->fillChunkBuffer(buf, pos);
 
     // 把 buffer 切到 4 个 section
     for (int sy = 0; sy < ChunkBuildResult::SECTION_COUNT; ++sy) {
         out.sections[sy].setCoords(pos.x, pos.y, sy);
-        BlockType* dst = out.sections[sy].blockData();
+        BlockState* dst = out.sections[sy].stateData();
         for (int y = 0; y < Section::HEIGHT; ++y) {
             int worldY = sy * Section::HEIGHT + y;
             for (int z = 0; z < D; ++z) {

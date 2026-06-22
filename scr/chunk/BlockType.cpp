@@ -19,6 +19,8 @@
 //}
 // 定义BlockFaceType的静态成员变量
 std::unordered_map<BlockFaceType, int> BlockFaceType::type_to_texture;
+int BlockFaceType::side_layer_by_type[BlockFaceType::kLayerLookupSize] = { 0 };
+int BlockFaceType::end_layer_by_type [BlockFaceType::kLayerLookupSize] = { 0 };
 
 int BlockFaceType::getTextureLayer(BlockFaceType key) {
     auto it = type_to_texture.find(key);
@@ -59,5 +61,17 @@ void BlockFaceType::init_type_map()
     type_to_texture[{ BLOCK_WOOD, DOWN }] = texMgr->GetTextureLayerIndex("oak_log_top");
     type_to_texture[{ BLOCK_WOOD, FRONT }] = texMgr->GetTextureLayerIndex("oak_log");
     type_to_texture[{ BLOCK_WOOD, BACK }] = texMgr->GetTextureLayerIndex("oak_log");
+
+    // 带轴方块的"侧面层 / 端面层"查表。
+    //   side_layer_by_type[t] >= 0  → 该方块走"带轴渲染路径"：CPU 端往 InstanceData 写 sideLayer，
+    //                                  shader 端按 orient 在 sideLayer / endLayer 间切换。
+    //   side_layer_by_type[t] == -1 → 该方块走"老路径"：CPU 端按 face 查 type_to_texture。
+    // 目前仅 BLOCK_WOOD 是 hasAxis 方块。
+    for (int i = 0; i < kLayerLookupSize; ++i) {
+        side_layer_by_type[i] = -1;
+        end_layer_by_type[i]  = -1;
+    }
+    side_layer_by_type[BLOCK_WOOD] = texMgr->GetTextureLayerIndex("oak_log");
+    end_layer_by_type [BLOCK_WOOD] = texMgr->GetTextureLayerIndex("oak_log_top");
 }
 
