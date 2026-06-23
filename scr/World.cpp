@@ -75,7 +75,8 @@ int World::run() {
 
     // 初始化区块管理器（半径从 runtime config 读，方便不重编调参）
     m_chunkManager = std::make_shared<ChunkManager>(m_seed);
-    m_chunkManager->setSaveManager(m_saveManager.get());
+    //m_chunkManager->setSaveManager(m_saveManager.get());
+    m_chunkManager->setSaveManager(nullptr);
     m_chunkManager->initialize(RuntimeConfig::get().renderRadius, m_player->getCamera()->Position);
     m_chunkManager->printStats();
 

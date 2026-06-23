@@ -25,7 +25,19 @@
       "Read(//mnt/**)",
       "Bash(where g++)",
       "Bash(where clang++)",
-      "Bash(clang++ --version)"
+      "Bash(clang++ --version)",
+      "WebSearch",
+      "WebFetch(domain:enet.bespin.org)",
+      "WebFetch(domain:github.com)",
+      "Bash(Get-ChildItem -Path \"e:\\\\opengl\\\\iMc\\\\scr\\\\enet\" -Recurse)",
+      "PowerShell(\"---\")",
+      "Bash(git -C \"e:\\\\opengl\\\\iMc\" log --oneline -5 -- scr/enet/)",
+      "Bash(MSBuild.exe iMc.sln /p:Configuration=Release /p:Platform=x64 /t:Build /m /v:minimal)",
+      "Read(//c/Program Files/**)",
+      "Read(//c/Program Files \\(x86\\)/Microsoft Visual Studio/**)",
+      "Bash(\"C:/Program Files \\(x86\\)/Microsoft Visual Studio/Installer/vswhere.exe\" -latest -requires Microsoft.Component.MSBuild -find \"MSBuild/**/Bin/MSBuild.exe\")",
+      "Bash(\"D:/visual studio/MSBuild/Current/Bin/MSBuild.exe\" \"e:/opengl/iMc/iMc.sln\" /p:Configuration=Release /p:Platform=x64 /t:Build /m /v:minimal)",
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"e:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Release /p:Platform=x64 /t:Build /m /v:minimal 2>&1)"
     ],
     "additionalDirectories": [
       "e:\\opengl\\iMc\\scr"

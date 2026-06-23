@@ -66,6 +66,8 @@ public:
 
     static SectionKey makeSectionKey(int chunkX, int chunkZ, int sectionY);
 
+    uint32_t getVisibilityGeneration() const { return m_visGeneration; }
+
     // 存档管理
     void setSaveManager(ChunkSaveManager* sm);
     void saveAllDirtyChunks();
@@ -140,6 +142,15 @@ private:
     ChunkSaveManager* m_saveManager = nullptr;
     double m_lastSaveCheckTime = 0.0;
     float  m_autoSaveTimer = 0.0f;
+
+    // 上次 requestMissingChunks 发现半径内全部就位后置 false，避免空扫
+    bool m_needChunkScan = true;
+
+    // 可见性缓存版本号：相机移动 >1m 或 FOV 变化时 ++，chunk 用它判断缓存是否失效，
+    // 替代原来每个 chunk 各自算 glm::distance 的 284 次 sqrt/帧。
+    uint32_t m_visGeneration = 1;
+    glm::vec3 m_lastVisCameraPos{ 0.0f };
+    float m_lastVisCameraFOV = 0.0f;
 
     ChunkKey chunkPosToKey(const glm::ivec2& pos) const;
 

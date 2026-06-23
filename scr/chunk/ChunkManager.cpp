@@ -5,6 +5,7 @@
 #include "../RuntimeConfig.h"
 #include "../save/ChunkSaveManager.h"
 #include "../Profiler.h"
+#include <array>
 #include <iostream>
 #include <algorithm>
 #include <thread>
@@ -109,16 +110,23 @@ void ChunkManager::update(std::shared_ptr<Camera> camera) {
     if (cameraChunk != m_currentCenterChunk) {
         m_currentCenterChunk = cameraChunk;
         updateActiveChunks(m_camera->Position);
+        m_needChunkScan = true;
     }
 
-    // 把已完成的 build worker 结果接管为 pending chunk
+    // 相机移动 >1m 或 FOV 变化时递增可见性版本号，各 chunk 用它替代各自 distance 比较
+    float camDist = glm::distance(m_lastVisCameraPos, m_camera->Position);
+    float fovDelta = std::abs(m_lastVisCameraFOV - m_camera->FOV);
+    if (camDist > 1.0f || fovDelta > 0.1f) {
+        m_lastVisCameraPos = m_camera->Position;
+        m_lastVisCameraFOV = m_camera->FOV;
+        ++m_visGeneration;
+    }
+
     integrateBuiltChunks();
-    // 把已完成的 stitch worker 结果应用到 pending chunk 的状态位，必要时晋升到 loaded
     integrateStitchResults();
 
-    // 补投递：初始化或一次性大批量请求时 m_maxInflightRequests 限流会丢一部分；
-    // 完成的 chunk 腾出 in-flight 配额后，每帧扫一次半径内缺失的 chunk 把它们补上。
-    if ((int)m_inFlight.size() < m_maxInflightRequests) {
+    // 补投递：m_needChunkScan 避免半径内全部就位后每帧空扫 361 个位置
+    if (m_needChunkScan && (int)m_inFlight.size() < m_maxInflightRequests) {
         PROFILE_SCOPE("requestMissingChunks");
         requestMissingChunks();
     }
@@ -184,10 +192,10 @@ void ChunkManager::printStats() const {
     std::cout << "Active Chunks: " << getActiveChunkCount() << std::endl;
     std::cout << "Visible Instances: " << m_visibleInstanceCount << std::endl;
     std::cout << "InFlight: " << m_inFlight.size()
-              << " / WorkerPending: " << m_workerPool.pendingCount() << std::endl;
+        << " / WorkerPending: " << m_workerPool.pendingCount() << std::endl;
     std::cout << "Arena: " << m_arena.getInUse() << " / " << m_arena.getCapacity()
-              << " | freeBlocks=" << m_arena.getFreeBlockCount()
-              << " largestFree=" << m_arena.getLargestFreeBlock() << std::endl;
+        << " | freeBlocks=" << m_arena.getFreeBlockCount()
+        << " largestFree=" << m_arena.getLargestFreeBlock() << std::endl;
     std::cout << "===========================" << std::endl;
 }
 
@@ -196,14 +204,14 @@ ChunkKey ChunkManager::chunkPosToKey(const glm::ivec2& pos) const {
 }
 
 bool ChunkManager::isWithinActiveRadius(const glm::ivec2& chunkPos,
-                                        const glm::ivec2& centerChunk) const {
+    const glm::ivec2& centerChunk) const {
     int dx = std::abs(chunkPos.x - centerChunk.x);
     int dz = std::abs(chunkPos.y - centerChunk.y);
     return dx <= m_renderRadius && dz <= m_renderRadius;
 }
 
 bool ChunkManager::isWithinEvictRadius(const glm::ivec2& chunkPos,
-                                       const glm::ivec2& centerChunk) const {
+    const glm::ivec2& centerChunk) const {
     int dx = std::abs(chunkPos.x - centerChunk.x);
     int dz = std::abs(chunkPos.y - centerChunk.y);
     int r = m_renderRadius + EVICT_MARGIN_CHUNKS;
@@ -243,13 +251,13 @@ void ChunkManager::evictFarChunkSlots() {
 
         // 走出 evict 半径 → 释放该 chunk 所有 section 的 GPU slot
         for (int sy = 0; sy < Chunk::SECTION_COUNT; ++sy) {
+            Section& sec = chunk->getSection(sy);
+            ChunkArena::Slot slot = sec.getGpuSlot();
+            if (!slot.valid()) continue;
+            m_arena.free(slot);
             SectionKey key = makeSectionKey(cp.x, cp.y, sy);
-            auto it = m_sectionSlots.find(key);
-            if (it == m_sectionSlots.end()) continue;
-            m_arena.free(it->second);
-            m_sectionSlots.erase(it);
-            // 清掉 section 的增量状态：再次入活跃半径时下次 upload 自动走全量 reupload 重建 slot
-            chunk->getSection(sy).notifyGpuSlotReleased();
+            m_sectionSlots.erase(key);
+            sec.notifyGpuSlotReleased(); // 同时清除 section 内缓存的 slot
         }
     }
 }
@@ -257,6 +265,7 @@ void ChunkManager::evictFarChunkSlots() {
 void ChunkManager::requestMissingChunks() {
     // 优先靠近相机中心：用曼哈顿距离逐圈扩散；扫描到 stitch 预加载半径以填外圈陪练。
     const int loadR = m_renderRadius + STITCH_PRELOAD_MARGIN;
+    bool foundMissing = false;
     for (int r = 0; r <= loadR; ++r) {
         if ((int)m_inFlight.size() >= m_maxInflightRequests) return;
         for (int dx = -r; dx <= r; ++dx) {
@@ -267,10 +276,13 @@ void ChunkManager::requestMissingChunks() {
                 if (getChunk(chunkPos) || getPendingChunk(chunkPos)) continue;
                 if (m_inFlight.find(chunkPosToKey(chunkPos)) != m_inFlight.end()) continue;
                 if ((int)m_inFlight.size() >= m_maxInflightRequests) return;
+                foundMissing = true;
                 requestChunkLoad(chunkPos);
             }
         }
     }
+    // 全部圈扫完没有缺口 → 下次不必再扫，等相机移动或 chunk 卸载再复位
+    if (!foundMissing) m_needChunkScan = false;
 }
 
 void ChunkManager::requestChunkLoad(const glm::ivec2& chunkPos) {
@@ -293,7 +305,7 @@ void ChunkManager::integrateBuiltChunks() {
         PROFILE_SCOPE("ibc.drainCompleted");
         auto results = m_workerPool.drainCompleted();
         if (!results.empty()) {
-            Profiler::addSample("ibc.resultCount", (int64_t)results.size());
+            Profiler::addCounter("ibc.resultCount", (int64_t)results.size());
             for (auto& r : results) m_pendingIntegrate.push_back(std::move(r));
         }
     }
@@ -335,7 +347,7 @@ void ChunkManager::integrateBuiltChunks() {
         }
         --budget;
     }
-    Profiler::addSample("ibc.queueDepth", (int64_t)m_pendingIntegrate.size());
+    Profiler::addCounter("ibc.queueDepth", (int64_t)m_pendingIntegrate.size());
 }
 
 void ChunkManager::linkNeighbors(Chunk* newChunk) {
@@ -346,7 +358,7 @@ void ChunkManager::linkNeighbors(Chunk* newChunk) {
     auto findAny = [this](const glm::ivec2& q) -> Chunk* {
         if (Chunk* c = getPendingChunk(q)) return c;
         return getChunk(q); // loaded
-    };
+        };
     Chunk* xp = findAny(glm::ivec2(p.x + 1, p.y));
     Chunk* xn = findAny(glm::ivec2(p.x - 1, p.y));
     Chunk* zp = findAny(glm::ivec2(p.x, p.y + 1));
@@ -407,7 +419,7 @@ void ChunkManager::integrateStitchResults() {
         results = m_workerPool.drainStitchResults();
     }
     if (results.empty()) return;
-    Profiler::addSample("isr.resultCount", (int64_t)results.size());
+    Profiler::addCounter("isr.resultCount", (int64_t)results.size());
 
     static constexpr int faceToDir[6] = { 0, 1, 2, 3, -1, -1 }; // RIGHT/LEFT/FRONT/BACK -> 0..3
 
@@ -484,21 +496,15 @@ void ChunkManager::releaseSectionSlot(SectionKey key) {
 }
 
 void ChunkManager::uploadSection(int chunkX, int chunkZ, int sectionY,
-                                 Section& section, int& uploadBudget) {
+    Section& section, int& uploadBudget) {
     if (uploadBudget <= 0) return;
 
     SectionKey key = makeSectionKey(chunkX, chunkZ, sectionY);
     const auto& data = section.getInstanceData();
     const auto& dirtyIdx = section.getDirtyIndices();
 
-    auto it = m_sectionSlots.find(key);
-    ChunkArena::Slot oldSlot = (it != m_sectionSlots.end()) ? it->second : ChunkArena::Slot{};
+    ChunkArena::Slot oldSlot = section.getGpuSlot();
 
-    // 增量上传条件：
-    //   1) 已有有效 slot
-    //   2) section 没有发出全量重建信号（rebuild / compact / adopt 不走增量）
-    //   3) 有脏 index 可写
-    //   4) 新的 instanceData 长度仍 <= slot.capacity（即不需要升 size class）
     bool canIncremental =
         oldSlot.valid()
         && !section.fullRebuildPending()
@@ -508,19 +514,23 @@ void ChunkManager::uploadSection(int chunkX, int chunkZ, int sectionY,
     if (canIncremental) {
         ChunkArena::Slot s = oldSlot;
         m_arena.patch(s, data.data(),
-                      dirtyIdx.data(), (uint32_t)dirtyIdx.size(),
-                      (uint32_t)data.size());
-        // patch 内部会更新 s.count 到 newCount，回写 map
+            dirtyIdx.data(), (uint32_t)dirtyIdx.size(),
+            (uint32_t)data.size());
         m_sectionSlots[key] = s;
-    } else {
+        section.setGpuSlot(s);
+    }
+    else {
         ChunkArena::Slot newSlot = m_arena.reupload(oldSlot,
             data.empty() ? nullptr : data.data(),
             (uint32_t)data.size());
 
         if (data.empty()) {
             if (oldSlot.valid()) m_sectionSlots.erase(key);
-        } else if (newSlot.valid()) {
+            section.setGpuSlot(ChunkArena::Slot{});
+        }
+        else if (newSlot.valid()) {
             m_sectionSlots[key] = newSlot;
+            section.setGpuSlot(newSlot);
         }
     }
 
@@ -556,57 +566,78 @@ void ChunkManager::rebuildDrawCommands() {
             if (uploadBudget <= 0) break;
         }
     }
-    Profiler::addSample("rdc.uploadCount", uploadedCount); // 计数借 profiler 频道展示
+    Profiler::addCounter("rdc.uploadCount", uploadedCount);
 
     {
-    PROFILE_SCOPE("rdc.cullPass");
-    // 第二遍：按 active chunk → 组合剔除（空section + 视锥 + 距离 + 纵向）生成 indirect 命令
-    const auto& cfg = RuntimeConfig::get();
-    int cameraSectionY = (int)(m_camera->Position.y / Section::HEIGHT);
-    int maxDownSections = cfg.verticalCullRatio > 0.0f
-        ? (int)(m_renderRadius * cfg.verticalCullRatio)
-        : 0;
+        PROFILE_SCOPE("rdc.cullPass");
+        const auto& cfg = RuntimeConfig::get();
+        const Camera* cam = m_camera.get();
+        int cameraSectionY = (int)(cam->Position.y / Section::HEIGHT);
+        int maxDownSections = cfg.verticalCullRatio > 0.0f
+            ? (int)(m_renderRadius * cfg.verticalCullRatio)
+            : 0;
 
-    for (Chunk* chunk : m_activeChunks) {
-        if (!chunk->isMeshReady()) continue;
-        if (!chunk->isChunkPotentiallyVisible(m_camera)) continue;
-
-        uint32_t mask = chunk->getVisibleSectionMask(m_camera, cameraSectionY, maxDownSections);
-
-        // 只遍历 mask 置位的 section
-        while (mask) {
-            int sy = lowestBitIndex(mask);
-            mask &= mask - 1u;   // 清掉最低置位
-
-            SectionKey key = makeSectionKey(chunk->getPosition().x,
-                                            chunk->getPosition().y, sy);
-            auto it = m_sectionSlots.find(key);
-            if (it == m_sectionSlots.end()) continue;
-            const ChunkArena::Slot& slot = it->second;
-            if (slot.count == 0) continue;
-
-            DrawElementsIndirectCommand cmd{};
-            cmd.count = 6;
-            cmd.instanceCount = slot.count;
-            cmd.firstIndex = 0;
-            cmd.baseVertex = 0;
-            cmd.baseInstance = slot.offset;
-            m_drawCommands.push_back(cmd);
-
-            // 与命令同序追加 section base：shader 通过 gl_DrawID 拿到 (chunkX*16, sectionY*16, chunkZ*16)
-            glm::ivec2 cp = chunk->getPosition();
-            m_sectionBases.emplace_back(
-                float(cp.x * Chunk::WIDTH),
-                float(sy * Section::HEIGHT),
-                float(cp.y * Chunk::DEPTH),
-                0.0f);
-
-            m_visibleInstanceCount += slot.count;
+        std::array<glm::vec4, 6> frustumPlanes;
+        const std::array<glm::vec4, 6>* pPlanes = nullptr;
+        if (cam->FrustumCullingEnabled) {
+            frustumPlanes = cam->GetFrustumPlanes();
+            pPlanes = &frustumPlanes;
         }
-    }
+
+        int chunkTotal = 0, chunkCoarseCull = 0;
+        int64_t coarseVisUs = 0, getMaskUs = 0, emitCmdUs = 0;
+
+        for (Chunk* chunk : m_activeChunks) {
+            if (!chunk->isMeshReady()) continue;
+            ++chunkTotal;
+
+            auto t0 = std::chrono::steady_clock::now();
+            bool visible = chunk->isChunkPotentiallyVisible(cam);
+            auto t1 = std::chrono::steady_clock::now();
+            coarseVisUs += std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+            if (!visible) { ++chunkCoarseCull; continue; }
+
+            uint32_t mask = chunk->getVisibleSectionMask(cam, cameraSectionY, maxDownSections, pPlanes);
+            auto t2 = std::chrono::steady_clock::now();
+            getMaskUs += std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+
+            while (mask) {
+                int sy = lowestBitIndex(mask);
+                mask &= mask - 1u;
+
+                const ChunkArena::Slot& slot = chunk->getSection(sy).getGpuSlot();
+                if (!slot.valid() || slot.count == 0) continue;
+
+                DrawElementsIndirectCommand cmd{};
+                cmd.count = 6;
+                cmd.instanceCount = slot.count;
+                cmd.firstIndex = 0;
+                cmd.baseVertex = 0;
+                cmd.baseInstance = slot.offset;
+                m_drawCommands.push_back(cmd);
+
+                glm::ivec2 cp = chunk->getPosition();
+                m_sectionBases.emplace_back(
+                    float(cp.x * Chunk::WIDTH),
+                    float(sy * Section::HEIGHT),
+                    float(cp.y * Chunk::DEPTH),
+                    0.0f);
+
+                m_visibleInstanceCount += slot.count;
+            }
+            auto t3 = std::chrono::steady_clock::now();
+            emitCmdUs += std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count();
+        }
+
+        Profiler::addSample("rdc.cull.coarseVis", coarseVisUs);
+        Profiler::addSample("rdc.cull.getMask", getMaskUs);
+        Profiler::addSample("rdc.cull.emitCmd", emitCmdUs);
+        Profiler::addCounter("rdc.chunkTotal", chunkTotal);
+        Profiler::addCounter("rdc.chunkCoarseCull", chunkCoarseCull);
     } // rdc.cullPass
 
-    Profiler::addSample("rdc.drawCmdCount", (int64_t)m_drawCommands.size());
+    Profiler::addCounter("rdc.drawCmdCount", (int64_t)m_drawCommands.size());
+    Profiler::addCounter("rdc.visibleInstances", (int64_t)m_visibleInstanceCount);
 
     {
         PROFILE_SCOPE("rdc.syncGpuBuffers");
@@ -682,7 +713,7 @@ void ChunkManager::setSaveManager(ChunkSaveManager* sm) {
 // ====================== 存档 ======================
 
 bool ChunkManager::isWithinUnloadRadius(const glm::ivec2& chunkPos,
-                                        const glm::ivec2& centerChunk) const {
+    const glm::ivec2& centerChunk) const {
     int dx = std::abs(chunkPos.x - centerChunk.x);
     int dz = std::abs(chunkPos.y - centerChunk.y);
     int r = m_renderRadius + UNLOAD_MARGIN_CHUNKS;
@@ -754,6 +785,8 @@ void ChunkManager::unloadDistantChunks() {
         it->second->unload();  // 清理邻居指针
         m_loadedChunks.erase(it);
     }
+
+    if (!toRemove.empty()) m_needChunkScan = true;
 }
 
 void ChunkManager::saveAllDirtyChunks() {

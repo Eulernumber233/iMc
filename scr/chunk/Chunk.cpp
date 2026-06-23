@@ -1,4 +1,5 @@
 ﻿#include "Chunk.h"
+#include "../Profiler.h"
 #include <iostream>
 #include <algorithm>
 #ifdef _MSC_VER
@@ -227,37 +228,33 @@ bool Chunk::aabbInFrustum(const glm::vec3& min, const glm::vec3& max,
     return true;
 }
 
-bool Chunk::isChunkPotentiallyVisible(std::shared_ptr<Camera> camera) {
+bool Chunk::isChunkPotentiallyVisible(const Camera* camera) {
     if (!camera) return true;
-    const bool frustumEnabled = camera->FrustumCullingEnabled;
+    if (!m_chunkManager) return true;
 
-    static int frameCount = 0;
-    frameCount++;
-
-    bool cameraMoved = (glm::distance(m_cachedCameraPos, camera->Position) > 1.0f);
-    bool fovChanged = (std::abs(m_cachedCameraFOV - camera->FOV) > 0.1f);
-
-    if (cameraMoved || fovChanged || (frameCount - m_lastVisibilityFrame > 10)) {
-        m_cachedCameraPos = camera->Position;
-        m_cachedCameraFOV = camera->FOV;
-        m_lastVisibilityFrame = frameCount;
-
-        if (frustumEnabled) {
-            auto planes = camera->GetFrustumPlanes();
-            if (!aabbInFrustum(m_minPos, m_maxPos, planes)) {
-                m_cachedVisibility = false;
-                return false;
-            }
-        }
-        glm::vec3 chunkCenter = getCenter();
-        float distance = glm::distance(chunkCenter, camera->Position);
-        const float MAX_RENDER_DISTANCE = 300.0f;
-        m_cachedVisibility = (distance <= MAX_RENDER_DISTANCE);
+    // ChunkManager 统一追踪相机移动，递增 visGeneration；
+    // chunk 只需比较本地记录的版本号，省掉原先每 chunk 各自 glm::distance 的 284 次 sqrt/帧。
+    uint32_t curGen = m_chunkManager->getVisibilityGeneration();
+    if (m_cachedVisGeneration == curGen) {
+        return m_cachedVisibility;
     }
+    m_cachedVisGeneration = curGen;
+
+    const bool frustumEnabled = camera->FrustumCullingEnabled;
+    if (frustumEnabled) {
+        auto planes = camera->GetFrustumPlanes();
+        if (!aabbInFrustum(m_minPos, m_maxPos, planes)) {
+            m_cachedVisibility = false;
+            return false;
+        }
+    }
+    glm::vec3 d = getCenter() - camera->Position;
+    const float MAX_RENDER_DISTANCE_SQ = 300.0f * 300.0f;
+    m_cachedVisibility = (glm::dot(d, d) <= MAX_RENDER_DISTANCE_SQ);
     return m_cachedVisibility;
 }
 
-bool Chunk::isSectionVisible(int sectionY, std::shared_ptr<Camera> camera) const {
+bool Chunk::isSectionVisible(int sectionY, const Camera* camera) const {
     if (!camera) return true;
 
     // section AABB
@@ -278,16 +275,19 @@ bool Chunk::isSectionVisible(int sectionY, std::shared_ptr<Camera> camera) const
     return glm::distance(center, camera->Position) <= MAX_RENDER_DISTANCE;
 }
 
-uint32_t Chunk::getVisibleSectionMask(std::shared_ptr<Camera> camera,
-                                       int cameraSectionY, int maxDownSections) const {
+uint32_t Chunk::getVisibleSectionMask(const Camera* camera,
+                                       int cameraSectionY, int maxDownSections,
+                                       const std::array<glm::vec4, 6>* frustumPlanes) const {
     uint32_t mask = m_nonEmptyMask;
     if (mask == 0) return 0;
     if (!camera) return mask;
 
     const bool frustumEnabled = camera->FrustumCullingEnabled;
-    std::array<glm::vec4, 6> planes;
-    if (frustumEnabled) {
-        planes = camera->GetFrustumPlanes();
+    const std::array<glm::vec4, 6>* planes = frustumPlanes;
+    std::array<glm::vec4, 6> localPlanes;
+    if (frustumEnabled && !planes) {
+        localPlanes = camera->GetFrustumPlanes();
+        planes = &localPlanes;
     }
 
     const int minSectionY = (maxDownSections > 0)
@@ -296,7 +296,12 @@ uint32_t Chunk::getVisibleSectionMask(std::shared_ptr<Camera> camera,
 
     const float chunkBaseX = m_position.x * (float)WIDTH;
     const float chunkBaseZ = m_position.y * (float)DEPTH;
-    const float MAX_RENDER_DISTANCE = 300.0f;
+    const float MAX_RENDER_DISTANCE_SQ = 300.0f * 300.0f;
+    const float secHalf = Section::HEIGHT * 0.5f;
+    const float chalfX = chunkBaseX + WIDTH * 0.5f;
+    const float chalfZ = chunkBaseZ + DEPTH * 0.5f;
+
+    int secTested = 0, secVertCull = 0, secFrustCull = 0, secDistCull = 0;
 
     uint32_t result = 0;
     while (mask) {
@@ -309,25 +314,34 @@ uint32_t Chunk::getVisibleSectionMask(std::shared_ptr<Camera> camera,
         sy = __builtin_ctz(mask);
 #endif
         mask &= mask - 1u;
+        ++secTested;
 
         // 纵向剔除：太靠下的 section 不渲染
-        if (sy < minSectionY) continue;
+        if (sy < minSectionY) { ++secVertCull; continue; }
 
-        // 视锥 + 距离剔除（内联 isSectionVisible 逻辑，避免每 section 重算视锥平面）
-        if (frustumEnabled) {
-            glm::vec3 smin(chunkBaseX, sy * (float)Section::HEIGHT, chunkBaseZ);
-            glm::vec3 smax = smin + glm::vec3((float)Section::WIDTH, (float)Section::HEIGHT, (float)Section::DEPTH);
-            if (!aabbInFrustum(smin, smax, planes)) continue;
+        // 视锥 + 距离剔除
+        if (frustumEnabled && planes) {
+            float sy0 = sy * (float)Section::HEIGHT;
+            glm::vec3 smin(chunkBaseX, sy0, chunkBaseZ);
+            glm::vec3 smax(chunkBaseX + (float)Section::WIDTH,
+                           sy0 + (float)Section::HEIGHT,
+                           chunkBaseZ + (float)Section::DEPTH);
+            if (!aabbInFrustum(smin, smax, *planes)) { ++secFrustCull; continue; }
         }
 
-        glm::vec3 center(
-            chunkBaseX + WIDTH * 0.5f,
-            sy * (float)Section::HEIGHT + Section::HEIGHT * 0.5f,
-            chunkBaseZ + DEPTH * 0.5f
-        );
-        if (glm::distance(center, camera->Position) > MAX_RENDER_DISTANCE) continue;
+        // 距离剔除：用平方距离避免 sqrt
+        float cy = sy * (float)Section::HEIGHT + secHalf;
+        float dx = chalfX - camera->Position.x;
+        float dy = cy - camera->Position.y;
+        float dz = chalfZ - camera->Position.z;
+        if (dx * dx + dy * dy + dz * dz > MAX_RENDER_DISTANCE_SQ) { ++secDistCull; continue; }
 
         result |= (1u << sy);
     }
+
+    Profiler::addCounter("vis.secTested", secTested);
+    Profiler::addCounter("vis.secVertCull", secVertCull);
+    Profiler::addCounter("vis.secFrustCull", secFrustCull);
+    Profiler::addCounter("vis.secDistCull", secDistCull);
     return result;
 }

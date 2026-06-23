@@ -1,4 +1,8 @@
-﻿#include "Shader.h"
+﻿// 强制使用独立显卡（NVIDIA + AMD）
+extern "C" { __declspec(dllexport) unsigned long NvOptimusEnablement = 0x00000001; }
+extern "C" { __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1; }
+
+#include "Shader.h"
 #include "Camera.h"
 #include "TextureMgr.h"
 #include "World.h"
@@ -7,6 +11,10 @@
 #include <chrono>
 #include <ctime>
 #include <unordered_set>
+#define _WINSOCK_DEPRECATED_NO_WARNINGS
+#define ENET_IMPLEMENTATION
+
+#include "enet/enet.h"
 // 窗口大小回调（调整视口）- 现在由World类处理
 void framebufferSizeCallback(GLFWwindow* window, int width, int height) {
     glViewport(0, 0, width, height);
@@ -48,6 +56,7 @@ GLFWwindow* initAll() {
         return nullptr;
     }
     glfwMakeContextCurrent(window);
+    glfwSwapInterval(0);  // 关 vsync，避免锁帧
     // 注意：回调函数现在由World类设置
     glfwSetFramebufferSizeCallback(window, framebufferSizeCallback);
 

@@ -191,13 +191,10 @@ void Section::rebuildVisibilityInternal(const Section* above, const Section* bel
 }
 
 void Section::notifyGpuSlotReleased() {
-    // GPU slot 清空，之前累计的 dirty index 全部失效
-    // free list 里的 ERRER 槽下一次全量上传会被一并写回 GPU，但正确
-    // m_dirty 必须为 true：下次该 section 重新进入活跃半径时，rebuildDrawCommands 才会触发 uploadSection
-    // → 找不到 oldSlot → 走 reupload 全量分支，重新分配 slot 并完整上传。
     m_dirty = true;
     m_dirtyIndices.clear();
     m_fullRebuildPending = true;
+    m_gpuSlot = ChunkArena::Slot{};  // 清除缓存，下次上传走全量
 }
 
 void Section::adoptFrom(Section&& other) {

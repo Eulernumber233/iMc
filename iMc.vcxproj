@@ -161,6 +161,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="scr\Camera.h" />
+    <ClInclude Include="scr\enet\enet.h" />
     <ClInclude Include="scr\RuntimeConfig.h" />
     <ClInclude Include="scr\Profiler.h" />
     <ClInclude Include="scr\chunk\BlockType.h" />
@@ -201,6 +202,7 @@
   <ItemGroup>
     <None Include=".gitattributes" />
     <None Include=".gitignore" />
+    <None Include="assert\runtime_config.json" />
     <None Include="PropertySheet.props" />
     <None Include="PropertySheet_debug.props" />
     <None Include="README.md" />

@@ -66,15 +66,15 @@ public:
     }
 
     // 渲染层可见性 —— 粗剔（chunk 整体 AABB + 距离），每帧/每相机状态变化时重算并缓存
-    bool isChunkPotentiallyVisible(std::shared_ptr<Camera> camera);
+    bool isChunkPotentiallyVisible(const Camera* camera);
     // 渲染层可见性 —— 精剔（section AABB），调用前应先确认 isChunkPotentiallyVisible
-    bool isSectionVisible(int sectionY, std::shared_ptr<Camera> camera) const;
+    bool isSectionVisible(int sectionY, const Camera* camera) const;
 
     // 组合剔除：非空 mask + 视锥 + 距离 + 纵向（下方 section 限制）。
-    // cameraSectionY = 玩家所在 section 索引，maxDownSections = 下方最多渲染几个 section。
-    // 返回应渲染的 section bitmask；调用前应已通过 isChunkPotentiallyVisible 粗剔。
-    uint32_t getVisibleSectionMask(std::shared_ptr<Camera> camera,
-                                    int cameraSectionY, int maxDownSections) const;
+    // frustumPlanes 可选：传入则复用，nullptr 则内部自取。
+    uint32_t getVisibleSectionMask(const Camera* camera,
+                                    int cameraSectionY, int maxDownSections,
+                                    const std::array<glm::vec4, 6>* frustumPlanes = nullptr) const;
 
     // 给 ChunkManager / worker 调用：把本 chunk 在 face 方向的边界面与 other 缝合（双向）。
     // face: 本 chunk 视角的方向（RIGHT/LEFT/FRONT/BACK 之一）
@@ -125,11 +125,10 @@ private:
     bool m_stitchBusy = false;
     bool m_saveDirty = true; // 新生成/修改过的区块需要存档；写入磁盘后清零
 
-    // 可见性缓存（chunk 粗剔结果）
+    // 可见性缓存（chunk 粗剔结果）。用 ChunkManager 的 visGeneration 做版本号，
+    // 代替每 chunk 各自 glm::distance 比较相机是否移动。0 表示首次需计算。
     mutable bool m_cachedVisibility = true;
-    mutable int m_lastVisibilityFrame = -1;
-    glm::vec3 m_cachedCameraPos{ 0.0f };
-    float m_cachedCameraFOV = 0.0f;
+    mutable uint32_t m_cachedVisGeneration = 0;
 
     // 内部：AABB vs 视锥
     static bool aabbInFrustum(const glm::vec3& min, const glm::vec3& max,

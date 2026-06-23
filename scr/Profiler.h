@@ -10,16 +10,20 @@
 //
 // 用法：
 //   void foo() {
-//       PROFILE_SCOPE("foo");
+//       PROFILE_SCOPE("foo");          // 计时
 //       ...
 //   }
+//   Profiler::addCounter("bar", 42);   // 计数（独立表格）
 class Profiler {
 public:
     // 主线程每帧调一次（在帧首尾都行）。负责每秒触发打印 + 重置累计。
     static void frame();
 
-    // 在某区段结束时累加一次耗时。一般通过 ScopedTimer 自动调。
+    // 累加一次耗时（μs）。一般通过 ScopedTimer / PROFILE_SCOPE 自动调。
     static void addSample(const char* name, int64_t microseconds);
+
+    // 累加一次计数值（与计时表分开，输出独立表格）。
+    static void addCounter(const char* name, int64_t value);
 
     // 立即打印一次当前累计（不重置）
     static void dump();

@@ -1,6 +1,7 @@
 ﻿#pragma once
 #include "../core.h"
 #include "BlockType.h"
+#include "ChunkArena.h"
 #include "ChunkDimensions.h"
 #include <array>
 #include <memory>
@@ -86,6 +87,10 @@ public:
     // 不动 m_blocks / m_instanceData / m_PosToInstanceIndex —— 这些是 CPU 端 mesh，仍然有效。
     void notifyGpuSlotReleased();
 
+    // 缓存 GPU arena slot，避免 rebuildDrawCommands 每帧查 unordered_map
+    ChunkArena::Slot getGpuSlot() const { return m_gpuSlot; }
+    void setGpuSlot(const ChunkArena::Slot& s) { m_gpuSlot = s; }
+
 private:
     using BlockArray = std::array<BlockState, VOLUME>;
     // 在 Section() 构造时分配；adoptFrom 时和源 Section 交换指针，源被销毁时自然释放它接到的旧块。
@@ -109,6 +114,9 @@ private:
     int m_chunkX = 0;
     int m_chunkZ = 0;
     int m_sectionY = 0;   // 0..3，section 起始 worldY = m_sectionY * HEIGHT
+
+    // GPU arena slot 缓存：rebuildDrawCommands 直接读此字段，无需查 unordered_map。
+    ChunkArena::Slot m_gpuSlot;
 
     // 内部辅助
     static int idx(int x, int y, int z) { return (y * DEPTH + z) * WIDTH + x; }
