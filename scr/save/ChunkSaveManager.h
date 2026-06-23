@@ -17,7 +17,7 @@ struct PlayerSaveData;
 struct WorldInfo {
     std::string name;
     std::string path;
-    uint32_t    seed = 0;
+    uint64_t    seed = 0;
     uint64_t    lastPlayed = 0; // epoch 秒
 };
 
@@ -36,13 +36,13 @@ public:
     static std::vector<WorldInfo> listWorlds(const std::string& savesRoot = "saves");
 
     // ---- 世界管理 ----
-    bool createWorld(const std::string& worldName, uint32_t seed);
+    bool createWorld(const std::string& worldName, uint64_t seed);
     bool openWorld(const std::string& worldName);
     void closeWorld();
 
     bool isWorldOpen() const { return m_worldOpen; }
     const std::string& getWorldName() const { return m_worldName; }
-    uint32_t getSeed() const { return m_seed; }
+    uint64_t getSeed() const { return m_seed; }
     const std::string& getSavesRoot() const { return m_savesRoot; }
 
     // ---- 区块 I/O (线程安全, m_ioMutex 保护) ----
@@ -66,7 +66,7 @@ private:
     std::string m_savesRoot;
     std::string m_worldPath;
     std::string m_worldName;
-    uint32_t    m_seed = 0;
+    uint64_t    m_seed = 0;
     bool        m_worldOpen = false;
 
     // region 缓存: key = ((int64_t)rx << 32) | (uint32_t)rz
@@ -77,8 +77,8 @@ private:
     RegionFile* getOrOpenRegion(int regionX, int regionZ);
 
     // 世界元数据 I/O
-    bool readWorldJson(uint32_t& outSeed, PlayerSaveData& outPlayer);
-    void writeWorldJson(uint32_t seed, const PlayerSaveData& player);
+    bool readWorldJson(uint64_t& outSeed, PlayerSaveData& outPlayer);
+    void writeWorldJson(uint64_t seed, const PlayerSaveData& player);
 
     // TLV 编解码
     static void encodeChunkTLV(const glm::ivec2& pos, const BlockState* buf,

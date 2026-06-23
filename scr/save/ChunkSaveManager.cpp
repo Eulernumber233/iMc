@@ -79,7 +79,12 @@ std::vector<WorldInfo> ChunkSaveManager::listWorlds(const std::string& savesRoot
         WorldInfo info;
         info.name = fd.cFileName;
         info.path = worldPath;
-        info.seed = root.get("seed", 0).asUInt();
+        Json::Value seedVal = root["seed"];
+        if (seedVal.isString()) {
+            info.seed = std::stoull(seedVal.asString());
+        } else {
+            info.seed = seedVal.asUInt();
+        }
         info.lastPlayed = (uint64_t)root.get("lastPlayed", 0).asUInt();
         result.push_back(info);
     } while (FindNextFileA(hFind, &fd));
@@ -90,7 +95,7 @@ std::vector<WorldInfo> ChunkSaveManager::listWorlds(const std::string& savesRoot
 
 // ====================== 世界创建 / 打开 ======================
 
-bool ChunkSaveManager::createWorld(const std::string& worldName, uint32_t seed) {
+bool ChunkSaveManager::createWorld(const std::string& worldName, uint64_t seed) {
     if (m_worldOpen) closeWorld();
 
     m_worldPath = m_savesRoot + "/" + worldName;
@@ -159,7 +164,7 @@ void ChunkSaveManager::closeWorld() {
 
 bool ChunkSaveManager::loadPlayerState(PlayerSaveData& outData) {
     if (!m_worldOpen) return false;
-    uint32_t seed;
+    uint64_t seed;
     return readWorldJson(seed, outData);
 }
 
@@ -270,7 +275,7 @@ RegionFile* ChunkSaveManager::getOrOpenRegion(int regionX, int regionZ) {
 
 // ====================== world.json I/O ======================
 
-bool ChunkSaveManager::readWorldJson(uint32_t& outSeed, PlayerSaveData& outPlayer) {
+bool ChunkSaveManager::readWorldJson(uint64_t& outSeed, PlayerSaveData& outPlayer) {
     std::string path = m_worldPath + "/world.json";
     std::ifstream ifs(path);
     if (!ifs.good()) return false;
@@ -284,7 +289,13 @@ bool ChunkSaveManager::readWorldJson(uint32_t& outSeed, PlayerSaveData& outPlaye
         return false;
     }
 
-    outSeed = root.get("seed", 0).asUInt();
+    // 向前兼容：旧存档用数字，新存档用字符串（64-bit）
+    Json::Value seedVal = root["seed"];
+    if (seedVal.isString()) {
+        outSeed = std::stoull(seedVal.asString());
+    } else {
+        outSeed = seedVal.asUInt();
+    }
     outPlayer.posX   = (float)root.get("playerX", 0.0).asDouble();
     outPlayer.posY   = (float)root.get("playerY", 217.6).asDouble();
     outPlayer.posZ   = (float)root.get("playerZ", 0.0).asDouble();
@@ -293,11 +304,11 @@ bool ChunkSaveManager::readWorldJson(uint32_t& outSeed, PlayerSaveData& outPlaye
     return true;
 }
 
-void ChunkSaveManager::writeWorldJson(uint32_t seed, const PlayerSaveData& player) {
+void ChunkSaveManager::writeWorldJson(uint64_t seed, const PlayerSaveData& player) {
     std::string path = m_worldPath + "/world.json";
 
     Json::Value root;
-    root["seed"] = seed;
+    root["seed"] = std::to_string(seed);
     root["playerX"] = player.posX;
     root["playerY"] = player.posY;
     root["playerZ"] = player.posZ;

@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <vector>
+#include <cstdint>
 
 // 地形生成参数
 struct TerrainParams {
@@ -15,7 +16,7 @@ struct TerrainParams {
 	float grassLevel = 0.7f;       // 草地层深度
     float dirtDepth = 0.65f;        // 泥土层深度
     float stoneDepth = 0.60f;      // 石头层深度
-    unsigned int seed = 11242342;     // 随机种子
+    uint64_t seed = 11242342;     // 随机种子
 };
 
 // 连续地形生成器
@@ -25,7 +26,7 @@ public:
     ~TerrainGenerator();
 
     // 设置种子
-    void setSeed(unsigned int seed);
+    void setSeed(uint64_t seed);
 
     // 线程安全：直接把方块写到外部 buffer。
     // dst 大小必须为 ChunkConstants::CHUNK_VOLUME，

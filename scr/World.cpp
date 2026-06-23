@@ -12,7 +12,7 @@
 #include <chrono>
 
 World::World(GLFWwindow* window_, const std::string& worldName,
-             uint32_t seed, bool isNewWorld)
+             uint64_t seed, bool isNewWorld)
     : m_window(window_), m_seed(seed), m_worldName(worldName), m_isNewWorld(isNewWorld)
 {
     // 初始化存档管理器
@@ -75,8 +75,8 @@ int World::run() {
 
     // 初始化区块管理器（半径从 runtime config 读，方便不重编调参）
     m_chunkManager = std::make_shared<ChunkManager>(m_seed);
-    //m_chunkManager->setSaveManager(m_saveManager.get());
-    m_chunkManager->setSaveManager(nullptr);
+    m_chunkManager->setSaveManager(m_saveManager.get());
+    //m_chunkManager->setSaveManager(nullptr);
     m_chunkManager->initialize(RuntimeConfig::get().renderRadius, m_player->getCamera()->Position);
     m_chunkManager->printStats();
 

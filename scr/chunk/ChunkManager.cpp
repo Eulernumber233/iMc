@@ -27,7 +27,7 @@ namespace {
     }
 }
 
-ChunkManager::ChunkManager(unsigned int seed)
+ChunkManager::ChunkManager(uint64_t seed)
     : m_renderRadius(8) {
     m_generator = std::make_shared<TerrainGenerator>();
     m_generator->setSeed(seed);

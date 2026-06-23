@@ -1,4 +1,5 @@
 ﻿#pragma once
+#include <cstdint>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -30,7 +31,7 @@ class ChunkSaveManager;
 
 class ChunkManager {
 public:
-    ChunkManager(unsigned int seed);
+    ChunkManager(uint64_t seed);
     ~ChunkManager();
 
     void initialize(int renderRadius, const glm::vec3& cameraPos);

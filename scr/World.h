@@ -15,7 +15,7 @@ class World
 {
 public:
     World(GLFWwindow* window_, const std::string& worldName,
-          uint32_t seed, bool isNewWorld);
+          uint64_t seed, bool isNewWorld);
     ~World();
 
     int run();
@@ -36,7 +36,7 @@ public:
 
 private:
     GLFWwindow* m_window;
-    unsigned int m_seed;
+    uint64_t m_seed;
     std::string m_worldName;
     bool m_isNewWorld;
 

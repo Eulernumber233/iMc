@@ -10,6 +10,7 @@ extern "C" { __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 #include <thread>
 #include <chrono>
 #include <ctime>
+#include <random>
 #include <unordered_set>
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #define ENET_IMPLEMENTATION
@@ -77,6 +78,16 @@ void clearAll(GLFWwindow* window) {
     glfwTerminate();
 }
 
+// FNV-1a 64-bit 哈希，将任意字符串映射为种子
+static uint64_t hashStringToSeed(const std::string& s) {
+    uint64_t h = 14695981039346656037ULL;
+    for (char c : s) {
+        h ^= (uint64_t)(unsigned char)c;
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
 int main() {
     srand(13);
 
@@ -84,7 +95,7 @@ int main() {
     // Phase 1: CLI 世界选择 / 创建
     // ==============================
     std::string worldName;
-    uint32_t seed = 0;
+    uint64_t seed = 0;
     bool isNewWorld = false;
 
     std::cout << "=== iMc 体素引擎 ===" << std::endl;
@@ -154,21 +165,20 @@ int main() {
             }
         }
 
-        std::cout << "请输入种子 (0 = 随机, 直接回车 = 随机): ";
+        std::cout << "请输入种子 (直接回车 = 随机): ";
         {
             std::string seedLine;
             std::getline(std::cin, seedLine);
             if (seedLine.empty()) {
-                seed = 0;
+                std::random_device rd;
+                uint32_t lo = (uint32_t)rd();
+                uint32_t hi = (uint32_t)rd();
+                seed = ((uint64_t)hi << 32) | lo;
+                std::cout << "随机种子: " << seed << std::endl;
             } else {
-                try { seed = (uint32_t)std::stoul(seedLine); }
-                catch (...) { seed = 0; }
+                seed = hashStringToSeed(seedLine);
+                std::cout << "种子: " << seed << " (来自 \"" << seedLine << "\")" << std::endl;
             }
-        }
-        if (seed == 0) {
-            seed = (uint32_t)std::chrono::system_clock::now()
-                       .time_since_epoch().count();
-            std::cout << "随机种子: " << seed << std::endl;
         }
         isNewWorld = true;
     }

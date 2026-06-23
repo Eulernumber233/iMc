@@ -7,7 +7,7 @@
 #include <iostream>
 
 struct TerrainGenerator::Impl {
-    unsigned int seed = 0;
+    uint64_t seed = 0;
 
     float generateTerrainNoise(int worldX, int worldZ) const {
         const float fx = static_cast<float>(worldX);
@@ -47,7 +47,7 @@ TerrainGenerator::TerrainGenerator()
 
 TerrainGenerator::~TerrainGenerator() = default;
 
-void TerrainGenerator::setSeed(unsigned int seed) {
+void TerrainGenerator::setSeed(uint64_t seed) {
     m_params.seed = seed;
     m_impl->seed = seed;
 }
