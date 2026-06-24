@@ -87,6 +87,9 @@ public:
     GLuint LoadTexture2DManual(const std::string& name, const std::string& path, bool isSRGB = false);
     GLuint LoadTextureCubeManual(const std::string& name, const std::vector<std::string>& faces);
 
+    // 新 GL 上下文时清空所有缓存纹理 ID，下次访问时重新加载
+    void resetForNewGLContext();
+
     // 新增接口
     GLuint GetTextureArray() const { return m_textureArray; }
     int GetTextureLayerIndex(const std::string& name) const {

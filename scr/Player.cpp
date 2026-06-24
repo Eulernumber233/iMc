@@ -42,7 +42,9 @@ Player::Player(std::shared_ptr<Camera> camera, GLFWwindow* window)
     updateCameraPosition();
 }
 
-void Player::initialize() {
+void Player::initialize(UIManager& uiManager) {
+    m_uiManager = &uiManager;
+
     // 初始化物品栏
     initHotbarItems();
 
@@ -61,7 +63,7 @@ void Player::initialize() {
         else m_hotbar->setSlotItem(i, m_hotbarItems[i]->getIconTextureName());
     }
     // 注册到UI管理器
-    UIManager::getInstance().addComponent(m_hotbar);
+    m_uiManager->addComponent(m_hotbar);
 
     // 创建并加载玩家模型
     m_model = std::make_unique<PlayerModel>();

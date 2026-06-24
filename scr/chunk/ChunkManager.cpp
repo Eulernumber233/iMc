@@ -174,6 +174,13 @@ std::vector<glm::ivec2> ChunkManager::getActiveChunkPositions() const {
     return ret;
 }
 
+std::vector<glm::ivec2> ChunkManager::getLoadedChunkPositions() const {
+    std::vector<glm::ivec2> ret;
+    ret.reserve(m_loadedChunks.size());
+    for (auto& kv : m_loadedChunks) ret.push_back(kv.second->getPosition());
+    return ret;
+}
+
 void ChunkManager::setRenderRadius(int radius) {
     if (radius > 0 && radius != m_renderRadius) {
         m_renderRadius = radius;
@@ -263,6 +270,9 @@ void ChunkManager::evictFarChunkSlots() {
 }
 
 void ChunkManager::requestMissingChunks() {
+    // 网络客户端：不进行地形生成，chunk 由 importChunkData 提供
+    if (m_networkClient) return;
+
     // 优先靠近相机中心：用曼哈顿距离逐圈扩散；扫描到 stitch 预加载半径以填外圈陪练。
     const int loadR = m_renderRadius + STITCH_PRELOAD_MARGIN;
     bool foundMissing = false;
@@ -292,6 +302,31 @@ void ChunkManager::requestChunkLoad(const glm::ivec2& chunkPos) {
     if (m_inFlight.find(key) != m_inFlight.end()) return;
     m_inFlight.insert(key);
     m_workerPool.submit(chunkPos);
+}
+
+void ChunkManager::importChunkData(int chunkX, int chunkZ,
+                                   std::unique_ptr<BlockState[]> blockBuffer) {
+    glm::ivec2 pos(chunkX, chunkZ);
+    ChunkKey key = chunkPosToKey(pos);
+
+    // 跳过已存在或已在加载的 chunk
+    if (m_loadedChunks.find(key) != m_loadedChunks.end()) {
+        printf("[ChunkManager] importChunkData: (%d,%d) already loaded, skip\n", chunkX, chunkZ);
+        return;
+    }
+    if (m_pendingChunks.find(key) != m_pendingChunks.end()) {
+        printf("[ChunkManager] importChunkData: (%d,%d) already pending, skip\n", chunkX, chunkZ);
+        return;
+    }
+    if (m_inFlight.find(key) != m_inFlight.end()) {
+        printf("[ChunkManager] importChunkData: (%d,%d) already in-flight, skip\n", chunkX, chunkZ);
+        return;
+    }
+
+    m_inFlight.insert(key);
+    m_workerPool.submitImport(pos, std::move(blockBuffer));
+    printf("[ChunkManager] importChunkData: (%d,%d) submitted, inflight=%zu\n",
+        chunkX, chunkZ, m_inFlight.size());
 }
 
 Chunk* ChunkManager::getPendingChunk(const glm::ivec2& chunkPos) {
@@ -369,10 +404,32 @@ void ChunkManager::linkNeighbors(Chunk* newChunk) {
     newChunk->m_neighbors[2] = zp;
     newChunk->m_neighbors[3] = zn;
 
-    if (xp) xp->m_neighbors[1] = newChunk;
-    if (xn) xn->m_neighbors[0] = newChunk;
-    if (zp) zp->m_neighbors[3] = newChunk;
-    if (zn) zn->m_neighbors[2] = newChunk;
+    // 连接邻居时，若对端之前因无邻居而提前标了 stitch done，现在邻居出现了，
+    // 需要复位该方向的 done（只复位仍在 pending 中的 chunk，loaded 不参与 stitch）。
+    if (xp) {
+        if (xp->isStitchDone(1) && m_pendingChunks.find(chunkPosToKey(xp->getPosition())) != m_pendingChunks.end()) {
+            xp->m_stitchDone &= ~(1u << 1);
+        }
+        xp->m_neighbors[1] = newChunk;
+    }
+    if (xn) {
+        if (xn->isStitchDone(0) && m_pendingChunks.find(chunkPosToKey(xn->getPosition())) != m_pendingChunks.end()) {
+            xn->m_stitchDone &= ~(1u << 0);
+        }
+        xn->m_neighbors[0] = newChunk;
+    }
+    if (zp) {
+        if (zp->isStitchDone(3) && m_pendingChunks.find(chunkPosToKey(zp->getPosition())) != m_pendingChunks.end()) {
+            zp->m_stitchDone &= ~(1u << 3);
+        }
+        zp->m_neighbors[3] = newChunk;
+    }
+    if (zn) {
+        if (zn->isStitchDone(2) && m_pendingChunks.find(chunkPosToKey(zn->getPosition())) != m_pendingChunks.end()) {
+            zn->m_stitchDone &= ~(1u << 2);
+        }
+        zn->m_neighbors[2] = newChunk;
+    }
 }
 
 void ChunkManager::trySubmitStitchJobs(Chunk* chunk) {
@@ -392,7 +449,11 @@ void ChunkManager::trySubmitStitchJobs(Chunk* chunk) {
     for (int d = 0; d < 4; ++d) {
         if (chunk->isStitchDone(d) || chunk->isStitchPending(d)) continue;
         Chunk* nb = chunk->m_neighbors[d];
-        if (!nb) continue;
+        if (!nb) {
+            // 无邻居：网络客户端可能在已加载区域边缘，或邻居尚未导入。
+            // 暂不处理（也不标 done），等邻居出现后 linkNeighbors 会连通。
+            continue;
+        }
         // loaded 邻居：见函数注释，按 done 处理。
         if (m_loadedChunks.find(chunkPosToKey(nb->getPosition())) != m_loadedChunks.end()) {
             chunk->markStitchDone(d);
@@ -477,7 +538,28 @@ void ChunkManager::promoteIfReady(const glm::ivec2& chunkPos) {
     auto it = m_pendingChunks.find(chunkPosToKey(chunkPos));
     if (it == m_pendingChunks.end()) return;
     Chunk* raw = it->second.get();
-    if (!raw->allStitchDone()) return;
+
+    // 检查 4 方向是否全部 stitch done。
+    // 网络客户端模式下，无邻居的方向也视作完成（外侧全空气，打开边界面即可）。
+    static const BlockFace dirToFace[4] = { RIGHT, LEFT, FRONT, BACK };
+    bool ready = true;
+    for (int d = 0; d < 4; ++d) {
+        if (!raw->isStitchDone(d) && raw->m_neighbors[d] != nullptr) {
+            ready = false;
+            break;
+        }
+    }
+    if (!ready) return;
+
+    // 无邻居的方向：打开边界面（外侧视为全空气）
+    for (int d = 0; d < 4; ++d) {
+        if (!raw->isStitchDone(d) && raw->m_neighbors[d] == nullptr) {
+            raw->openBoundaryFace(dirToFace[d]);
+            raw->markStitchDone(d);
+        }
+    }
+
+    if (!raw->allStitchDone()) return;  // 安全断言，理论上不会到此
 
     // 4 方向都 stitch 完毕 → 晋升。
     auto node = m_pendingChunks.extract(it);

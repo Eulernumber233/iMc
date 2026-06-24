@@ -7,24 +7,28 @@
 #include "save/ChunkSaveManager.h"
 #include "RuntimeConfig.h"
 #include "Profiler.h"
+#include "net/NetManager.h"
 #include <iostream>
 #include <thread>
 #include <chrono>
 
 World::World(GLFWwindow* window_, const std::string& worldName,
-             uint64_t seed, bool isNewWorld)
-    : m_window(window_), m_seed(seed), m_worldName(worldName), m_isNewWorld(isNewWorld)
+             uint64_t seed, bool isNewWorld, NetMode netMode)
+    : m_window(window_), m_seed(seed), m_worldName(worldName), m_isNewWorld(isNewWorld),
+      m_netMode(netMode)
 {
-    // 初始化存档管理器
-    m_saveManager = std::make_unique<ChunkSaveManager>();
-    if (isNewWorld) {
-        m_saveManager->createWorld(worldName, seed);
-    } else {
-        if (!m_saveManager->openWorld(worldName)) {
-            std::cerr << "[World] 加载存档失败，将创建新世界\n";
+    // Join 模式不创建存档：种子由服务端分发，客户端不需要本地持久化
+    if (netMode != NetMode::Join) {
+        m_saveManager = std::make_unique<ChunkSaveManager>();
+        if (isNewWorld) {
             m_saveManager->createWorld(worldName, seed);
         } else {
-            m_seed = m_saveManager->getSeed();
+            if (!m_saveManager->openWorld(worldName)) {
+                std::cerr << "[World] 加载存档失败，将创建新世界\n";
+                m_saveManager->createWorld(worldName, seed);
+            } else {
+                m_seed = m_saveManager->getSeed();
+            }
         }
     }
 
@@ -45,6 +49,36 @@ World::World(GLFWwindow* window_, const std::string& worldName,
     glfwSetInputMode(m_window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 }
 
+bool World::setupNetworking(NetMode mode, uint16_t port,
+                            const std::string& joinAddress) {
+    m_netMode = mode;
+    if (mode == NetMode::None) return true;
+
+    m_netManager = std::make_unique<NetManager>();
+
+    if (mode == NetMode::Host) {
+        if (!m_netManager->host(port, m_worldName, static_cast<uint32_t>(m_seed))) {
+            std::cerr << "[World] Failed to host on port " << port << std::endl;
+            m_netManager.reset();
+            m_netMode = NetMode::None;
+            return false;
+        }
+        std::cout << "[World] Hosting on port " << port << std::endl;
+    } else if (mode == NetMode::Join) {
+        if (!m_netManager->join(joinAddress, port, "Player")) {
+            std::cerr << "[World] Failed to join " << joinAddress << ":" << port << std::endl;
+            m_netManager.reset();
+            m_netMode = NetMode::None;
+            return false;
+        }
+        // 使用服务端分配的种子
+        m_seed = m_netManager->getWorldSeed();
+        std::cout << "[World] Joined " << joinAddress << ":" << port
+                  << " (seed=" << m_seed << ")" << std::endl;
+    }
+    return true;
+}
+
 World::~World() {
     // 清理资源
     if (m_renderSystem) {
@@ -55,8 +89,7 @@ World::~World() {
 }
 
 int World::run() {
-    // 初始化纹理管理器
-    TextureMgr::GetInstance();
+    // 纹理已在持久化 GL 上下文中加载，所有窗口共享，无需重复加载
     BlockFaceType::init_type_map();
 
     // 初始化渲染系统
@@ -75,10 +108,54 @@ int World::run() {
 
     // 初始化区块管理器（半径从 runtime config 读，方便不重编调参）
     m_chunkManager = std::make_shared<ChunkManager>(m_seed);
-    m_chunkManager->setSaveManager(m_saveManager.get());
-    //m_chunkManager->setSaveManager(nullptr);
+
+    // 网络客户端：必须在 initialize 之前设置，否则 initialize 会走本地地形生成
+    if (m_netMode == NetMode::Join) {
+        m_chunkManager->setNetworkClient(true);
+        m_chunkManager->setSaveManager(nullptr);  // 客户端不需要存档
+    } else {
+        m_chunkManager->setSaveManager(m_saveManager.get());
+    }
     m_chunkManager->initialize(RuntimeConfig::get().renderRadius, m_player->getCamera()->Position);
     m_chunkManager->printStats();
+
+    // 网络：连接 ChunkManager（必须在 ChunkManager 创建后）
+    if (m_netManager) {
+        m_netManager->setChunkManager(m_chunkManager.get());
+
+        // 服务端：处理在初始化期间连接的客户端（着色器编译等耗时操作
+        // 可能持续数秒，客户端在此期间发送 JOIN_REQUEST 会超时）
+        // 使用时间循环而非固定次数，给予 ENET 握手往返足够的间隔
+        if (m_netMode == NetMode::Host) {
+            std::cout << "[World] Servicing pending connections..." << std::endl;
+            auto start = std::chrono::steady_clock::now();
+            while (std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::steady_clock::now() - start).count() < 800) {
+                m_netManager->update();
+                // 每轮 update 后短暂 yield，让对端有时间响应握手
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            std::cout << "[World] Connection service done, players="
+                      << m_netManager->getPlayers().size() << std::endl;
+        }
+
+        // 客户端：快速消化服务端推送的初始地形数据
+        if (m_netMode == NetMode::Join) {
+            std::cout << "[World] Receiving initial chunk data..." << std::endl;
+            auto start = std::chrono::steady_clock::now();
+            while (std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::steady_clock::now() - start).count() < 5000) {
+                m_netManager->update();
+                m_chunkManager->update(m_player->getCamera());
+                // 中心 3x3 loaded 即可开始游戏（出生点所在 chunk + 周围一圈）
+                if (m_chunkManager->getLoadedChunkCount() >= 9) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            std::cout << "[World] Initial sync done, loaded chunks="
+                      << m_chunkManager->getLoadedChunkCount()
+                      << ", inflight=" << m_chunkManager->getInFlightCount() << std::endl;
+        }
+    }
 
     // 读档：加载玩家位置（存档已有出生点，无需重新计算）
     if (!m_isNewWorld) {
@@ -90,7 +167,7 @@ int World::run() {
     }
 
     // 初始化玩家
-    m_player->initialize();
+    m_player->initialize(renderSystem.getUIManager());
 
     // 设置方块选择回调
     m_player->setOnBlockSelectedCallback([&renderSystem](const glm::ivec3& blockPos) {
@@ -116,9 +193,23 @@ int World::run() {
         // 显示FPS
         showFPS();
 
+        // 网络：帧首 poll + dispatch
+        if (m_netManager) {
+            m_netManager->update();
+        }
+
         // 更新玩家状态（包括移动、交互等）
         m_player->update(deltaTime, *m_chunkManager, renderSystem);
         auto camera = m_player->getCamera();
+
+        // 网络：同步本地玩家位置到 NetState
+        if (m_netManager && (m_netMode == NetMode::Host || m_netMode == NetMode::Join)) {
+            auto* netState = m_netManager->getLocalNetState();
+            if (netState) {
+                netState->setPosition(camera->Position);
+                netState->setLook(camera->Yaw, camera->Pitch);
+            }
+        }
 
         // 更新区块管理器（根据玩家位置更新可见区块）
         m_chunkManager->update(camera);
@@ -175,7 +266,6 @@ int World::run() {
         m_saveManager->closeWorld();
     }
 
-    glfwTerminate();
     return 0;
 }
 

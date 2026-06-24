@@ -2,6 +2,7 @@
 #include "Camera.h"
 #include "Item.h"
 #include "UI/UIHotbar.h"
+#include "UI/UIManager.h"
 #include "collision/AABB.h"
 #include "collision/PhysicsConstants.h"
 #include "Data.h"
@@ -23,7 +24,7 @@ public:
     Player(std::shared_ptr<Camera> camera, GLFWwindow* window);
 
     // 初始化
-    void initialize();
+    void initialize(UIManager& uiManager);
 
     // 更新玩家状态（包括物理更新）
     void update(float deltaTime, ChunkManager& chunkManager, RenderSystem& renderSystem);
@@ -143,6 +144,7 @@ private:
     // 摄像机
     std::shared_ptr<Camera> m_camera;
     GLFWwindow* m_window;
+    UIManager* m_uiManager = nullptr;
 
     // 模型与动画器
     std::unique_ptr<PlayerModel> m_model;

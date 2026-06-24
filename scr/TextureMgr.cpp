@@ -1,4 +1,5 @@
 ﻿#include "TextureMgr.h"
+#include "RuntimeConfig.h"
 
 std::shared_ptr<TextureMgr> TextureMgr::m_instance = nullptr;
 
@@ -55,7 +56,8 @@ GLint TextureMgr::getGLenumFromStr(const std::string& str) {
 
 GLuint TextureMgr::loadTexture2D(const Texture2DConfig& config) {
     if (m_textures2D.find(config.name) != m_textures2D.end()) {
-        std::cout << "纹理[" << config.name << "]已存在，返回现有ID" << std::endl;
+        if (RuntimeConfig::get().verboseTextureLoading)
+            std::cout << "[TextureMgr] " << config.name << " 已缓存" << std::endl;
         return m_textures2D[config.name];
     }
 
@@ -63,7 +65,8 @@ GLuint TextureMgr::loadTexture2D(const Texture2DConfig& config) {
     int width, height, nrChannels;
     unsigned char* data = stbi_load(fullPath.c_str(), &width, &height, &nrChannels, 4); // 强制RGBA
     if (!data) {
-        std::cerr << "纹理加载失败：" << fullPath << std::endl;
+        if (RuntimeConfig::get().verboseTextureLoading)
+            std::cerr << "纹理加载失败：" << fullPath << std::endl;
         return 0;
     }
 
@@ -104,13 +107,15 @@ GLuint TextureMgr::loadTexture2D(const Texture2DConfig& config) {
     m_textures2D[config.name] = texID;
 
     stbi_image_free(data);
-    std::cout << "2D纹理加载成功：" << config.name << " (" << fullPath << ")" << std::endl;
+    if (RuntimeConfig::get().verboseTextureLoading)
+        std::cout << "[TextureMgr] 2D纹理加载: " << config.name << " (" << fullPath << ")" << std::endl;
     return texID;
 }
 
 GLuint TextureMgr::loadTextureCube(const CubeTextureConfig& config) {
     if (m_texturesCube.find(config.name) != m_texturesCube.end()) {
-        std::cout << "立方体贴图[" << config.name << "]已存在，返回现有ID" << std::endl;
+        if (RuntimeConfig::get().verboseTextureLoading)
+            std::cout << "[TextureMgr] 立方体贴图 " << config.name << " 已缓存" << std::endl;
         return m_texturesCube[config.name];
     }
 
@@ -133,7 +138,8 @@ GLuint TextureMgr::loadTextureCube(const CubeTextureConfig& config) {
         int w, h, ch;
         unsigned char* data = stbi_load(fullPath.c_str(), &w, &h, &ch, 4);
         if (!data) {
-            std::cerr << "立方体贴图面加载失败：" << fullPath << std::endl;
+            if (RuntimeConfig::get().verboseTextureLoading)
+                std::cerr << "立方体贴图面加载失败：" << fullPath << std::endl;
             loadSuccess = false;
             stbi_image_free(data);
             break;
@@ -159,7 +165,8 @@ GLuint TextureMgr::loadTextureCube(const CubeTextureConfig& config) {
     glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
 
     m_texturesCube[config.name] = texID;
-    std::cout << "立方体贴图加载成功：" << config.name << std::endl;
+    if (RuntimeConfig::get().verboseTextureLoading)
+        std::cout << "[TextureMgr] 立方体贴图: " << config.name << std::endl;
     return texID;
 }
 
@@ -193,7 +200,8 @@ void TextureMgr::parseConfig() {
                 texConfig.name = item.get("name", "").asString();
                 texConfig.path = item.get("path", "").asString();
                 if (texConfig.name.empty() || texConfig.path.empty()) {
-                    std::cerr << "警告：第" << i + 1 << "个2D纹理缺少name或path，跳过" << std::endl;
+                    if (RuntimeConfig::get().verboseTextureLoading)
+                        std::cerr << "Warning: 2D texture #" << (i + 1) << " missing name or path, skipped" << std::endl;
                     continue;
                 }
 
@@ -244,7 +252,8 @@ void TextureMgr::parseConfig() {
                     }
                 }
                 if (cubeConfig.name.empty() || cubeConfig.faces.size() != 6) {
-                    std::cerr << "警告：立方体贴图[" << cubeConfig.name << "]无效，跳过" << std::endl;
+                    if (RuntimeConfig::get().verboseTextureLoading)
+                        std::cerr << "Warning: cube texture [" << cubeConfig.name << "] invalid, skipped" << std::endl;
                     continue;
                 }
                 std::string wrapS = item.isMember("wrap_s") ? item["wrap_s"].asString() : "clamp_to_edge";
@@ -273,7 +282,8 @@ void TextureMgr::parseConfig() {
             std::string firstPath = m_basePath + blockConfigs[0].path;
             unsigned char* firstData = stbi_load(firstPath.c_str(), &texWidth, &texHeight, nullptr, 4);
             if (!firstData) {
-                std::cerr << "无法加载第一个方块纹理：" << firstPath << std::endl;
+                if (RuntimeConfig::get().verboseTextureLoading)
+                    std::cerr << "Failed to load first block texture: " << firstPath << std::endl;
             }
             else {
                 stbi_image_free(firstData);
@@ -296,7 +306,8 @@ void TextureMgr::parseConfig() {
                         indexUsed[idx] = true;
                     }
                     else {
-                        std::cerr << "警告：方块纹理 " << blockConfigs[i].name << " 指定的 index " << idx << " 已被占用，将自动分配" << std::endl;
+                        if (RuntimeConfig::get().verboseTextureLoading)
+                            std::cerr << "Warning: index " << idx << " for block texture " << blockConfigs[i].name << " already taken, auto-assigning" << std::endl;
                     }
                 }
             }
@@ -318,12 +329,14 @@ void TextureMgr::parseConfig() {
                 int w, h, ch;
                 unsigned char* data = stbi_load(fullPath.c_str(), &w, &h, &ch, 4);
                 if (!data) {
-                    std::cerr << "方块纹理加载失败：" << fullPath << std::endl;
+                    if (RuntimeConfig::get().verboseTextureLoading)
+                        std::cerr << "Block texture load failed: " << fullPath << std::endl;
                     continue;
                 }
 
                 if (w != texWidth || h != texHeight) {
-                    std::cerr << "错误：方块纹理 " << config.name << " 尺寸 (" << w << "x" << h << ") 与第一个纹理不一致，跳过" << std::endl;
+                    if (RuntimeConfig::get().verboseTextureLoading)
+                        std::cerr << "Error: block texture " << config.name << " size (" << w << "x" << h << ") mismatch, skipped" << std::endl;
                     stbi_image_free(data);
                     continue;
                 }
@@ -358,7 +371,8 @@ void TextureMgr::parseConfig() {
                 m_textureLayerIndex[config.name] = layer;
 
                 stbi_image_free(data);
-                std::cout << "方块纹理加载成功：" << config.name << " 层索引 " << layer << std::endl;
+                if (RuntimeConfig::get().verboseTextureLoading)
+                    std::cout << "[TextureMgr] 方块纹理: " << config.name << " layer=" << layer << std::endl;
             }
 
             // 设置纹理数组过滤为最近邻 mipmap 最近邻
@@ -375,11 +389,13 @@ void TextureMgr::parseConfig() {
             loadTextureCube(config);
         }
 
-        std::cout << "纹理配置文件解析完成，共加载2D纹理：" << m_textures2D.size()
-            << "个，立方体贴图：" << m_texturesCube.size() << "个" << std::endl;
+        if (RuntimeConfig::get().verboseTextureLoading)
+            std::cout << "[TextureMgr] parseConfig 完成: 2D=" << m_textures2D.size()
+                << " Cube=" << m_texturesCube.size() << std::endl;
     }
     catch (const std::exception& e) {
-        std::cerr << "解析纹理配置文件失败：" << e.what() << std::endl;
+        if (RuntimeConfig::get().verboseTextureLoading)
+            std::cerr << "Texture config parse failed: " << e.what() << std::endl;
     }
 }
 
@@ -411,6 +427,19 @@ GLuint TextureMgr::LoadTextureCubeManual(const std::string& name, const std::vec
     config.name = name;
     config.faces = faces;
     return loadTextureCube(config);
+}
+
+void TextureMgr::resetForNewGLContext() {
+    // 不删除 GL 纹理（旧上下文可能已销毁），仅清空映射表
+    m_textures2D.clear();
+    m_texturesCube.clear();
+    m_textureInfos.clear();
+    m_textureLayerIndex.clear();
+    m_textureArray = 0;
+    // 重新解析配置文件，加载所有纹理到新 GL 上下文
+    parseConfig();
+    if (RuntimeConfig::get().verboseTextureLoading)
+        std::cout << "[TextureMgr] 纹理映射已重置, 2D=" << m_textures2D.size() << std::endl;
 }
 
 TextureMgr::~TextureMgr() {

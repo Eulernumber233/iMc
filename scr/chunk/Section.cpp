@@ -209,3 +209,13 @@ void Section::adoptFrom(Section&& other) {
     m_fullRebuildPending = true;
     // reserve 由 worker 端在 rebuildVisibilityInternal 内做（避免主线程在 adopt 时的堆分配尖峰）
 }
+
+void Section::readAllBlocks(std::vector<BlockState>& out) const {
+    out.resize(VOLUME);
+    std::memcpy(out.data(), m_blocks->data(), VOLUME * sizeof(BlockState));
+}
+
+void Section::writeAllBlocks(const std::vector<BlockState>& data) {
+    std::memcpy(m_blocks->data(), data.data(),
+        std::min(data.size(), (size_t)VOLUME) * sizeof(BlockState));
+}

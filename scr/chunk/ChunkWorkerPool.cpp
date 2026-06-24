@@ -63,15 +63,26 @@ void ChunkWorkerPool::submit(const glm::ivec2& pos) {
 void ChunkWorkerPool::submitStitch(Chunk* a, Chunk* b, uint8_t dirAtoB) {
     {
         std::lock_guard<std::mutex> lk(m_jobMutex);
-        Job j; 
-        j.kind = JOB_STITCH; 
-        j.a = a; 
-        j.b = b; 
+        Job j;
+        j.kind = JOB_STITCH;
+        j.a = a;
+        j.b = b;
         j.dirAtoB = dirAtoB;
-        // 平等排队 —— stitch / build 不抢插队优先级；前面把 stitch push_front 反而会让
-        // build 长期排不到位，玩家高速移动时新区块迟迟不显示。
         m_jobs.push_back(std::move(j));
     }
+    m_jobCV.notify_one();
+}
+
+void ChunkWorkerPool::submitImport(const glm::ivec2& pos, std::unique_ptr<BlockState[]> buffer) {
+    {
+        std::lock_guard<std::mutex> lk(m_jobMutex);
+        Job j;
+        j.kind = JOB_IMPORT;
+        j.pos = pos;
+        j.importBuffer = std::move(buffer);
+        m_jobs.push_back(std::move(j));
+    }
+    m_pending.fetch_add(1, std::memory_order_relaxed);
     m_jobCV.notify_one();
 }
 
@@ -107,7 +118,7 @@ void ChunkWorkerPool::workerMain() {
             std::unique_lock<std::mutex> lk(m_jobMutex);
             m_jobCV.wait(lk, [this] { return m_stop.load() || !m_jobs.empty(); });
             if (m_stop.load() && m_jobs.empty()) return;
-            job = m_jobs.front();
+            job = std::move(m_jobs.front());
             m_jobs.pop_front();
         }
 
@@ -115,6 +126,17 @@ void ChunkWorkerPool::workerMain() {
             auto result = std::make_unique<ChunkBuildResult>();
             result->pos = job.pos;
             buildOne(job.pos, *result);
+
+            {
+                std::lock_guard<std::mutex> lk(m_buildDoneMutex);
+                m_buildDone.push_back(std::move(result));
+            }
+            m_pending.fetch_sub(1, std::memory_order_relaxed);
+        } else if (job.kind == JOB_IMPORT) {
+            auto result = std::make_unique<ChunkBuildResult>();
+            result->pos = job.pos;
+            importOne(job.pos, job.importBuffer.get(), *result);
+            job.importBuffer.reset();
 
             {
                 std::lock_guard<std::mutex> lk(m_buildDoneMutex);
@@ -169,6 +191,36 @@ void ChunkWorkerPool::buildOne(const glm::ivec2& pos, ChunkBuildResult& out) con
     }
 
     // 计算每个 section 的可见性（含垂直邻居 section；横向边界默认不可见）
+    for (int sy = 0; sy < ChunkBuildResult::SECTION_COUNT; ++sy) {
+        const Section* above = (sy + 1 < ChunkBuildResult::SECTION_COUNT)
+            ? &out.sections[sy + 1] : nullptr;
+        const Section* below = (sy > 0) ? &out.sections[sy - 1] : nullptr;
+        out.sections[sy].rebuildVisibilityInternal(above, below);
+    }
+}
+
+void ChunkWorkerPool::importOne(const glm::ivec2& pos, BlockState* buffer,
+                                ChunkBuildResult& out) const {
+    constexpr int W = ChunkConstants::CHUNK_WIDTH;
+    constexpr int H = ChunkConstants::CHUNK_HEIGHT;
+    constexpr int D = ChunkConstants::CHUNK_DEPTH;
+
+    // buffer 已由调用方预填充（网络接收），跳过地形生成
+    // 直接拷贝到 section + 重建可见性
+    for (int sy = 0; sy < ChunkBuildResult::SECTION_COUNT; ++sy) {
+        out.sections[sy].setCoords(pos.x, pos.y, sy);
+        BlockState* dst = out.sections[sy].stateData();
+        for (int y = 0; y < Section::HEIGHT; ++y) {
+            int worldY = sy * Section::HEIGHT + y;
+            for (int z = 0; z < D; ++z) {
+                for (int x = 0; x < W; ++x) {
+                    dst[(y * Section::DEPTH + z) * Section::WIDTH + x] =
+                        buffer[(worldY * D + z) * W + x];
+                }
+            }
+        }
+    }
+
     for (int sy = 0; sy < ChunkBuildResult::SECTION_COUNT; ++sy) {
         const Section* above = (sy + 1 < ChunkBuildResult::SECTION_COUNT)
             ? &out.sections[sy + 1] : nullptr;

@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "Shader.h"
 #include "Camera.h"
 #include "TextureMgr.h"
@@ -10,15 +10,26 @@
 #include <sstream>
 
 class ChunkSaveManager;
+class NetManager;
+
+enum class NetMode : uint8_t {
+    None,   // 单机
+    Host,   // 开房间
+    Join,   // 加入
+};
 
 class World
 {
 public:
     World(GLFWwindow* window_, const std::string& worldName,
-          uint64_t seed, bool isNewWorld);
+          uint64_t seed, bool isNewWorld, NetMode netMode = NetMode::None);
     ~World();
 
     int run();
+
+    // 设置联网模式（在构造后、run() 前调用），成功返回 true
+    bool setupNetworking(NetMode mode, uint16_t port = 0,
+                         const std::string& joinAddress = "");
 
     // 获取玩家对象
     std::shared_ptr<Player> getPlayer() const { return m_player; }
@@ -34,15 +45,24 @@ public:
     // 获取渲染系统
     RenderSystem* getRenderSystem() const { return m_renderSystem; }
 
+    // 获取网络管理器
+    NetManager* getNetManager() const { return m_netManager.get(); }
+    bool isNetHost() const { return m_netMode == NetMode::Host; }
+    bool isNetClient() const { return m_netMode == NetMode::Join; }
+
 private:
     GLFWwindow* m_window;
     uint64_t m_seed;
     std::string m_worldName;
     bool m_isNewWorld;
 
+    // 网络
+    NetMode m_netMode = NetMode::None;
+    std::unique_ptr<NetManager> m_netManager;
+
     // 存档管理器
     std::unique_ptr<ChunkSaveManager> m_saveManager;
-    bool m_spawnFound = false; // 出生点是否已计算（新世界需等区块(0,0)加载）
+    bool m_spawnFound = false;
 
     // 玩家对象
     std::shared_ptr<Player> m_player;
@@ -53,7 +73,7 @@ private:
     // 区块管理器
     std::shared_ptr<ChunkManager> m_chunkManager;
 
-    // 输入处理函数（转发给Player）
+    // 输入处理函数
     void processMouse(double xpos, double ypos);
     void processMouseButton(int button, int action);
     void processKey(int key, int action);
@@ -70,4 +90,3 @@ private:
     void showFPS();
     void RenderQuad();
 };
-

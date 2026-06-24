@@ -137,7 +137,7 @@ void UIHotbar::scroll(float yoffset) {
 }
 
 void UIHotbar::update(float deltaTime) { UIContainer::update(deltaTime); }
-void UIHotbar::render(const glm::mat4& projection) { UIContainer::render(projection); }
+void UIHotbar::render(const glm::mat4& projection, Shader& shader) { UIContainer::render(projection, shader); }
 
 void UIHotbar::setGuiScale(int scale) {
     m_guiScale = std::max(1, scale);

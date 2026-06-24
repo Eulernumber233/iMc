@@ -53,6 +53,7 @@ public:
     std::vector<glm::ivec2> getActiveChunkPositions() const;
     void setRenderRadius(int radius);
 
+    std::vector<glm::ivec2> getLoadedChunkPositions() const;
     int getLoadedChunkCount() const { return (int)m_loadedChunks.size(); }
     int getActiveChunkCount() const { return (int)m_activeChunks.size(); }
     int getInFlightCount() const { return (int)m_inFlight.size(); }
@@ -68,6 +69,14 @@ public:
     static SectionKey makeSectionKey(int chunkX, int chunkZ, int sectionY);
 
     uint32_t getVisibilityGeneration() const { return m_visGeneration; }
+
+    // 网络导入：从网络接收整个 chunk 的方块数据（绕过地形生成）
+    void importChunkData(int chunkX, int chunkZ,
+                         std::unique_ptr<BlockState[]> blockBuffer);
+
+    // 网络客户端模式：跳过地形生成，仅通过 importChunkData 获取地形
+    void setNetworkClient(bool v) { m_networkClient = v; }
+    bool isNetworkClient() const { return m_networkClient; }
 
     // 存档管理
     void setSaveManager(ChunkSaveManager* sm);
@@ -143,6 +152,9 @@ private:
     ChunkSaveManager* m_saveManager = nullptr;
     double m_lastSaveCheckTime = 0.0;
     float  m_autoSaveTimer = 0.0f;
+
+    // 网络客户端：跳过地形生成
+    bool m_networkClient = false;
 
     // 上次 requestMissingChunks 发现半径内全部就位后置 false，避免空扫
     bool m_needChunkScan = true;

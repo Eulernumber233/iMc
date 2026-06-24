@@ -36,18 +36,18 @@ void UIComponent::setRotation(float degrees) {
 
 glm::mat4 UIComponent::calculateTransform() const {
     glm::mat4 result = glm::mat4(1.0f);
-
     glm::vec2 finalPos = position - size * anchor;
     result = glm::translate(result, glm::vec3(finalPos, 0.0f));
-
     if (rotation != 0.0f) {
         result = glm::rotate(result, glm::radians(rotation), glm::vec3(0.0f, 0.0f, 1.0f));
     }
-
     result = glm::scale(result, glm::vec3(size, 1.0f));
-
     return result;
 }
+
+// ============================================================================
+// UIRect
+// ============================================================================
 
 GLuint UIRect::s_VAO = 0;
 GLuint UIRect::s_VBO = 0;
@@ -67,53 +67,51 @@ UIRect::~UIRect() {}
 
 void UIRect::initGeometry() {
     float vertices[] = {
-        // 位置        // 纹理坐标（Y翻转，因为纹理加载时不翻转）
-        0.0f, 1.0f,   0.0f, 0.0f,  // 左上
-        0.0f, 0.0f,   0.0f, 1.0f,  // 左下
-        1.0f, 0.0f,   1.0f, 1.0f,  // 右下
-        1.0f, 1.0f,   1.0f, 0.0f   // 右上
+        0.0f, 1.0f,   0.0f, 0.0f,
+        0.0f, 0.0f,   0.0f, 1.0f,
+        1.0f, 0.0f,   1.0f, 1.0f,
+        1.0f, 1.0f,   1.0f, 0.0f
     };
-
-    unsigned int indices[] = {
-        0, 1, 2,
-        0, 2, 3
-    };
+    unsigned int indices[] = { 0, 1, 2, 0, 2, 3 };
 
     glGenVertexArrays(1, &s_VAO);
     glGenBuffers(1, &s_VBO);
     glGenBuffers(1, &s_EBO);
 
     glBindVertexArray(s_VAO);
-
     glBindBuffer(GL_ARRAY_BUFFER, s_VBO);
     glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, s_EBO);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
 
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
-
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float),
         (void*)(2 * sizeof(float)));
     glEnableVertexAttribArray(1);
 
     glBindVertexArray(0);
-
     s_geometryInitialized = true;
 }
 
-void UIRect::render(const glm::mat4& projection) {
+void UIRect::resetGeometry() {
+    if (s_geometryInitialized) {
+        glDeleteVertexArrays(1, &s_VAO);
+        glDeleteBuffers(1, &s_VBO);
+        glDeleteBuffers(1, &s_EBO);
+        s_VAO = s_VBO = s_EBO = 0;
+        s_geometryInitialized = false;
+    }
+}
+
+void UIRect::render(const glm::mat4& projection, Shader& shader) {
     if (!visible) return;
 
     glm::mat4 model = calculateTransform();
 
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDisable(GL_DEPTH_TEST); // UI渲染禁用深度测试
-
-    auto& uiManager = UIManager::getInstance();
-    Shader& shader = uiManager.getUIShader();
+    glDisable(GL_DEPTH_TEST);
 
     shader.use();
     shader.setMat4("uProjection", projection);
@@ -132,9 +130,13 @@ void UIRect::render(const glm::mat4& projection) {
     glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
     glBindVertexArray(0);
 
-    glEnable(GL_DEPTH_TEST); // 恢复深度测试
+    glEnable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);
 }
+
+// ============================================================================
+// UIImage
+// ============================================================================
 
 GLuint UIImage::s_VAO = 0;
 GLuint UIImage::s_VBO = 0;
@@ -150,8 +152,7 @@ UIImage::UIImage(const std::string& id) : UIComponent(id) {
     EBO = s_EBO;
 }
 
-UIImage::~UIImage() {
-}
+UIImage::~UIImage() {}
 
 void UIImage::initGeometry() {
     UIRect::initGeometry();
@@ -161,17 +162,21 @@ void UIImage::initGeometry() {
     s_geometryInitialized = true;
 }
 
-void UIImage::render(const glm::mat4& projection) {
+void UIImage::resetGeometry() {
+    if (s_geometryInitialized) {
+        s_VAO = s_VBO = s_EBO = 0;
+        s_geometryInitialized = false;
+    }
+}
+
+void UIImage::render(const glm::mat4& projection, Shader& shader) {
     if (!visible || textureID == 0) return;
 
     glm::mat4 model = calculateTransform();
 
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDisable(GL_DEPTH_TEST); // UI渲染禁用深度测试
-
-    auto& uiManager = UIManager::getInstance();
-    Shader& shader = uiManager.getUIShader();
+    glDisable(GL_DEPTH_TEST);
 
     shader.use();
     shader.setMat4("uProjection", projection);
@@ -186,9 +191,10 @@ void UIImage::render(const glm::mat4& projection) {
 
     glBindVertexArray(VAO);
     glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+
     glBindVertexArray(0);
 
-    glEnable(GL_DEPTH_TEST); // 恢复深度测试
+    glEnable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);
 }
 
@@ -196,15 +202,11 @@ bool UIImage::containsPoint(const glm::vec2& point) const {
     return UIComponent::containsPoint(point);
 }
 
-// auto textureMgr = TextureMgr::GetInstance();
 bool UIImage::loadTextureByFilePath(const std::string& filepath) {
-    //textureID = textureMgr->loadTexture2D(filepath);
-    //return textureID != 0;
     return false;
 }
 
-bool UIImage::loadTextureByGLid(GLuint ID)
-{
+bool UIImage::loadTextureByGLid(GLuint ID) {
     textureID = ID;
     return textureID != 0;
 }
@@ -213,6 +215,10 @@ bool UIImage::loadTextureByTextureName(const std::string& texturename) {
     textureID = TextureMgr::GetInstance()->GetTexture2D(texturename);
     return textureID != 0;
 }
+
+// ============================================================================
+// UIText
+// ============================================================================
 
 std::unordered_map<std::string, UIText::FontInfo> UIText::s_fonts;
 GLuint UIText::s_VAO = 0;
@@ -243,22 +249,26 @@ void UIText::initGeometry() {
     s_geometryInitialized = true;
 }
 
+void UIText::resetGeometry() {
+    if (s_geometryInitialized) {
+        s_VAO = s_VBO = s_EBO = 0;
+        s_geometryInitialized = false;
+    }
+}
+
 void UIText::setText(const std::string& text) {
     this->text = text;
     updateTexture();
 }
 
-void UIText::render(const glm::mat4& projection) {
+void UIText::render(const glm::mat4& projection, Shader& shader) {
     if (!visible || text.empty() || m_textTexture == 0) return;
 
     glm::mat4 model = calculateTransform();
 
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDisable(GL_DEPTH_TEST); // UI渲染禁用深度测试
-
-    auto& uiManager = UIManager::getInstance();
-    Shader& shader = uiManager.getUIShader();
+    glDisable(GL_DEPTH_TEST);
 
     shader.use();
     shader.setMat4("uProjection", projection);
@@ -276,12 +286,11 @@ void UIText::render(const glm::mat4& projection) {
     glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
     glBindVertexArray(0);
 
-    glEnable(GL_DEPTH_TEST); // 恢复深度测试
+    glEnable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);
 }
 
 void UIText::updateTexture() {
-
     if (m_textTexture != 0) {
         glDeleteTextures(1, &m_textTexture);
     }
@@ -296,10 +305,10 @@ void UIText::updateTexture() {
         int x = i * 8;
         for (int y = 20; y < 44; y++) {
             int idx = (y * texSize + x + 2) * 4;
-            pixels[idx] = 0;       // R
-            pixels[idx + 1] = 0;   // G
-            pixels[idx + 2] = 0;   // B
-            pixels[idx + 3] = 255; // A
+            pixels[idx] = 0;
+            pixels[idx + 1] = 0;
+            pixels[idx + 2] = 0;
+            pixels[idx + 3] = 255;
         }
     }
 
@@ -318,6 +327,10 @@ bool UIText::loadFont(const std::string& name, const std::string& texturePath,
     const std::string& configPath) {
     return true;
 }
+
+// ============================================================================
+// UIButton
+// ============================================================================
 
 UIButton::UIButton(const std::string& id) : UIComponent(id) {
     m_background = new UIRect(id + "_bg");
@@ -344,13 +357,13 @@ void UIButton::setLabel(const std::string& label) {
     );
 }
 
-void UIButton::render(const glm::mat4& projection) {
+void UIButton::render(const glm::mat4& projection, Shader& shader) {
     if (!visible) return;
 
     m_background->position = position;
     m_background->size = size;
     m_background->visible = visible;
-    m_background->render(projection);
+    m_background->render(projection, shader);
 
     if (!label.empty()) {
         m_label->position = position + glm::vec2(
@@ -358,18 +371,16 @@ void UIButton::render(const glm::mat4& projection) {
             (size.y - m_label->size.y) * 0.5f
         );
         m_label->visible = visible;
-        m_label->render(projection);
+        m_label->render(projection, shader);
     }
 }
 
 void UIButton::update(float deltaTime) {
     if (isHovered && !m_isPressed) {
         m_background->color = hoverColor;
-    }
-    else if (m_isPressed) {
+    } else if (m_isPressed) {
         m_background->color = pressedColor;
-    }
-    else {
+    } else {
         m_background->color = normalColor;
     }
 }
@@ -389,6 +400,10 @@ void UIButton::onHoverLeave() {
     isHovered = false;
     m_isPressed = false;
 }
+
+// ============================================================================
+// UIContainer
+// ============================================================================
 
 UIContainer::UIContainer(const std::string& id) : UIComponent(id) {}
 
@@ -417,36 +432,30 @@ std::shared_ptr<UIComponent> UIContainer::getComponent(const std::string& id) {
     return nullptr;
 }
 
-void UIContainer::render(const glm::mat4& projection) {
+void UIContainer::render(const glm::mat4& projection, Shader& shader) {
     if (!visible) return;
 
     for (const auto& comp : m_children) {
         if (comp->visible) {
-            // 应用容器的变换（考虑锚点，但不应用缩放）
             glm::vec2 finalPos = position - size * anchor;
             glm::mat4 containerTransform = glm::translate(glm::mat4(1.0f),
                 glm::vec3(finalPos, 0.0f));
-
-            // 组合变换矩阵
             glm::mat4 combinedProjection = projection * containerTransform;
-
-            comp->render(combinedProjection);
+            comp->render(combinedProjection, shader);
         }
     }
 }
 
 void UIContainer::update(float deltaTime) {
     if (!visible) return;
-
     for (const auto& comp : m_children) {
         comp->update(deltaTime);
     }
 }
 
-UIManager& UIManager::getInstance() {
-    static UIManager instance;
-    return instance;
-}
+// ============================================================================
+// UIManager
+// ============================================================================
 
 UIManager::~UIManager() {
     shutdown();
@@ -464,6 +473,11 @@ void UIManager::initialize(int screenWidth, int screenHeight) {
 void UIManager::shutdown() {
     m_components.clear();
     m_sortedComponents.clear();
+
+    // Reset static geometry so next session recreates VAOs in new GL context
+    UIRect::resetGeometry();
+    UIImage::resetGeometry();
+    UIText::resetGeometry();
 }
 
 void UIManager::addComponent(std::shared_ptr<UIComponent> component) {
@@ -501,7 +515,7 @@ void UIManager::render() {
 
     for (const auto& component : m_sortedComponents) {
         if (component->visible) {
-            component->render(projection);
+            component->render(projection, m_uiShader);
         }
     }
 }
@@ -550,15 +564,11 @@ void UIManager::handleMouseMove(float x, float y) {
 }
 
 void UIManager::handleMouseScroll(float xoffset, float yoffset) {
-    // 查找所有UIHotbar组件并传递滚轮事件
     for (const auto& pair : m_components) {
         auto component = pair.second;
-        // 尝试动态转换为UIHotbar
         if (auto hotbar = std::dynamic_pointer_cast<UIHotbar>(component)) {
             hotbar->scroll(yoffset);
         }
-        // 如果是容器，还需要递归查找子组件？UIHotbar继承自UIContainer，但UIContainer的子组件不在m_components中
-        // 由于UIHotbar本身是UIContainer，它已经直接添加到m_components中，所以上述转换应该能捕获到
     }
 }
 

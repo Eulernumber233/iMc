@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "../core.h"
 #include "../Shader.h"
 #include <vector>
@@ -27,7 +27,7 @@ public:
     glm::vec2 anchor = glm::vec2(0.0f);
 
     virtual void update(float deltaTime) {}
-    virtual void render(const glm::mat4& projection) = 0;
+    virtual void render(const glm::mat4& projection, Shader& shader) = 0;
 
     virtual bool containsPoint(const glm::vec2& point) const;
     virtual void onClick() {}
@@ -54,11 +54,12 @@ public:
     float borderWidth = 1.0f;
     glm::vec4 borderColor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
 
-    void render(const glm::mat4& projection) override;
-    
+    void render(const glm::mat4& projection, Shader& shader) override;
+
     GLuint VAO, VBO, EBO;
 
     static void initGeometry();
+    static void resetGeometry();
     static GLuint s_VAO, s_VBO, s_EBO;
     static bool s_geometryInitialized;
 };
@@ -69,15 +70,17 @@ public:
     ~UIImage();
 
     GLuint textureID = 0;
-    glm::vec4 textureRect = glm::vec4(0.0f, 0.0f, 1.0f, 1.0f); // u, v, width, height
+    glm::vec4 textureRect = glm::vec4(0.0f, 0.0f, 1.0f, 1.0f);
     bool preserveAspectRatio = false;
 
-    void render(const glm::mat4& projection) override;
+    void render(const glm::mat4& projection, Shader& shader) override;
     bool containsPoint(const glm::vec2& point) const override;
 
     bool loadTextureByFilePath(const std::string& filepath);
     bool loadTextureByGLid(GLuint texID);
-	bool loadTextureByTextureName(const std::string& texture_name);
+    bool loadTextureByTextureName(const std::string& texture_name);
+
+    static void resetGeometry();
 
 private:
     GLuint VAO, VBO, EBO;
@@ -95,10 +98,9 @@ public:
     std::string fontName = "default";
     float fontSize = 16.0f;
     glm::vec4 textColor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
-    //TextAlignment alignment = TextAlignment::LEFT;
 
     void setText(const std::string& text);
-    void render(const glm::mat4& projection) override;
+    void render(const glm::mat4& projection, Shader& shader) override;
 
     struct FontInfo {
         GLuint textureID;
@@ -108,6 +110,8 @@ public:
 
     static bool loadFont(const std::string& name, const std::string& texturePath,
         const std::string& configPath);
+
+    static void resetGeometry();
 
 private:
     GLuint VAO, VBO, EBO;
@@ -135,7 +139,7 @@ public:
     std::function<void()> onClickCallback;
 
     void setLabel(const std::string& label);
-    void render(const glm::mat4& projection) override;
+    void render(const glm::mat4& projection, Shader& shader) override;
     void update(float deltaTime) override;
     void onClick() override;
     void onHoverEnter() override;
@@ -156,7 +160,7 @@ public:
     void removeComponent(const std::string& id);
     std::shared_ptr<UIComponent> getComponent(const std::string& id);
 
-    void render(const glm::mat4& projection) override;
+    void render(const glm::mat4& projection, Shader& shader) override;
     void update(float deltaTime) override;
 
     template<typename T>
@@ -176,7 +180,8 @@ private:
 
 class UIManager {
 public:
-    static UIManager& getInstance();
+    UIManager() = default;
+    ~UIManager();
 
     void initialize(int screenWidth, int screenHeight);
     void shutdown();
@@ -201,9 +206,6 @@ public:
     glm::vec2 screenToUIPoint(float screenX, float screenY) const;
 
 private:
-    UIManager() = default;
-    ~UIManager();
-
     int m_screenWidth = 0;
     int m_screenHeight = 0;
 

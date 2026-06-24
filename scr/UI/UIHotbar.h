@@ -21,7 +21,7 @@ public:
     void scroll(float yoffset);
 
     void update(float deltaTime) override;
-    void render(const glm::mat4& projection) override;
+    void render(const glm::mat4& projection, Shader& shader) override;
 
     // 按屏幕高度自动选择整数 GUI 缩放（像素完美），
     // 并更新自身尺寸、子组件位置

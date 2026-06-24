@@ -1,4 +1,5 @@
 ﻿#include "Shader.h"
+#include "RuntimeConfig.h"
 
 Shader::Shader(const std::initializer_list<
     std::pair<GLenum, const char*>>& shaders)
@@ -78,7 +79,8 @@ GLuint Shader::createShader(GLenum type, const std::string& filePath) {
     if (!success) {
         char info[512];
         glGetShaderInfoLog(shader, 512, NULL, info);
-        std::cerr << "Shader编译失败：" << info << std::endl;
+        if (RuntimeConfig::get().verboseShaderLoading)
+            std::cerr << "Shader compile failed: " << info << std::endl;
         glDeleteShader(shader);
         return 0;
     }
@@ -97,7 +99,8 @@ GLuint Shader::createProgram(std::vector<GLuint> shaders) {
     if (!success) {
         char info[512];
         glGetProgramInfoLog(programID, 512, NULL, info);
-        std::cerr << "Program链接失败：" << info << std::endl;
+        if (RuntimeConfig::get().verboseShaderLoading)
+            std::cerr << "Program link failed: " << info << std::endl;
         glDeleteProgram(programID);
         return 0;
     }
@@ -105,7 +108,8 @@ GLuint Shader::createProgram(std::vector<GLuint> shaders) {
         glDetachShader(programID, shader);
         glDeleteShader(shader);
     }
-	std::cout << "Shader Program " << programID << " created successfully." << std::endl;
+	if (RuntimeConfig::get().verboseShaderLoading)
+		std::cout << "Shader Program " << programID << " created successfully." << std::endl;
     return programID;
 }
 

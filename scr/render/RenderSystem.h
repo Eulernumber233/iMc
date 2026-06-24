@@ -93,7 +93,7 @@ public:
 
     // UI
     void initUI();
-    UIManager& getUIManager() { return UIManager::getInstance(); }
+    UIManager& getUIManager() { return m_uiManager; }
     void setScreenSize(int width, int height);
 
     // 粒子系统
@@ -204,7 +204,7 @@ private:
     BlockRenderer m_blockRenderer;
     ParticleManager m_particleManager;
     BlockOutlineRenderer m_outlineRenderer;
-    UIManager& m_uiManager = UIManager::getInstance();
+    UIManager m_uiManager;
 
     // 选中方块
     glm::ivec3 m_selectedBlockPos;

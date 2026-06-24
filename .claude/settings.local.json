@@ -37,7 +37,27 @@
       "Read(//c/Program Files \\(x86\\)/Microsoft Visual Studio/**)",
       "Bash(\"C:/Program Files \\(x86\\)/Microsoft Visual Studio/Installer/vswhere.exe\" -latest -requires Microsoft.Component.MSBuild -find \"MSBuild/**/Bin/MSBuild.exe\")",
       "Bash(\"D:/visual studio/MSBuild/Current/Bin/MSBuild.exe\" \"e:/opengl/iMc/iMc.sln\" /p:Configuration=Release /p:Platform=x64 /t:Build /m /v:minimal)",
-      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"e:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Release /p:Platform=x64 /t:Build /m /v:minimal 2>&1)"
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"e:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Release /p:Platform=x64 /t:Build /m /v:minimal 2>&1)",
+      "PowerShell(if \\(-not \\(Test-Path \"e:\\\\opengl\\\\iMc\\\\scr\\\\net\"\\)\\) { New-Item -ItemType Directory \"e:\\\\opengl\\\\iMc\\\\scr\\\\net\" } else { ls \"e:\\\\opengl\\\\iMc\\\\scr\\\\net\" })",
+      "Bash(xxd -l 6 scr/net/NetCommon.h)",
+      "Bash(xxd -l 6 \"e:/opengl/iMc/scr/World.cpp\")",
+      "PowerShell($vswhere = \"${env:ProgramFiles\\(x86\\)}\\\\Microsoft Visual Studio\\\\Installer\\\\vswhere.exe\"; if \\(Test-Path $vswhere\\) { & $vswhere -latest -property installationPath } else { Write-Output \"vswhere not found\" })",
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"e:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Debug /p:Platform=x64 /t:Build /m /verbosity:minimal)",
+      "PowerShell($content = Get-Content \"e:\\\\opengl\\\\iMc\\\\scr\\\\CliManager.cpp\" -Raw; $utf8Bom = New-Object System.Text.UTF8Encoding $true; [System.IO.File]::WriteAllText\\(\"e:\\\\opengl\\\\iMc\\\\scr\\\\CliManager.cpp\", $content, $utf8Bom\\); $content = Get-Content \"e:\\\\opengl\\\\iMc\\\\scr\\\\CliManager.h\" -Raw; [System.IO.File]::WriteAllText\\(\"e:\\\\opengl\\\\iMc\\\\scr\\\\CliManager.h\", $content, $utf8Bom\\); Write-Output \"Done\")",
+      "Bash(msbuild iMc.sln /p:Configuration=Debug /p:Platform=x64 /t:Build /m)",
+      "PowerShell(& \"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"e:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Debug /p:Platform=x64 /t:Build /m /v:minimal 2>&1)",
+      "PowerShell(Get-Process -Name \"iMc\" -ErrorAction SilentlyContinue)",
+      "PowerShell(Stop-Process -Force -ErrorAction SilentlyContinue)",
+      "PowerShell(& 'C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe' e:\\\\opengl\\\\iMc\\\\iMc.sln /p:Configuration=Debug /p:Platform=x64 /t:iMc /nologo 2>&1)",
+      "Read(//d/visual studio/MSBuild/Current/Bin/**)",
+      "Read(//d/visual studio/Msbuild/Current/Bin/**)",
+      "Read(//d/visual studio/**)",
+      "PowerShell(& 'D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe' e:\\\\opengl\\\\iMc\\\\iMc.sln /p:Configuration=Debug /p:Platform=x64 /t:iMc /nologo 2>&1)",
+      "PowerShell(taskkill /F /IM iMc.exe 2>$null)",
+      "Bash(taskkill //F //IM iMc.exe)",
+      "Bash(msbuild \"e:\\\\opengl\\\\iMc\\\\iMc.vcxproj\" /t:Build /p:Configuration=Debug /p:Platform=x64 /m)",
+      "PowerShell(& \"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"e:\\\\opengl\\\\iMc\\\\iMc.vcxproj\" /t:Build /p:Configuration=Debug /p:Platform=x64 /m 2>&1)",
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"e:\\\\opengl\\\\iMc\\\\iMc.vcxproj\" /t:Build /p:Configuration=Debug /p:Platform=x64 /m 2>&1)"
     ],
     "additionalDirectories": [
       "e:\\opengl\\iMc\\scr"

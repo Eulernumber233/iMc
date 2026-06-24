@@ -20,6 +20,8 @@ public:
     float verticalCullRatio = 0.5f;
 
     bool printProfileEverySecond = false; // 每秒输出 profiler 汇总
+    bool verboseTextureLoading = false;   // 输出纹理加载详情日志
+    bool verboseShaderLoading = false;    // 输出着色器编译详情日志
 
     // 存档：自动保存间隔（秒）。设为 0 禁用定时自动保存（区块卸载时仍会保存）
     int autoSaveIntervalSec = 60;

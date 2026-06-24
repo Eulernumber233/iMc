@@ -147,6 +147,29 @@ void Chunk::stitchWithNeighbor(Chunk* other, BlockFace faceFromSelf) {
     });
 }
 
+void Chunk::openBoundaryFace(BlockFace face) {
+    int fixedX = -1, fixedZ = -1;
+    switch (face) {
+    case RIGHT: fixedX = WIDTH - 1; break;
+    case LEFT:  fixedX = 0; break;
+    case FRONT: fixedZ = DEPTH - 1; break;
+    case BACK:  fixedZ = 0; break;
+    default: return;
+    }
+
+    for (int y = 0; y < HEIGHT; ++y) {
+        if (fixedX >= 0) {
+            for (int z = 0; z < DEPTH; ++z) {
+                updateFaceAt(fixedX, y, z, face);
+            }
+        } else {
+            for (int x = 0; x < WIDTH; ++x) {
+                updateFaceAt(x, y, fixedZ, face);
+            }
+        }
+    }
+}
+
 // 未来进一步优化：TODO
 // 持久映射（GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT）
 // addFaceLocal/removeFaceLocal 直接写映射内存，省掉 staging vector。

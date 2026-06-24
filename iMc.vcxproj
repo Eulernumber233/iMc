@@ -137,6 +137,7 @@
     <ClCompile Include="scr\generate\Noise.cpp" />
     <ClCompile Include="scr\generate\TerrainGenerator.cpp" />
     <ClCompile Include="scr\iMc.cpp" />
+    <ClCompile Include="scr\CliManager.cpp" />
     <ClCompile Include="scr\mode\Mesh.cpp" />
     <ClCompile Include="scr\mode\Model.cpp" />
     <ClCompile Include="scr\mode\PlayerModel.cpp" />
@@ -157,6 +158,14 @@
     <ClCompile Include="scr\Item.cpp" />
     <ClCompile Include="scr\save\ChunkSaveManager.cpp" />
     <ClCompile Include="scr\save\RegionFile.cpp" />
+    <ClCompile Include="scr\net\lz4.c" />
+    <ClCompile Include="scr\net\NetChunkSync.cpp" />
+    <ClCompile Include="scr\net\NetManager.cpp" />
+    <ClCompile Include="scr\net\NetMessage.cpp" />
+    <ClCompile Include="scr\net\NetObject.cpp" />
+    <ClCompile Include="scr\net\NetObjectManager.cpp" />
+    <ClCompile Include="scr\net\NetPlayer.cpp" />
+    <ClCompile Include="scr\net\NetTransport.cpp" />
     <ClCompile Include="scr\World.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -197,7 +206,18 @@
     <ClInclude Include="scr\Item.h" />
     <ClInclude Include="scr\save\ChunkSaveManager.h" />
     <ClInclude Include="scr\save\RegionFile.h" />
+    <ClInclude Include="scr\net\lz4.h" />
+    <ClInclude Include="scr\net\NetChunkSync.h" />
+    <ClInclude Include="scr\net\NetCommon.h" />
+    <ClInclude Include="scr\net\NetManager.h" />
+    <ClInclude Include="scr\net\NetMessage.h" />
+    <ClInclude Include="scr\net\NetObject.h" />
+    <ClInclude Include="scr\net\NetObjectManager.h" />
+    <ClInclude Include="scr\net\NetPlayer.h" />
+    <ClInclude Include="scr\net\NetSerializer.h" />
+    <ClInclude Include="scr\net\NetTransport.h" />
     <ClInclude Include="scr\World.h" />
+    <ClInclude Include="scr\CliManager.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include=".gitattributes" />

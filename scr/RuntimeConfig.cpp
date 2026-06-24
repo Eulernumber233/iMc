@@ -77,6 +77,8 @@ void RuntimeConfig::loadFrom(const std::string& path) {
     if (root.isMember("worker_threads")) workerThreads = root["worker_threads"].asInt();
     if (root.isMember("vertical_cull_ratio")) verticalCullRatio = (float)root["vertical_cull_ratio"].asDouble();
     if (root.isMember("print_profile_every_second")) printProfileEverySecond = root["print_profile_every_second"].asBool();
+    if (root.isMember("verbose_texture_loading")) verboseTextureLoading = root["verbose_texture_loading"].asBool();
+    if (root.isMember("verbose_shader_loading")) verboseShaderLoading = root["verbose_shader_loading"].asBool();
     if (root.isMember("auto_save_interval_sec")) autoSaveIntervalSec = root["auto_save_interval_sec"].asInt();
 
     std::cout << "[RuntimeConfig] loaded from " << path

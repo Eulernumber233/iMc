@@ -53,6 +53,10 @@ public:
     // （即两个 chunk 都在 m_pendingChunks 中）。
     void submitStitch(Chunk* a, Chunk* b, uint8_t dirAtoB);
 
+    // 投递一个 import 任务（任务3）：跳过地形生成，直接用预填充的 buffer 构建 chunk。
+    // buffer 大小为 CHUNK_VOLUME，所有权转移给 worker。
+    void submitImport(const glm::ivec2& pos, std::unique_ptr<BlockState[]> buffer);
+
     // 主线程每帧调用：拿出所有已完成的 build 结果。
     std::vector<ChunkBuildResult> drainCompleted();
     // 主线程每帧调用：拿出所有已完成的 stitch 结果。
@@ -67,9 +71,10 @@ public:
 private:
     void workerMain();
     void buildOne(const glm::ivec2& pos, ChunkBuildResult& out) const;
+    void importOne(const glm::ivec2& pos, BlockState* buffer, ChunkBuildResult& out) const;
     void stitchOne(Chunk* a, Chunk* b, uint8_t dirAtoB, StitchResult& out) const;
 
-    enum JobKind : uint8_t { JOB_BUILD = 0, JOB_STITCH = 1 };
+    enum JobKind : uint8_t { JOB_BUILD = 0, JOB_STITCH = 1, JOB_IMPORT = 2 };
     struct Job {
         JobKind kind;
         // BUILD 字段
@@ -78,6 +83,8 @@ private:
         Chunk* a = nullptr;
         Chunk* b = nullptr;
         uint8_t dirAtoB = 0;
+        // IMPORT 字段
+        std::unique_ptr<BlockState[]> importBuffer;
     };
 
     const TerrainGenerator* m_generator = nullptr;

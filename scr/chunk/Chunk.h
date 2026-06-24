@@ -80,6 +80,10 @@ public:
     // face: 本 chunk 视角的方向（RIGHT/LEFT/FRONT/BACK 之一）
     void stitchWithNeighbor(Chunk* other, BlockFace faceFromSelf);
 
+    // 打开某方向的边界面（无邻居时视为外侧全空气，边界方块面全部可见）。
+    // 仅被 ChunkManager 在确认该方向无邻居后调用。
+    void openBoundaryFace(BlockFace face);
+
     // ---------------- 异步 stitch 状态位（4 方向：0:+X 1:-X 2:+Z 3:-Z） ----------------
     // 主线程独占读写。仅在 chunk 处于 ChunkManager::m_pendingChunks 时有意义。
     //   m_stitchDone[i]    = 1 表示该方向已与对应邻居缝合完成

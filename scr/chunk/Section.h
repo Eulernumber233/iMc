@@ -87,6 +87,10 @@ public:
     // 不动 m_blocks / m_instanceData / m_PosToInstanceIndex —— 这些是 CPU 端 mesh，仍然有效。
     void notifyGpuSlotReleased();
 
+    // 网络序列化：读取/写入整个 section 的 BlockState 数据
+    void readAllBlocks(std::vector<BlockState>& out) const;
+    void writeAllBlocks(const std::vector<BlockState>& data);
+
     // 缓存 GPU arena slot，避免 rebuildDrawCommands 每帧查 unordered_map
     ChunkArena::Slot getGpuSlot() const { return m_gpuSlot; }
     void setGpuSlot(const ChunkArena::Slot& s) { m_gpuSlot = s; }
