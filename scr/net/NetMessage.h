@@ -36,13 +36,16 @@ public:
     // ---- 便捷工厂 ----
     static NetMessage joinRequest(const std::string& playerName);
     static NetMessage joinAccept(uint16_t playerId, uint32_t seed,
-        float posX = 0.0f, float posY = 500.0f, float posZ = 0.0f, float yaw = 0.0f);
+        float posX = 0.0f, float posY = 500.0f, float posZ = 0.0f, float yaw = 0.0f,
+        const std::string& skinName = "steve", const std::string& worldName = "");
     static NetMessage joinDeny(const std::string& reason);
     static NetMessage playerJoined(uint16_t playerId, const std::string& name,
-        float posX = 0.0f, float posY = 500.0f, float posZ = 0.0f, float yaw = 0.0f);
+        float posX = 0.0f, float posY = 500.0f, float posZ = 0.0f, float yaw = 0.0f,
+        const std::string& skinName = "");
     static NetMessage playerLeft(uint16_t playerId);
     static NetMessage playerList(const std::vector<std::pair<uint16_t, std::string>>& players,
-        const float* positions = nullptr, const float* yaws = nullptr);
+        const float* positions = nullptr, const float* yaws = nullptr,
+        const std::vector<std::string>* skinNames = nullptr);
     static NetMessage propertySync(uint16_t netObjId, MemoryStream& propData);
     static NetMessage chunkData(const std::vector<uint8_t>& compressedChunks);
     static NetMessage chunkRequest(int32_t chunkX, int32_t chunkZ);

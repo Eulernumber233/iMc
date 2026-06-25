@@ -25,7 +25,9 @@
       "Read(//c//**)",
       "PowerShell(& \"C:\\\\Windows\\\\Microsoft.NET\\\\Framework64\\\\v4.0.30319\\\\MSBuild.exe\" \"e:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Debug /p:Platform=x64 /t:Build /m /nologo 2>&1)",
       "Bash(ls \"E:/\" 2>/dev/null | head -20)",
-      "Read(//e//**)"
+      "Read(//e//**)",
+      "PowerShell($msbuild = \"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\"; if \\(-not \\(Test-Path $msbuild\\)\\) { $msbuild = \"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Professional\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" }; if \\(-not \\(Test-Path $msbuild\\)\\) { $msbuild = \"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Enterprise\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" }; & $msbuild \"e:\\\\opengl\\\\iMc\\\\iMc.vcxproj\" /p:Configuration=Debug /p:Platform=x64 /t:Build /m /verbosity:minimal 2>&1)",
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"e:\\\\opengl\\\\iMc\\\\iMc.vcxproj\" /p:Configuration=Debug /p:Platform=x64 /t:Build /m /verbosity:minimal 2>&1)"
     ]
   }
 }

@@ -24,7 +24,7 @@ public:
     Player(std::shared_ptr<Camera> camera, GLFWwindow* window);
 
     // 初始化
-    void initialize(UIManager& uiManager);
+    void initialize(UIManager& uiManager, const std::string& skinPath = "assert/mode/player/wide/steve.png");
 
     // 更新玩家状态（包括物理更新）
     void update(float deltaTime, ChunkManager& chunkManager, RenderSystem& renderSystem);

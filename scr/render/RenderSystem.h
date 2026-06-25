@@ -259,4 +259,9 @@ private:
 
     // 远程玩家模型（共享几何体，逐玩家设置变换矩阵）
     PlayerModel m_remotePlayerModel;
+
+    // 皮肤纹理缓存（skinName → GLuint texture）
+    std::unordered_map<std::string, GLuint> m_skinTextures;
+    GLuint loadSkinTexture(const std::string& skinName);
+    void loadAllSkinTextures();
 };

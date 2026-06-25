@@ -4,10 +4,12 @@
 #include "chunk/Chunk.h"
 #include "chunk/ChunkDimensions.h"
 #include "collision/PhysicsConstants.h"
+#include "mode/SkinManager.h"
 #include "save/ChunkSaveManager.h"
 #include "RuntimeConfig.h"
 #include "Profiler.h"
 #include "net/NetManager.h"
+#include <iomanip>
 #include <iostream>
 #include <thread>
 #include <chrono>
@@ -207,8 +209,25 @@ int World::run() {
         m_spawnFound = true;
     }
 
+    // Join 模式：使用服务端回传的世界名替换本地 session 名
+    if (m_netManager && m_netMode == NetMode::Join) {
+        const std::string& svrName = m_netManager->getWorldName();
+        if (!svrName.empty()) m_worldName = svrName;
+    }
+
+    // 确定本地皮肤路径
+    std::string localSkinPath = "assert/mode/player/wide/steve.png";
+    m_localSkinName = "Steve";
+    if (m_netManager && m_netMode == NetMode::Join) {
+        m_localSkinName = m_netManager->getLocalSkinName();
+        if (!m_localSkinName.empty()) {
+            std::string p = SkinManager::instance().getSkinPath(m_localSkinName);
+            if (!p.empty()) localSkinPath = p;
+        }
+    }
+
     // 初始化玩家
-    m_player->initialize(renderSystem.getUIManager());
+    m_player->initialize(renderSystem.getUIManager(), localSkinPath);
 
     // 设置方块选择回调
     m_player->setOnBlockSelectedCallback([&renderSystem](const glm::ivec3& blockPos) {
@@ -394,7 +413,15 @@ void World::showFPS() {
     if (currentTime - fpsLastUpdate >= fpsUpdateInterval) {
         double fps = frameCount / (currentTime - fpsLastUpdate);
         std::stringstream ss;
-        ss << "Open Window - FPS: " << std::fixed << fps;
+        ss << std::fixed << std::setprecision(3);
+        if (m_netMode == NetMode::None) {
+            ss << "Local - " << m_worldName << " - FPS: " << fps;
+        } else if (m_netMode == NetMode::Host) {
+            ss << "Host - " << m_worldName << " - Steve - FPS: " << fps;
+        } else {
+            uint16_t cid = m_netManager ? m_netManager->getLocalPlayerId() : 0;
+            ss << "Client_" << cid << " - " << m_worldName << " - " << m_localSkinName << " - FPS: " << fps;
+        }
         glfwSetWindowTitle(m_window, ss.str().c_str());
 
         // 重置计数器和时间

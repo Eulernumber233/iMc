@@ -40,7 +40,8 @@ NetMessage NetMessage::joinRequest(const std::string& playerName) {
 }
 
 NetMessage NetMessage::joinAccept(uint16_t playerId, uint32_t seed,
-                                   float posX, float posY, float posZ, float yaw) {
+                                   float posX, float posY, float posZ, float yaw,
+                                   const std::string& skinName, const std::string& worldName) {
     NetMessage msg(NetMsgType::JOIN_ACCEPT);
     msg.payload.writePod(playerId);
     msg.payload.writePod(seed);
@@ -48,6 +49,8 @@ NetMessage NetMessage::joinAccept(uint16_t playerId, uint32_t seed,
     msg.payload.writePod(posY);
     msg.payload.writePod(posZ);
     msg.payload.writePod(yaw);
+    msg.payload.writeString(skinName);
+    msg.payload.writeString(worldName);
     return msg;
 }
 
@@ -58,7 +61,8 @@ NetMessage NetMessage::joinDeny(const std::string& reason) {
 }
 
 NetMessage NetMessage::playerJoined(uint16_t playerId, const std::string& name,
-                                      float posX, float posY, float posZ, float yaw) {
+                                      float posX, float posY, float posZ, float yaw,
+                                      const std::string& skinName) {
     NetMessage msg(NetMsgType::PLAYER_JOINED);
     msg.payload.writePod(playerId);
     msg.payload.writeString(name);
@@ -66,6 +70,7 @@ NetMessage NetMessage::playerJoined(uint16_t playerId, const std::string& name,
     msg.payload.writePod(posY);
     msg.payload.writePod(posZ);
     msg.payload.writePod(yaw);
+    msg.payload.writeString(skinName);
     return msg;
 }
 
@@ -76,7 +81,8 @@ NetMessage NetMessage::playerLeft(uint16_t playerId) {
 }
 
 NetMessage NetMessage::playerList(const std::vector<std::pair<uint16_t, std::string>>& players,
-                                   const float* positions, const float* yaws) {
+                                   const float* positions, const float* yaws,
+                                   const std::vector<std::string>* skinNames) {
     NetMessage msg(NetMsgType::PLAYER_LIST);
     msg.payload.writePod(static_cast<uint16_t>(players.size()));
     for (size_t i = 0; i < players.size(); ++i) {
@@ -96,6 +102,11 @@ NetMessage NetMessage::playerList(const std::vector<std::pair<uint16_t, std::str
             msg.payload.writePod(yaws[i]);
         } else {
             msg.payload.writePod(0.0f);
+        }
+        if (skinNames && i < skinNames->size()) {
+            msg.payload.writeString((*skinNames)[i]);
+        } else {
+            msg.payload.writeString("");
         }
     }
     return msg;

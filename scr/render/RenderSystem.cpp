@@ -6,6 +6,8 @@
 #include "../UI/UIHotbar.h"
 #include "../Player.h"
 #include "../mode/PlayerModel.h"
+#include "../mode/SkinManager.h"
+#include "../stb_image.h"
 #include "../Profiler.h"
 #include "../net/NetManager.h"
 #include "../collision/PhysicsConstants.h"
@@ -203,6 +205,11 @@ RenderSystem::~RenderSystem() {
 
     if (m_screenQuadVAO) glDeleteVertexArrays(1, &m_screenQuadVAO);
     if (m_screenQuadVBO) glDeleteBuffers(1, &m_screenQuadVBO);
+
+    for (auto& [name, tex] : m_skinTextures) {
+        if (tex) glDeleteTextures(1, &tex);
+    }
+    m_skinTextures.clear();
 }
 
 bool RenderSystem::initialize() {
@@ -236,6 +243,10 @@ bool RenderSystem::initialize() {
 
     // 远程玩家模型（共享几何体，不同皮肤可后续扩展）
     m_remotePlayerModel.initialize("assert/mode/player/wide/steve.png");
+
+    // 初始化皮肤管理器并预加载所有皮肤纹理
+    SkinManager::instance().init("assert/mode/player/wide");
+    loadAllSkinTextures();
 
     // 配置边框
     BlockOutlineRenderer::OutlineConfig outlineConfig;
@@ -1076,7 +1087,46 @@ void RenderSystem::renderRemotePlayers(NetManager* netManager,
         m_modeShader.setVec3("light.specular", 1.0f, 1.0f, 1.0f);
         m_modeShader.setFloat("shininess", 256.0f);
 
-        m_remotePlayerModel.drawPosed(m_modeShader, footPos, idlePose);
+        // 查找并绑定该玩家的皮肤纹理
+        GLuint skinTex = 0;
+        auto it = m_skinTextures.find(player->skinName);
+        if (it != m_skinTextures.end()) skinTex = it->second;
+        if (skinTex && skinTex != m_remotePlayerModel.getTextureID()) {
+            m_remotePlayerModel.drawPosed(m_modeShader, footPos, idlePose, skinTex);
+        } else {
+            m_remotePlayerModel.drawPosed(m_modeShader, footPos, idlePose);
+        }
+    }
+}
+
+GLuint RenderSystem::loadSkinTexture(const std::string& skinName) {
+    auto it = m_skinTextures.find(skinName);
+    if (it != m_skinTextures.end()) return it->second;
+
+    std::string path = SkinManager::instance().getSkinPath(skinName);
+    if (path.empty()) return 0;
+
+    int width, height, channels;
+    unsigned char* data = stbi_load(path.c_str(), &width, &height, &channels, 4);
+    if (!data) return 0;
+
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    stbi_image_free(data);
+    m_skinTextures[skinName] = tex;
+    return tex;
+}
+
+void RenderSystem::loadAllSkinTextures() {
+    for (const auto& name : SkinManager::instance().getSkinNames()) {
+        loadSkinTexture(name);
     }
 }
 

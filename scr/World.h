@@ -67,6 +67,9 @@ private:
     // 玩家对象
     std::shared_ptr<Player> m_player;
 
+    // 本地皮肤名（用于窗口标题）
+    std::string m_localSkinName;
+
     // 渲染系统
     RenderSystem* m_renderSystem = nullptr;
 

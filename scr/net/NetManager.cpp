@@ -1,4 +1,5 @@
 ﻿#include "NetManager.h"
+#include "../mode/SkinManager.h"
 #include <cstdio>
 #include <chrono>
 
@@ -29,6 +30,7 @@ bool NetManager::host(uint16_t port, const std::string& worldName, uint32_t seed
     auto player = std::make_unique<NetPlayer>();
     player->playerId = m_localPlayerId;
     player->playerName = "Host";
+    player->skinName = "steve";
     player->peer = nullptr;  // 本地玩家无 peer
     m_localNetState = player->netState.get();
     player->netState->setOwner(player.get());
@@ -110,10 +112,20 @@ bool NetManager::join(const std::string& ip, uint16_t port, const std::string& p
                                 spawnYaw = payload.readPod<float>();
                             }
 
+                            std::string skinName = "steve";
+                            if (payload.remaining() > 0) {
+                                skinName = payload.readString();
+                            }
+
+                            if (payload.remaining() > 0) {
+                                m_worldName = payload.readString();
+                            }
+
                             // 创建本地玩家
                             auto player = std::make_unique<NetPlayer>();
                             player->playerId = m_localPlayerId;
                             player->playerName = playerName;
+                            player->skinName = skinName;
                             player->peer = nullptr;
                             m_localNetState = player->netState.get();
                             player->netState->setOwner(player.get());
@@ -124,8 +136,8 @@ bool NetManager::join(const std::string& ip, uint16_t port, const std::string& p
                             player->netState.release();
                             m_players[m_localPlayerId] = std::move(player);
 
-                            printf("[NetManager] joined, local player id=%u, world seed=%u, spawn=(%.1f,%.1f,%.1f)\n",
-                                m_localPlayerId, m_worldSeed, spawnX, spawnY, spawnZ);
+                            printf("[NetManager] joined, local player id=%u, world seed=%u, spawn=(%.1f,%.1f,%.1f), skin=%s\n",
+                                m_localPlayerId, m_worldSeed, spawnX, spawnY, spawnZ, skinName.c_str());
                             gotAccept = true;
                         } else if (netMsg.type == NetMsgType::JOIN_DENY) {
                             MemoryStream payload;
@@ -367,11 +379,18 @@ void NetManager::handleJoinRequest(ENetPeer* peer, MemoryStream& payload) {
     uint16_t newId = 2;
     while (m_players.count(newId)) ++newId;
 
+    // 分配皮肤（随机非 steve 皮肤）
+    std::string skinName = "steve";
+    if (SkinManager::instance().isInitialized() && SkinManager::instance().getSkinCount() > 1) {
+        skinName = SkinManager::instance().getRandomSkin("steve");
+    }
+
     // 创建 NetPlayer
     auto player = std::make_unique<NetPlayer>();
     player->playerId = newId;
     player->peer = peer;
     player->playerName = playerName;
+    player->skinName = skinName;
     player->netState->setOwner(player.get());
 
     m_objManager.addObject(newId, std::move(player->netState));
@@ -380,8 +399,8 @@ void NetManager::handleJoinRequest(ENetPeer* peer, MemoryStream& payload) {
     m_players[newId] = std::move(player);
     m_peerToPlayer[peer] = newId;
 
-    printf("[NetManager] player \"%s\" joined, assigned id=%u\n",
-        playerName.c_str(), newId);
+    printf("[NetManager] player \"%s\" joined, assigned id=%u, skin=%s\n",
+        playerName.c_str(), newId, skinName.c_str());
 
     // 设置新玩家的初始渲染位置（使用宿主位置作为近似出生点，
     // 避免 renderRemotePlayers 的 (0,0,0) 过滤导致远程玩家不可见）
@@ -409,7 +428,7 @@ void NetManager::handleJoinRequest(ENetPeer* peer, MemoryStream& payload) {
             hz = m_localNetState->m_position.z;
             hyaw = m_localNetState->m_yaw;
         }
-        auto msg = NetMessage::joinAccept(newId, m_worldSeed, hx, hy, hz, hyaw);
+        auto msg = NetMessage::joinAccept(newId, m_worldSeed, hx, hy, hz, hyaw, skinName, m_worldName);
         std::vector<uint8_t> buf;
         msg.encode(buf);
         m_transport.sendReliable(peer, buf.data(), buf.size());
@@ -420,8 +439,10 @@ void NetManager::handleJoinRequest(ENetPeer* peer, MemoryStream& payload) {
         std::vector<std::pair<uint16_t, std::string>> list;
         std::vector<float> posData;
         std::vector<float> yawData;
+        std::vector<std::string> skinNames;
         for (auto& [id, p] : m_players) {
             list.emplace_back(id, p->playerName);
+            skinNames.push_back(p->skinName);
             if (p->netState) {
                 posData.push_back(p->netState->m_position.x);
                 posData.push_back(p->netState->m_position.y);
@@ -432,7 +453,7 @@ void NetManager::handleJoinRequest(ENetPeer* peer, MemoryStream& payload) {
                 yawData.push_back(0.0f);
             }
         }
-        auto msg = NetMessage::playerList(list, posData.data(), yawData.data());
+        auto msg = NetMessage::playerList(list, posData.data(), yawData.data(), &skinNames);
         std::vector<uint8_t> buf;
         msg.encode(buf);
         m_transport.sendReliable(peer, buf.data(), buf.size());
@@ -448,7 +469,7 @@ void NetManager::handleJoinRequest(ENetPeer* peer, MemoryStream& payload) {
             pz = it->second->netState->m_position.z;
             pyaw = it->second->netState->m_yaw;
         }
-        auto msg = NetMessage::playerJoined(newId, playerName, px, py, pz, pyaw);
+        auto msg = NetMessage::playerJoined(newId, playerName, px, py, pz, pyaw, skinName);
         sendToAll(peer, msg, true);  // 排除新玩家自己
     }
 
@@ -491,10 +512,20 @@ void NetManager::handleJoinAccept(MemoryStream& payload) {
         spawnYaw = payload.readPod<float>();
     }
 
+    std::string skinName = "steve";
+    if (payload.remaining() > 0) {
+        skinName = payload.readString();
+    }
+
+    if (payload.remaining() > 0) {
+        m_worldName = payload.readString();
+    }
+
     // 创建本地玩家
     auto player = std::make_unique<NetPlayer>();
     player->playerId = m_localPlayerId;
     player->playerName = "Client";
+    player->skinName = skinName;
     player->peer = nullptr;
     m_localNetState = player->netState.get();
     player->netState->setOwner(player.get());
@@ -526,9 +557,15 @@ void NetManager::handlePlayerJoined(MemoryStream& payload) {
         pyaw = payload.readPod<float>();
     }
 
+    std::string skinName;
+    if (payload.remaining() > 0) {
+        skinName = payload.readString();
+    }
+
     auto player = std::make_unique<NetPlayer>();
     player->playerId = playerId;
     player->playerName = name;
+    player->skinName = skinName;
     player->peer = nullptr;
     player->netState->setOwner(player.get());
     player->updateCachedPosition(glm::vec3(px, py, pz));
@@ -538,8 +575,8 @@ void NetManager::handlePlayerJoined(MemoryStream& payload) {
     player->netState.release();
     m_players[playerId] = std::move(player);
 
-    printf("[NetManager] remote player %u (\"%s\") joined, pos=(%.1f,%.1f,%.1f)\n",
-        playerId, name.c_str(), px, py, pz);
+    printf("[NetManager] remote player %u (\"%s\", skin=%s) joined, pos=(%.1f,%.1f,%.1f)\n",
+        playerId, name.c_str(), skinName.c_str(), px, py, pz);
 }
 
 void NetManager::handlePlayerLeft(MemoryStream& payload) {
@@ -563,12 +600,18 @@ void NetManager::handlePlayerList(MemoryStream& payload) {
             pyaw = payload.readPod<float>();
         }
 
+        std::string skinName;
+        if (payload.remaining() > 0) {
+            skinName = payload.readString();
+        }
+
         if (playerId == m_localPlayerId) continue;
         if (m_players.count(playerId)) continue;
 
         auto player = std::make_unique<NetPlayer>();
         player->playerId = playerId;
         player->playerName = name;
+        player->skinName = skinName;
         player->peer = nullptr;
         player->netState->setOwner(player.get());
         player->updateCachedPosition(glm::vec3(px, py, pz));
@@ -578,8 +621,8 @@ void NetManager::handlePlayerList(MemoryStream& payload) {
         player->netState.release();
         m_players[playerId] = std::move(player);
 
-        printf("[NetManager] player in list: %u (\"%s\") pos=(%.1f,%.1f,%.1f)\n",
-            playerId, name.c_str(), px, py, pz);
+        printf("[NetManager] player in list: %u (\"%s\", skin=%s) pos=(%.1f,%.1f,%.1f)\n",
+            playerId, name.c_str(), skinName.c_str(), px, py, pz);
     }
 }
 
@@ -626,6 +669,12 @@ NetPlayer* NetManager::getLocalPlayer() {
 NetPlayer* NetManager::getPlayer(uint16_t playerId) {
     auto it = m_players.find(playerId);
     return (it != m_players.end()) ? it->second.get() : nullptr;
+}
+
+std::string NetManager::getLocalSkinName() const {
+    auto it = m_players.find(m_localPlayerId);
+    if (it != m_players.end()) return it->second->skinName;
+    return "steve";
 }
 
 void NetManager::sendToAll(ENetPeer* exclude, const NetMessage& msg, bool reliable) {

@@ -9,6 +9,8 @@ struct CmdlineArgs {
     uint16_t port = 0;
     std::string joinAddr;
     std::string worldName;
+    int winPosX = -1;
+    int winPosY = -1;
 };
 
 struct SessionConfig {
@@ -43,6 +45,7 @@ private:
     GLFWwindow* createWindow();
     void destroyWindow(GLFWwindow* window);
 
+    int m_winPosX = -1, m_winPosY = -1;
     bool m_glfwInitialized = false;
     GLFWwindow* m_persistentCtx = nullptr;
 };

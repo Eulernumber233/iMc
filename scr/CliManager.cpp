@@ -73,6 +73,11 @@ void CliManager::parseCmdline(int argc, char* argv[]) {
             }
         } else if (arg == "--world") {
             if (i + 1 < argc) m_cmdline.worldName = argv[++i];
+        } else if (arg == "--winpos") {
+            if (i + 2 < argc) {
+                m_cmdline.winPosX = std::atoi(argv[++i]);
+                m_cmdline.winPosY = std::atoi(argv[++i]);
+            }
         }
     }
 }
@@ -184,6 +189,9 @@ GLFWwindow* CliManager::createWindow() {
     }
 
     setWindowIcon(window, "assert/textures/item/Axolotl_Bucket.png");
+    if (m_winPosX >= 0 && m_winPosY >= 0) {
+        glfwSetWindowPos(window, m_winPosX, m_winPosY);
+    }
     return window;
 }
 
@@ -394,6 +402,10 @@ int CliManager::run() {
             seed = cfg.seed;
             isNewWorld = cfg.isNewWorld;
         }
+
+        // 设置窗口初始位置（命令行或菜单指定）
+        m_winPosX = m_cmdline.winPosX;
+        m_winPosY = m_cmdline.winPosY;
 
         // Create window -> create world -> run
         GLFWwindow* window = createWindow();

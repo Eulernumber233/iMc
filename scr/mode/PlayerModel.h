@@ -39,6 +39,9 @@ public:
     // pose: 来自 PlayerAnimator 的姿态
     void drawPosed(Shader& shader, const glm::vec3& worldPos, const PlayerPose& pose);
 
+    // 使用外部纹理绘制（overrideTexture 替换 m_skinTexture，几何体复用）
+    void drawPosed(Shader& shader, const glm::vec3& worldPos, const PlayerPose& pose, GLuint overrideTexture);
+
     // 获取皮肤纹理 ID
     GLuint getTextureID() const { return m_skinTexture; }
 

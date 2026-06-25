@@ -42,7 +42,7 @@ Player::Player(std::shared_ptr<Camera> camera, GLFWwindow* window)
     updateCameraPosition();
 }
 
-void Player::initialize(UIManager& uiManager) {
+void Player::initialize(UIManager& uiManager, const std::string& skinPath) {
     m_uiManager = &uiManager;
 
     // 初始化物品栏
@@ -67,7 +67,7 @@ void Player::initialize(UIManager& uiManager) {
 
     // 创建并加载玩家模型
     m_model = std::make_unique<PlayerModel>();
-    if (!m_model->initialize("assert/mode/player/wide/steve.png")) {
+    if (!m_model->initialize(skinPath)) {
         std::cerr << "Player: Failed to initialize PlayerModel" << std::endl;
         m_model.reset();
     }

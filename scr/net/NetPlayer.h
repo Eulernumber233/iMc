@@ -47,6 +47,7 @@ public:
     uint16_t playerId = 0;
     ENetPeer* peer = nullptr;        // 所属连接（服务端用，客户端本地玩家为 nullptr）
     std::string playerName;
+    std::string skinName;
     std::unique_ptr<PlayerNetState> netState;  // 拥有 PlayerNetState
 
     NetPlayer() : netState(std::make_unique<PlayerNetState>()) {}

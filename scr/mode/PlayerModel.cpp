@@ -144,8 +144,8 @@ void PlayerModel::createBoxPart(Part part, glm::vec3 size,
         glm::vec3(x1, y1, z0),   // 右上后
         glm::vec3(x1, y1, z1),   // 右上前
         glm::vec3(1, 0, 0),
-        u0 / TEX_W, (v0 + D) / TEX_H,
-        (u0 + D) / TEX_W,   (v0 + D + H) / TEX_H);
+        (u0 + D)/ TEX_W, (v0 + D) / TEX_H,
+        u0 / TEX_W,   (v0 + D + H) / TEX_H);
 
     // Left face (-X): UV区域 (u0+D+W, v0+D, u0+D+W+D, v0+D+H)
     addFace(vertices, indices,
@@ -154,8 +154,8 @@ void PlayerModel::createBoxPart(Part part, glm::vec3 size,
         glm::vec3(x0, y1, z1),   // 左上前
         glm::vec3(x0, y1, z0),   // 左上后
         glm::vec3(-1, 0, 0),
-        (u0 + D + W) / TEX_W, (v0 + D) / TEX_H,
-        (u0 + D + W + D) / TEX_W, (v0 + D + H) / TEX_H);
+        (u0 + D + W + D) / TEX_W, (v0 + D) / TEX_H,
+        (u0 + D + W) / TEX_W, (v0 + D + H) / TEX_H);
 
     // Front face (+Z): UV区域 (u0+D, v0+D, u0+D+W, v0+D+H)
     addFace(vertices, indices,
@@ -376,6 +376,70 @@ void PlayerModel::drawPosed(Shader& shader, const glm::vec3& worldPos, const Pla
 
         shader.setMat4("model", model);
 
+        glBindVertexArray(m_parts[i].VAO);
+        glDrawElements(GL_TRIANGLES, m_parts[i].indexCount, GL_UNSIGNED_INT, 0);
+    }
+    glBindVertexArray(0);
+}
+
+void PlayerModel::drawPosed(Shader& shader, const glm::vec3& worldPos, const PlayerPose& pose, GLuint overrideTexture) {
+    // 使用外部纹理
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, overrideTexture);
+    shader.setInt("texture_diffuse1", 0);
+
+    // 以下与无参 drawPosed 完全相同
+    glm::mat4 root = glm::mat4(1.0f);
+    root = glm::translate(root, worldPos + pose.rootOffset);
+    root = glm::rotate(root, pose.bodyYaw, glm::vec3(0, 1, 0));
+
+    const glm::vec3 hipPivot = glm::vec3(0.0f, 12.0f / 16.0f, 0.0f);
+    glm::mat4 bodyTilt = glm::mat4(1.0f);
+    if (pose.bodyPitch != 0.0f) {
+        bodyTilt = glm::translate(bodyTilt, hipPivot);
+        bodyTilt = glm::rotate(bodyTilt, pose.bodyPitch, glm::vec3(1, 0, 0));
+        bodyTilt = glm::translate(bodyTilt, -hipPivot);
+    }
+
+    for (int i = 0; i < PART_COUNT; i++) {
+        if (m_parts[i].VAO == 0) continue;
+
+        glm::mat4 model = root * bodyTilt;
+        model = glm::translate(model, m_parts[i].origin);
+
+        glm::vec3 pv = m_parts[i].pivot;
+
+        auto applyJointRotation = [&](float pitch, float roll, float yaw) {
+            if (pitch == 0.0f && roll == 0.0f && yaw == 0.0f) return;
+            model = glm::translate(model, pv);
+            if (yaw != 0.0f)   model = glm::rotate(model, yaw,   glm::vec3(0, 1, 0));
+            if (pitch != 0.0f) model = glm::rotate(model, pitch, glm::vec3(1, 0, 0));
+            if (roll != 0.0f)  model = glm::rotate(model, roll,  glm::vec3(0, 0, 1));
+            model = glm::translate(model, -pv);
+        };
+
+        switch (i) {
+        case HEAD:
+            applyJointRotation(pose.headPitch, 0.0f, pose.headYaw);
+            break;
+        case RIGHT_ARM:
+            applyJointRotation(pose.rightArmPitch, pose.rightArmRoll, 0.0f);
+            break;
+        case LEFT_ARM:
+            applyJointRotation(pose.leftArmPitch, pose.leftArmRoll, 0.0f);
+            break;
+        case RIGHT_LEG:
+            applyJointRotation(pose.rightLegPitch, 0.0f, 0.0f);
+            break;
+        case LEFT_LEG:
+            applyJointRotation(pose.leftLegPitch, 0.0f, 0.0f);
+            break;
+        case BODY:
+        default:
+            break;
+        }
+
+        shader.setMat4("model", model);
         glBindVertexArray(m_parts[i].VAO);
         glDrawElements(GL_TRIANGLES, m_parts[i].indexCount, GL_UNSIGNED_INT, 0);
     }

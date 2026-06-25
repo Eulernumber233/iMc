@@ -50,7 +50,9 @@ public:
     bool isConnected() const { return m_connected; }
     uint16_t getLocalPlayerId() const { return m_localPlayerId; }
     uint32_t getWorldSeed() const { return m_worldSeed; }
+    const std::string& getWorldName() const { return m_worldName; }
     PlayerNetState* getLocalNetState() const { return m_localNetState; }
+    std::string getLocalSkinName() const;
 
     // ---- 访问下层 ----
     NetTransport& getTransport() { return m_transport; }
