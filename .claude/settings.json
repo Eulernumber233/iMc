@@ -9,7 +9,23 @@
       "PowerShell($paths = @\\('C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022','C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio'\\); foreach \\($p in $paths\\) { if \\(Test-Path $p\\) { Get-ChildItem $p -Recurse -Filter MSBuild.exe -ErrorAction SilentlyContinue | Select-Object -First 3 -ExpandProperty FullName } })",
       "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"e:\\\\opengl\\\\iMc\\\\iMc.sln\" /t:iMc:Compile /p:Configuration=Debug /p:Platform=x64 /nologo /verbosity:minimal /m 2>&1)",
       "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"e:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Debug /p:Platform=x64 /nologo /verbosity:minimal /m 2>&1)",
-      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"e:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Release /p:Platform=x64 /nologo /verbosity:minimal /m 2>&1)"
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"e:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Release /p:Platform=x64 /nologo /verbosity:minimal /m 2>&1)",
+      "Read(//c/Program Files/Microsoft Visual Studio/**)",
+      "Read(//c/Program Files/**)",
+      "PowerShell(& \"C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\\\\Installer\\\\vswhere.exe\" -latest -property installationPath)",
+      "PowerShell($msbuild = Get-ChildItem \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName; cd \"e:\\\\opengl\\\\iMc\"; & $msbuild iMc.vcxproj /p:Configuration=Debug /p:Platform=x64 /t:Build /m /v:minimal 2>&1 | Select-Object -Last 30)",
+      "PowerShell($f = \"e:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.h\"; $content = [System.IO.File]::ReadAllText\\($f, [System.Text.Encoding]::UTF8\\); [System.IO.File]::WriteAllText\\($f, $content, [System.Text.UTF8Encoding]::new\\($true\\)\\); $bytes = [System.IO.File]::ReadAllBytes\\($f\\); Write-Output \"ChunkManager.h: $\\($bytes[0].ToString\\('X2'\\)\\) $\\($bytes[1].ToString\\('X2'\\)\\) $\\($bytes[2].ToString\\('X2'\\)\\)\")",
+      "PowerShell($files = @\\(\"scr/net/NetCommon.h\", \"scr/net/NetMessage.h\", \"scr/net/NetMessage.cpp\", \"scr/net/NetManager.h\", \"scr/net/NetManager.cpp\", \"scr/net/NetChunkSync.h\", \"scr/net/NetChunkSync.cpp\", \"scr/World.cpp\", \"scr/render/RenderSystem.cpp\"\\); foreach \\($f in $files\\) { $full = \"e:\\\\opengl\\\\iMc\\\\$f\"; if \\(Test-Path $full\\) { $bytes = [System.IO.File]::ReadAllBytes\\($full\\); $bom = if \\($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF\\) { \"UTF-8-BOM\" } else { \"NO-BOM\" }; Write-Output \"$f : $bom\" } })",
+      "Bash(cat scr/chunk/ChunkManager.h)",
+      "Bash(mv scr/chunk/ChunkManager.h.tmp scr/chunk/ChunkManager.h)",
+      "PowerShell(Get-Process msbuild -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 500; $bytes = Get-Content \"e:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.h\" -Raw -Encoding UTF8; $utf8bom = New-Object System.Text.UTF8Encoding\\($true\\); [System.IO.File]::WriteAllText\\(\"e:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.h\", $bytes, $utf8bom\\); $check = [System.IO.File]::ReadAllBytes\\(\"e:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.h\"\\); Write-Output \"ChunkManager.h: $\\($check[0].ToString\\('X2'\\)\\) $\\($check[1].ToString\\('X2'\\)\\) $\\($check[2].ToString\\('X2'\\)\\)\")",
+      "PowerShell($content = Get-Content \"e:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.h\" -Raw -Encoding UTF8; $utf8bom = New-Object System.Text.UTF8Encoding\\($true\\); [System.IO.File]::WriteAllText\\(\"e:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager_bom.h\", $content, $utf8bom\\); Get-Content \"e:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager_bom.h\" -Raw -Encoding UTF8 | Out-Null; Write-Output \"Temp file written\")",
+      "PowerShell(cmd /c \"copy /y e:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager_bom.h e:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.h\")",
+      "PowerShell(Get-Process | Where-Object { $_.ProcessName -match \"cl|msbuild|vbc|conhost|Code\" } | Select-Object Id, ProcessName -First 10)",
+      "Read(//c//**)",
+      "PowerShell(& \"C:\\\\Windows\\\\Microsoft.NET\\\\Framework64\\\\v4.0.30319\\\\MSBuild.exe\" \"e:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Debug /p:Platform=x64 /t:Build /m /nologo 2>&1)",
+      "Bash(ls \"E:/\" 2>/dev/null | head -20)",
+      "Read(//e//**)"
     ]
   }
 }

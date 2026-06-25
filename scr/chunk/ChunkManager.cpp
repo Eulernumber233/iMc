@@ -15,7 +15,6 @@
 #endif
 
 namespace {
-    // 找到 v 中最低位的 1 的索引（v 必须非零）
     inline int lowestBitIndex(uint32_t v) {
 #ifdef _MSC_VER
         unsigned long idx;
@@ -37,12 +36,14 @@ ChunkManager::~ChunkManager() {
     m_workerPool.stop();
 
     m_loadedChunks.clear();
-    m_pendingChunks.clear();
-    m_pendingIntegrate.clear();
+    m_blockReady.clear();
+    m_pendingBlockData.clear();
+    m_pendingMeshResults.clear();
     m_activeChunks.clear();
     m_sectionSlots.clear();
     m_drawCommands.clear();
     m_inFlight.clear();
+    m_meshInFlight.clear();
 
     if (m_indirectBuffer) {
         glDeleteBuffers(1, &m_indirectBuffer);
@@ -77,13 +78,22 @@ void ChunkManager::initialize(int renderRadius, const glm::vec3& cameraPos) {
         (uint32_t)((2 * renderRadius + 1) * (2 * renderRadius + 1) * 1024));
     m_arena.initialize(initialInstances);
 
+    // 预分配 hash map 容量，防止 rehash 导致 BlockReadyEntry 地址变化
+    // （MeshBuildInput 持有指向 BlockReadyEntry::blocks 的原始指针）
+    int maxChunks = (2 * (m_renderRadius + UNLOAD_MARGIN_CHUNKS) + 1);
+    maxChunks = maxChunks * maxChunks + 64; // 留余量
+    m_loadedChunks.reserve(maxChunks);
+    m_blockReady.reserve(maxChunks);
+    m_inFlight.reserve(maxChunks);
+    m_meshInFlight.reserve(maxChunks);
+    m_sectionSlots.reserve(maxChunks * Chunk::SECTION_COUNT);
+
     glGenBuffers(1, &m_indirectBuffer);
     glBindBuffer(GL_DRAW_INDIRECT_BUFFER, m_indirectBuffer);
     m_indirectBufferCapacityBytes = sizeof(DrawElementsIndirectCommand) * 256;
     glBufferData(GL_DRAW_INDIRECT_BUFFER, m_indirectBufferCapacityBytes, nullptr, GL_DYNAMIC_DRAW);
     glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
 
-    // SectionBases SSBO：与 indirect buffer 命令一一对应，shader 用 gl_DrawID 索引
     glGenBuffers(1, &m_sectionBaseSSBO);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_sectionBaseSSBO);
     m_sectionBaseCapacityBytes = sizeof(glm::vec4) * 256;
@@ -113,19 +123,22 @@ void ChunkManager::update(std::shared_ptr<Camera> camera) {
         m_needChunkScan = true;
     }
 
-    // 相机移动 >1m 或 FOV 变化时递增可见性版本号，各 chunk 用它替代各自 distance 比较
     float camDist = glm::distance(m_lastVisCameraPos, m_camera->Position);
-    float fovDelta = std::abs(m_lastVisCameraFOV - m_camera->FOV);
-    if (camDist > 1.0f || fovDelta > 0.1f) {
+    float YawDelta = std::abs(m_lastVisCameraYaw - m_camera->Yaw);
+    float YawDelta_w = std::fmod(YawDelta, 360.0f);// 处理角度 wrap-around
+    float PitchDelta = std::abs(m_lastVisCameraPitch - m_camera->Pitch);
+    if (camDist > 1.0f || PitchDelta > 0.1f || (YawDelta > 1.0 && YawDelta_w > 1.0)) {
         m_lastVisCameraPos = m_camera->Position;
-        m_lastVisCameraFOV = m_camera->FOV;
+        m_lastVisCameraYaw = m_camera->Yaw;
+        m_lastVisCameraPitch = m_camera->Pitch;
         ++m_visGeneration;
     }
 
-    integrateBuiltChunks();
-    integrateStitchResults();
+    // Task 1 集成：block data 进入 BLOCK_READY，通知邻居，触发 Task 2 检查
+    integrateBlockData();
+    // Task 2 集成：mesh 结果进入 m_loadedChunks
+    integrateMeshResults();
 
-    // 补投递：m_needChunkScan 避免半径内全部就位后每帧空扫 361 个位置
     if (m_needChunkScan && (int)m_inFlight.size() < m_maxInflightRequests) {
         PROFILE_SCOPE("requestMissingChunks");
         requestMissingChunks();
@@ -133,7 +146,6 @@ void ChunkManager::update(std::shared_ptr<Camera> camera) {
 
     rebuildDrawCommands();
 
-    // 自动保存定时器 + 远距离区块卸载
     if (m_saveManager) {
         double now = glfwGetTime();
         float dt = (float)(now - m_lastSaveCheckTime);
@@ -149,6 +161,10 @@ void ChunkManager::update(std::shared_ptr<Camera> camera) {
     }
 }
 
+// ============================================================================
+// Chunk 查询
+// ============================================================================
+
 Chunk* ChunkManager::getChunk(const glm::ivec2& chunkPos) {
     auto it = m_loadedChunks.find(chunkPosToKey(chunkPos));
     return it != m_loadedChunks.end() ? it->second.get() : nullptr;
@@ -162,8 +178,30 @@ Chunk* ChunkManager::getChunkAnyState(const glm::ivec2& chunkPos) {
     ChunkKey key = chunkPosToKey(chunkPos);
     auto it = m_loadedChunks.find(key);
     if (it != m_loadedChunks.end()) return it->second.get();
-    auto it2 = m_pendingChunks.find(key);
-    if (it2 != m_pendingChunks.end()) return it2->second.get();
+    // BLOCK_READY 中的 chunk 有方块数据但无 mesh，仍返回 nullptr（调用方需要 Chunk*）
+    return nullptr;
+}
+
+const BlockState* ChunkManager::getChunkBlockData(const glm::ivec2& chunkPos) {
+    ChunkKey key = chunkPosToKey(chunkPos);
+    // LOADED：从 Chunk 的完整方块数组读取（按 CHUNK_VOLUME 连续布局）
+    auto itLoaded = m_loadedChunks.find(key);
+    if (itLoaded != m_loadedChunks.end()) {
+        // 考虑到 Chunk 内部的 Section 可能被修改，返回完整方块数据指针
+        // 注意：调用方必须保证在主线程读取时，Chunk 内部的 Section 不会被修改（否则可能出现数据竞争）。
+        // TODO 目前没有这个保护措施
+        // 实现思路：可以通过增加一个结合四方向标志位，
+        // 当标志位为1111时，表示该chunk四方向的邻居都已经加载完成（完成任务一和任务二）
+        // 此时不会再有其他区块为完成任务二而读取当前区块数据的需求。
+        // 此时，开放玩家对这个区块的修改权限，允许玩家修改方块数据。
+        // 也就是说，每次玩家修改区块数据，都要检查这个标志位是否为1111，如果不是，则不允许修改。
+        return itLoaded->second->fullBlockData();
+    }
+    // BLOCK_READY
+    auto itBR = m_blockReady.find(key);
+    if (itBR != m_blockReady.end()) {
+        return itBR->second.blocks.get();
+    }
     return nullptr;
 }
 
@@ -196,6 +234,8 @@ void ChunkManager::printStats() const {
     std::cout << "=== Chunk Manager Stats ===" << std::endl;
     std::cout << "Render Radius: " << m_renderRadius << std::endl;
     std::cout << "Loaded Chunks: " << getLoadedChunkCount() << std::endl;
+    std::cout << "Block-Ready: " << getBlockReadyCount() << std::endl;
+    std::cout << "Mesh In-Flight: " << getMeshInFlightCount() << std::endl;
     std::cout << "Active Chunks: " << getActiveChunkCount() << std::endl;
     std::cout << "Visible Instances: " << m_visibleInstanceCount << std::endl;
     std::cout << "InFlight: " << m_inFlight.size()
@@ -228,7 +268,6 @@ bool ChunkManager::isWithinEvictRadius(const glm::ivec2& chunkPos,
 void ChunkManager::updateActiveChunks(const glm::vec3& cameraPos) {
     m_activeChunks.clear();
 
-    // 1) active 半径内：已 loaded 的进 active 列表
     for (int dx = -m_renderRadius; dx <= m_renderRadius; ++dx) {
         for (int dz = -m_renderRadius; dz <= m_renderRadius; ++dz) {
             glm::ivec2 chunkPos(m_currentCenterChunk.x + dx, m_currentCenterChunk.y + dz);
@@ -238,13 +277,21 @@ void ChunkManager::updateActiveChunks(const glm::vec3& cameraPos) {
         }
     }
 
-    // 2) 投递缺失的 build：从中心向外按 Chebyshev 距离逐圈扩散，确保由近到远加载。
-    //    扫描范围扩展到 stitch 预加载半径，外圈陪练用于让边缘 chunk 凑齐 4 邻居。
+    // 重新检查 m_blockReady 中进入活跃半径的区块，尝试投递 mesh
+    // （玩家移动到新位置后，之前为远程客户端生成而跳过 mesh 的区块可能需要 mesh 了）
+    for (auto& [key, entry] : m_blockReady) {
+        int cx = (int32_t)(key >> 32);
+        int cz = (int32_t)(key & 0xFFFFFFFFLL);
+        glm::ivec2 cp(cx, cz);
+        if (isWithinActiveRadius(cp, m_currentCenterChunk)) {
+            checkAndSubmitMesh(cp);
+        }
+    }
+
     if ((int)m_inFlight.size() < m_maxInflightRequests) {
         requestMissingChunks();
     }
 
-    // 把走出 evict 半径的 chunk 的 GPU slot 释放掉（CPU 数据保留）
     evictFarChunkSlots();
 }
 
@@ -256,7 +303,6 @@ void ChunkManager::evictFarChunkSlots() {
         glm::ivec2 cp = chunk->getPosition();
         if (isWithinEvictRadius(cp, m_currentCenterChunk)) continue;
 
-        // 走出 evict 半径 → 释放该 chunk 所有 section 的 GPU slot
         for (int sy = 0; sy < Chunk::SECTION_COUNT; ++sy) {
             Section& sec = chunk->getSection(sy);
             ChunkArena::Slot slot = sec.getGpuSlot();
@@ -264,44 +310,98 @@ void ChunkManager::evictFarChunkSlots() {
             m_arena.free(slot);
             SectionKey key = makeSectionKey(cp.x, cp.y, sy);
             m_sectionSlots.erase(key);
-            sec.notifyGpuSlotReleased(); // 同时清除 section 内缓存的 slot
+            sec.notifyGpuSlotReleased();
         }
     }
 }
 
-void ChunkManager::requestMissingChunks() {
-    // 网络客户端：不进行地形生成，chunk 由 importChunkData 提供
-    if (m_networkClient) return;
+// ============================================================================
+// Task 1 投递：requestMissingChunks / requestChunkLoad / forceChunkLoad / importChunkData
+// ============================================================================
 
-    // 优先靠近相机中心：用曼哈顿距离逐圈扩散；扫描到 stitch 预加载半径以填外圈陪练。
-    const int loadR = m_renderRadius + STITCH_PRELOAD_MARGIN;
+void ChunkManager::requestMissingChunks() {
+    // 网络客户端：清理超时的 in-flight 条目，避免僵尸请求占满槽位
+    if (m_networkClient) {
+        double now = glfwGetTime();
+        for (auto it = m_inFlight.begin(); it != m_inFlight.end(); ) {
+            if (now - it->second > INFLIGHT_TIMEOUT_SEC) {
+                int cx = (int32_t)(it->first >> 32);
+                int cz = (int32_t)(it->first & 0xFFFFFFFFLL);
+                printf("[ChunkManager] inflight timeout for (%d,%d) after %.1fs, re-requesting\n",
+                    cx, cz, now - it->second);
+                it = m_inFlight.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    // 网络客户端：通过回调发送 CHUNK_REQUEST
+    if (m_networkClient) {
+        if (!m_onRequestChunk) return;
+        const int loadR = m_renderRadius + BLOCK_PRELOAD_MARGIN;
+        bool foundMissing = false;
+        for (int r = 0; r <= loadR; ++r) {
+            if ((int)m_inFlight.size() >= m_maxInflightRequests) return;
+            for (int dx = -r; dx <= r; ++dx) {
+                int absDx = std::abs(dx);
+                for (int dz = -r; dz <= r; ++dz) {
+                    if (std::max(absDx, std::abs(dz)) != r) continue;
+                    glm::ivec2 chunkPos(m_currentCenterChunk.x + dx, m_currentCenterChunk.y + dz);
+                    if (getChunk(chunkPos)) continue;
+                    ChunkKey key = chunkPosToKey(chunkPos);
+                    if (m_blockReady.find(key) != m_blockReady.end()) continue;
+                    if (m_inFlight.find(key) != m_inFlight.end()) continue;
+                    if ((int)m_inFlight.size() >= m_maxInflightRequests) return;
+                    foundMissing = true;
+                    m_inFlight[key] = glfwGetTime();
+                    m_onRequestChunk(chunkPos.x, chunkPos.y);
+                }
+            }
+        }
+        if (!foundMissing) m_needChunkScan = false;
+        return;
+    }
+
+    // 本地模式：投递 Task 1（方块数据生成/加载）
+    const int loadR = m_renderRadius + BLOCK_PRELOAD_MARGIN;
     bool foundMissing = false;
     for (int r = 0; r <= loadR; ++r) {
         if ((int)m_inFlight.size() >= m_maxInflightRequests) return;
         for (int dx = -r; dx <= r; ++dx) {
             int absDx = std::abs(dx);
             for (int dz = -r; dz <= r; ++dz) {
-                if (std::max(absDx, std::abs(dz)) != r) continue; // 只取最外圈
+                if (std::max(absDx, std::abs(dz)) != r) continue;
                 glm::ivec2 chunkPos(m_currentCenterChunk.x + dx, m_currentCenterChunk.y + dz);
-                if (getChunk(chunkPos) || getPendingChunk(chunkPos)) continue;
-                if (m_inFlight.find(chunkPosToKey(chunkPos)) != m_inFlight.end()) continue;
+                ChunkKey key = chunkPosToKey(chunkPos);
+                if (getChunk(chunkPos)) continue;
+                if (m_blockReady.find(key) != m_blockReady.end()) continue;
+                if (m_inFlight.find(key) != m_inFlight.end()) continue;
                 if ((int)m_inFlight.size() >= m_maxInflightRequests) return;
                 foundMissing = true;
                 requestChunkLoad(chunkPos);
             }
         }
     }
-    // 全部圈扫完没有缺口 → 下次不必再扫，等相机移动或 chunk 卸载再复位
     if (!foundMissing) m_needChunkScan = false;
 }
 
 void ChunkManager::requestChunkLoad(const glm::ivec2& chunkPos) {
     ChunkKey key = chunkPosToKey(chunkPos);
     if (m_loadedChunks.find(key) != m_loadedChunks.end()) return;
-    if (m_pendingChunks.find(key) != m_pendingChunks.end()) return;
+    if (m_blockReady.find(key) != m_blockReady.end()) return;
     if (m_inFlight.find(key) != m_inFlight.end()) return;
-    m_inFlight.insert(key);
-    m_workerPool.submit(chunkPos);
+    m_inFlight[key] = glfwGetTime();
+    m_workerPool.submitBuild(chunkPos);
+}
+
+void ChunkManager::forceChunkLoad(const glm::ivec2& chunkPos) {
+    ChunkKey key = chunkPosToKey(chunkPos);
+    if (m_loadedChunks.find(key) != m_loadedChunks.end()) return;
+    if (m_blockReady.find(key) != m_blockReady.end()) return;
+    if (m_inFlight.find(key) != m_inFlight.end()) return;
+    m_inFlight[key] = glfwGetTime();
+    m_workerPool.submitBuild(chunkPos);
 }
 
 void ChunkManager::importChunkData(int chunkX, int chunkZ,
@@ -309,266 +409,276 @@ void ChunkManager::importChunkData(int chunkX, int chunkZ,
     glm::ivec2 pos(chunkX, chunkZ);
     ChunkKey key = chunkPosToKey(pos);
 
-    // 跳过已存在或已在加载的 chunk
     if (m_loadedChunks.find(key) != m_loadedChunks.end()) {
         printf("[ChunkManager] importChunkData: (%d,%d) already loaded, skip\n", chunkX, chunkZ);
         return;
     }
-    if (m_pendingChunks.find(key) != m_pendingChunks.end()) {
-        printf("[ChunkManager] importChunkData: (%d,%d) already pending, skip\n", chunkX, chunkZ);
-        return;
-    }
-    if (m_inFlight.find(key) != m_inFlight.end()) {
-        printf("[ChunkManager] importChunkData: (%d,%d) already in-flight, skip\n", chunkX, chunkZ);
+    if (m_blockReady.find(key) != m_blockReady.end()) {
+        printf("[ChunkManager] importChunkData: (%d,%d) already block-ready, skip\n", chunkX, chunkZ);
         return;
     }
 
-    m_inFlight.insert(key);
-    m_workerPool.submitImport(pos, std::move(blockBuffer));
-    printf("[ChunkManager] importChunkData: (%d,%d) submitted, inflight=%zu\n",
-        chunkX, chunkZ, m_inFlight.size());
+    // 从 m_inFlight 移除（由 requestMissingChunks 插入的 CHUNK_REQUEST 标记）
+    m_inFlight.erase(key);
+
+    // 直接在主线程构造 BlockReadyEntry，无需走 worker（数据已经解压完毕）
+    BlockReadyEntry entry;
+    entry.blocks = std::move(blockBuffer);
+    m_blockReady[key] = std::move(entry);
+
+    // 通知邻居并检查是否可投递 mesh
+    notifyNeighborsBlockReady(pos);
+    checkAndSubmitMesh(pos);
+
+    printf("[ChunkManager] importChunkData: (%d,%d) block-ready, inflight=%zu, blockReady=%zu\n",
+        chunkX, chunkZ, m_inFlight.size(), m_blockReady.size());
 }
 
-Chunk* ChunkManager::getPendingChunk(const glm::ivec2& chunkPos) {
-    auto it = m_pendingChunks.find(chunkPosToKey(chunkPos));
-    return it != m_pendingChunks.end() ? it->second.get() : nullptr;
-}
+// ============================================================================
+// Task 1 集成：BlockDataResult → BLOCK_READY
+// ============================================================================
 
-void ChunkManager::integrateBuiltChunks() {
-    PROFILE_SCOPE("integrateBuiltChunks");
+void ChunkManager::integrateBlockData() {
+    PROFILE_SCOPE("integrateBlockData");
     {
-        PROFILE_SCOPE("ibc.drainCompleted");
-        auto results = m_workerPool.drainCompleted();
+        PROFILE_SCOPE("ibd.drain");
+        auto results = m_workerPool.drainBlockData();
         if (!results.empty()) {
-            Profiler::addCounter("ibc.resultCount", (int64_t)results.size());
-            for (auto& r : results) m_pendingIntegrate.push_back(std::move(r));
+            Profiler::addCounter("ibd.resultCount", (int64_t)results.size());
+            for (auto& r : results) m_pendingBlockData.push_back(std::move(r));
         }
     }
-    if (m_pendingIntegrate.empty()) return;
+    if (m_pendingBlockData.empty()) return;
 
-    int budget = MAX_INTEGRATE_PER_FRAME;
-    while (budget > 0 && !m_pendingIntegrate.empty()) {
-        ChunkBuildResult r = std::move(m_pendingIntegrate.front());
-        m_pendingIntegrate.pop_front();
+    int budget = MAX_BLOCK_INTEGRATE_PER_FRAME;
+    while (budget > 0 && !m_pendingBlockData.empty()) {
+        BlockDataResult r = std::move(m_pendingBlockData.front());
+        m_pendingBlockData.pop_front();
 
         ChunkKey key = chunkPosToKey(r.pos);
         m_inFlight.erase(key);
 
-        // 已存在 → 丢弃（重复投递或竞态），不消耗 budget。
+        // 已存在（loaded 或 block-ready）→ 跳过
         if (m_loadedChunks.find(key) != m_loadedChunks.end()) continue;
-        if (m_pendingChunks.find(key) != m_pendingChunks.end()) continue;
+        if (m_blockReady.find(key) != m_blockReady.end()) continue;
 
-        auto chunk = std::make_unique<Chunk>(r.pos, this);
-        {
-            PROFILE_SCOPE("ibc.adoptSections");
-            chunk->adoptSections(std::move(r.sections));
-        }
+        // 进入 BLOCK_READY
+        BlockReadyEntry entry;
+        entry.blocks = std::move(r.blocks);
+        m_blockReady[key] = std::move(entry);
 
-        Chunk* raw = chunk.get();
-        m_pendingChunks[key] = std::move(chunk);
-        {
-            PROFILE_SCOPE("ibc.linkNeighbors");
-            linkNeighbors(raw);
-        }
+        // 通知 4 邻居"我这个位置方块数据已就绪"
+        notifyNeighborsBlockReady(r.pos);
 
-        {
-            PROFILE_SCOPE("ibc.trySubmitStitchJobs");
-            trySubmitStitchJobs(raw);
-            for (int d = 0; d < 4; ++d) {
-                if (Chunk* nb = raw->m_neighbors[d]) {
-                    trySubmitStitchJobs(nb);
-                }
-            }
-        }
+        // 检查自身是否可投递 Task 2
+        checkAndSubmitMesh(r.pos);
+
         --budget;
     }
-    Profiler::addCounter("ibc.queueDepth", (int64_t)m_pendingIntegrate.size());
+    Profiler::addCounter("ibd.queueDepth", (int64_t)m_pendingBlockData.size());
+}
+
+// ============================================================================
+// 邻居标记 & Task 2 触发
+// ============================================================================
+
+void ChunkManager::notifyNeighborsBlockReady(const glm::ivec2& pos) {
+    // 4 方向邻居偏移
+    static const glm::ivec2 offsets[4] = {
+        { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 }  // +X, -X, +Z, -Z
+    };
+    // 邻居视角下的"我"的方向：oppDir[d]
+    static const int oppDir[4] = { 1, 0, 3, 2 };
+
+    for (int d = 0; d < 4; ++d) {
+        glm::ivec2 nbPos = pos + offsets[d];
+        ChunkKey nbKey = chunkPosToKey(nbPos);
+
+        // 邻居在 BLOCK_READY 中 → 标记它"我这一侧已就绪"
+        auto itBR = m_blockReady.find(nbKey);
+        if (itBR != m_blockReady.end()) {
+            itBR->second.neighborBlockReady |= (uint8_t)(1u << oppDir[d]);
+            // 检查邻居是否可投递 Task 2
+            checkAndSubmitMesh(nbPos);
+        }
+
+        // 邻居在 LOADED 中 → 无需操作（loaded 不需要 mesh rebuild）
+    }
+
+    // 更新自身的 neighborBlockReady：扫 4 方向，如果邻居有方块数据则置位
+    auto itSelf = m_blockReady.find(chunkPosToKey(pos));
+    if (itSelf != m_blockReady.end()) {
+        for (int d = 0; d < 4; ++d) {
+            glm::ivec2 nbPos = pos + offsets[d];
+            if (getChunkBlockData(nbPos)) {
+                itSelf->second.neighborBlockReady |= (uint8_t)(1u << d);
+            }
+        }
+    }
+}
+
+void ChunkManager::checkAndSubmitMesh(const glm::ivec2& pos) {
+    // 服务端模式：只对活跃半径内的区块投递 mesh
+    // 为远程客户端生成的区块只需停留在 m_blockReady，客户端拿到数据后自行 mesh
+    if (!m_networkClient && !isWithinActiveRadius(pos, m_currentCenterChunk)) return;
+
+    ChunkKey key = chunkPosToKey(pos);
+
+    // 自身必须在 BLOCK_READY
+    auto it = m_blockReady.find(key);
+    if (it == m_blockReady.end()) return;
+
+    // 已 loaded（stale BlockReadyEntry 尚未清理）→ 不需要重复 mesh
+    if (m_loadedChunks.find(key) != m_loadedChunks.end()) return;
+
+    // 已在 mesh 投递中
+    if (m_meshInFlight.find(key) != m_meshInFlight.end()) return;
+
+    // 检查 4 方向邻居是否都有方块数据
+    static const glm::ivec2 offsets[4] = {
+        { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 }
+    };
+
+    for (int d = 0; d < 4; ++d) {
+        if (!(it->second.neighborBlockReady & (uint8_t)(1u << d))) {
+            // 这个方向还没就绪，double-check
+            if (getChunkBlockData(pos + offsets[d])) {
+                it->second.neighborBlockReady |= (uint8_t)(1u << d);
+            } else {
+                return; // 有方向未就绪，不能投递
+            }
+        }
+    }
+
+    // 所有 4 方向 + 自身都就绪 → 投递 Task 2
+    submitMeshTask(pos);
+}
+
+void ChunkManager::submitMeshTask(const glm::ivec2& pos) {
+    ChunkKey key = chunkPosToKey(pos);
+    auto it = m_blockReady.find(key);
+    if (it == m_blockReady.end()) return;
+    if (m_meshInFlight.find(key) != m_meshInFlight.end()) return;
+
+    // 构建 MeshBuildInput
+    MeshBuildInput input;
+    input.pos = pos;
+    input.selfBlocks = it->second.blocks.get();
+
+    static const glm::ivec2 offsets[4] = {
+        { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 }
+    };
+    for (int d = 0; d < 4; ++d) {
+        input.neighborBlocks[d] = getChunkBlockData(pos + offsets[d]);
+    }
+
+    m_meshInFlight.insert(key);
+    m_workerPool.submitMeshBuild(input);
+}
+
+// ============================================================================
+// Task 2 集成：ChunkBuildResult → m_loadedChunks
+// ============================================================================
+
+void ChunkManager::integrateMeshResults() {
+    PROFILE_SCOPE("integrateMeshResults");
+    {
+        PROFILE_SCOPE("imr.drain");
+        auto results = m_workerPool.drainMeshResults();
+        if (!results.empty()) {
+            Profiler::addCounter("imr.resultCount", (int64_t)results.size());
+            for (auto& r : results) m_pendingMeshResults.push_back(std::move(r));
+        }
+    }
+    if (m_pendingMeshResults.empty()) return;
+
+    int budget = MAX_MESH_INTEGRATE_PER_FRAME;
+    while (budget > 0 && !m_pendingMeshResults.empty()) {
+        ChunkBuildResult r = std::move(m_pendingMeshResults.front());
+        m_pendingMeshResults.pop_front();
+
+        ChunkKey key = chunkPosToKey(r.pos);
+        m_meshInFlight.erase(key);
+
+        if (m_loadedChunks.find(key) != m_loadedChunks.end()) continue;
+
+        // 创建 Chunk 并装入 m_loadedChunks（内部从 m_blockReady 移交完整方块数据）
+        loadMeshResult(r);
+
+        --budget;
+    }
+    Profiler::addCounter("imr.queueDepth", (int64_t)m_pendingMeshResults.size());
+}
+
+void ChunkManager::loadMeshResult(ChunkBuildResult& result) {
+    glm::ivec2 pos = result.pos;
+    ChunkKey key = chunkPosToKey(pos);
+
+    auto chunk = std::make_unique<Chunk>(pos, this);
+    chunk->adoptSections(std::move(result.sections));
+
+    // 将 BlockReadyEntry 的完整方块数据移交到 Chunk，供邻居 mesh 构建读取
+    auto itBR = m_blockReady.find(key);
+    if (itBR != m_blockReady.end()) {
+        chunk->setFullBlockData(std::move(itBR->second.blocks));
+        m_blockReady.erase(itBR);
+    }
+
+    Chunk* raw = chunk.get();
+    m_loadedChunks[key] = std::move(chunk);
+
+    // 连通邻居指针
+    linkNeighbors(raw);
+
+    // 在活跃半径内 → 加入 active 列表
+    if (isWithinActiveRadius(pos, m_currentCenterChunk)) {
+        m_activeChunks.push_back(raw);
+    }
+
+    // 新 loaded chunk 出现 → 重新检查周围 BLOCK_READY chunk 是否可投递 Task 2
+    // （它们之前可能缺这个方向）
+    static const glm::ivec2 offsets[4] = {
+        { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 }
+    };
+    for (int d = 0; d < 4; ++d) {
+        glm::ivec2 nbPos = pos + offsets[d];
+        ChunkKey nbKey = chunkPosToKey(nbPos);
+        auto itNbrBR = m_blockReady.find(nbKey);
+        if (itNbrBR != m_blockReady.end()) {
+            // 标记该方向已就绪
+            static const int oppDir[4] = { 1, 0, 3, 2 };
+            itNbrBR->second.neighborBlockReady |= (uint8_t)(1u << oppDir[d]);
+            checkAndSubmitMesh(nbPos);
+        }
+    }
 }
 
 void ChunkManager::linkNeighbors(Chunk* newChunk) {
     glm::ivec2 p = newChunk->getPosition();
-    // 邻居指针对 pending / loaded 都连通：玩家交互路径（setBlockAndUpdate）需要跨 chunk
-    // 路由到任何已存在的邻居。stitch 任务的发起逻辑由 trySubmitStitchJobs 单独管控，只对
-    // pending↔pending 投递，所以指向 loaded 邻居不会触发 worker 修改 loaded mesh。
-    auto findAny = [this](const glm::ivec2& q) -> Chunk* {
-        if (Chunk* c = getPendingChunk(q)) return c;
-        return getChunk(q); // loaded
-        };
-    Chunk* xp = findAny(glm::ivec2(p.x + 1, p.y));
-    Chunk* xn = findAny(glm::ivec2(p.x - 1, p.y));
-    Chunk* zp = findAny(glm::ivec2(p.x, p.y + 1));
-    Chunk* zn = findAny(glm::ivec2(p.x, p.y - 1));
+
+    auto findLoaded = [this](const glm::ivec2& q) -> Chunk* {
+        return getChunk(q);
+    };
+
+    Chunk* xp = findLoaded(glm::ivec2(p.x + 1, p.y));
+    Chunk* xn = findLoaded(glm::ivec2(p.x - 1, p.y));
+    Chunk* zp = findLoaded(glm::ivec2(p.x, p.y + 1));
+    Chunk* zn = findLoaded(glm::ivec2(p.x, p.y - 1));
 
     newChunk->m_neighbors[0] = xp;
     newChunk->m_neighbors[1] = xn;
     newChunk->m_neighbors[2] = zp;
     newChunk->m_neighbors[3] = zn;
 
-    // 连接邻居时，若对端之前因无邻居而提前标了 stitch done，现在邻居出现了，
-    // 需要复位该方向的 done（只复位仍在 pending 中的 chunk，loaded 不参与 stitch）。
-    if (xp) {
-        if (xp->isStitchDone(1) && m_pendingChunks.find(chunkPosToKey(xp->getPosition())) != m_pendingChunks.end()) {
-            xp->m_stitchDone &= ~(1u << 1);
-        }
-        xp->m_neighbors[1] = newChunk;
-    }
-    if (xn) {
-        if (xn->isStitchDone(0) && m_pendingChunks.find(chunkPosToKey(xn->getPosition())) != m_pendingChunks.end()) {
-            xn->m_stitchDone &= ~(1u << 0);
-        }
-        xn->m_neighbors[0] = newChunk;
-    }
-    if (zp) {
-        if (zp->isStitchDone(3) && m_pendingChunks.find(chunkPosToKey(zp->getPosition())) != m_pendingChunks.end()) {
-            zp->m_stitchDone &= ~(1u << 3);
-        }
-        zp->m_neighbors[3] = newChunk;
-    }
-    if (zn) {
-        if (zn->isStitchDone(2) && m_pendingChunks.find(chunkPosToKey(zn->getPosition())) != m_pendingChunks.end()) {
-            zn->m_stitchDone &= ~(1u << 2);
-        }
-        zn->m_neighbors[2] = newChunk;
-    }
+    if (xp) xp->m_neighbors[1] = newChunk;
+    if (xn) xn->m_neighbors[0] = newChunk;
+    if (zp) zp->m_neighbors[3] = newChunk;
+    if (zn) zn->m_neighbors[2] = newChunk;
 }
 
-void ChunkManager::trySubmitStitchJobs(Chunk* chunk) {
-    // 仅当 self 在 pending 时调用。4 方向逐个看：邻居存在且也在 pending、双方该边
-    // 都未 done 且未 pending → 投递。loaded 邻居跳过（loaded 不再参与 stitch；
-    // 不变量是 chunk 进入 loaded 时它和所有邻居的 stitch 都已经完成）。
-    //
-    // 互斥：每个 chunk 同一时刻只能参与一个 stitch 任务（m_stitchBusy）。
-    // 因为 stitchWithNeighbor 会改 self 与 nb 的 mesh，两个 worker 同时改同一 chunk
-    // 会产生数据竞争。busy 由 self 和 nb 共同决定，stitch 完成时主线程清掉双方 busy
-    // 并再次调用 trySubmitStitchJobs，把剩余方向的边继续推进。
-    static constexpr int oppDir[4] = { 1, 0, 3, 2 };
-    static const BlockFace dirToFace[4] = { RIGHT, LEFT, FRONT, BACK };
-
-    if (chunk->isStitchBusy()) return;
-
-    for (int d = 0; d < 4; ++d) {
-        if (chunk->isStitchDone(d) || chunk->isStitchPending(d)) continue;
-        Chunk* nb = chunk->m_neighbors[d];
-        if (!nb) {
-            // 无邻居：网络客户端可能在已加载区域边缘，或邻居尚未导入。
-            // 暂不处理（也不标 done），等邻居出现后 linkNeighbors 会连通。
-            continue;
-        }
-        // loaded 邻居：见函数注释，按 done 处理。
-        if (m_loadedChunks.find(chunkPosToKey(nb->getPosition())) != m_loadedChunks.end()) {
-            chunk->markStitchDone(d);
-            continue;
-        }
-        int od = oppDir[d];
-        if (nb->isStitchDone(od) || nb->isStitchPending(od)) continue;
-        if (nb->isStitchBusy()) continue; // 邻居正在被别的 stitch 任务占用
-
-        chunk->markStitchPending(d);
-        nb->markStitchPending(od);
-        chunk->setStitchBusy(true);
-        nb->setStitchBusy(true);
-        m_workerPool.submitStitch(chunk, nb, (uint8_t)dirToFace[d]);
-        return; // self 已经 busy，剩下的方向得等本次完成才能投
-    }
-}
-
-void ChunkManager::integrateStitchResults() {
-    PROFILE_SCOPE("integrateStitchResults");
-    std::vector<StitchResult> results;
-    {
-        PROFILE_SCOPE("isr.drainStitch");
-        results = m_workerPool.drainStitchResults();
-    }
-    if (results.empty()) return;
-    Profiler::addCounter("isr.resultCount", (int64_t)results.size());
-
-    static constexpr int faceToDir[6] = { 0, 1, 2, 3, -1, -1 }; // RIGHT/LEFT/FRONT/BACK -> 0..3
-
-    for (const auto& sr : results) {
-        Chunk* a = getPendingChunk(sr.posA);
-        Chunk* b = getPendingChunk(sr.posB);
-        // 不变量：pending chunk 在 stitch 完成前不会被晋升或销毁，所以这两个查找一定命中。
-        // 防御性跳过仅为容灾。
-        if (!a || !b) continue;
-        int dA = faceToDir[sr.dirA];
-        int dB = faceToDir[sr.dirB];
-        if (dA < 0 || dB < 0) continue;
-        a->markStitchDone(dA);
-        b->markStitchDone(dB);
-        // 清除 busy，恢复 a/b 接受新 stitch 投递。
-        a->setStitchBusy(false);
-        b->setStitchBusy(false);
-    }
-
-    {
-        PROFILE_SCOPE("isr.repush");
-        // 推进剩余方向：busy 解除后双方都可能再投一条新边。同时本次涉及的 chunk 还可能
-        // 让它们的"次邻居"具备投递条件（次邻居的某方向曾因为对端 busy 跳过）。
-        for (const auto& sr : results) {
-            Chunk* a = getPendingChunk(sr.posA);
-            Chunk* b = getPendingChunk(sr.posB);
-            if (a) {
-                trySubmitStitchJobs(a);
-                for (int d = 0; d < 4; ++d) if (Chunk* nb = a->m_neighbors[d]) {
-                    if (m_pendingChunks.find(chunkPosToKey(nb->getPosition())) != m_pendingChunks.end())
-                        trySubmitStitchJobs(nb);
-                }
-            }
-            if (b) {
-                trySubmitStitchJobs(b);
-                for (int d = 0; d < 4; ++d) if (Chunk* nb = b->m_neighbors[d]) {
-                    if (m_pendingChunks.find(chunkPosToKey(nb->getPosition())) != m_pendingChunks.end())
-                        trySubmitStitchJobs(nb);
-                }
-            }
-        }
-    }
-
-    {
-        PROFILE_SCOPE("isr.promote");
-        // 再扫一遍把 4 方向都 done 的 chunk 晋升到 loaded。
-        for (const auto& sr : results) {
-            promoteIfReady(sr.posA);
-            promoteIfReady(sr.posB);
-        }
-    }
-}
-
-void ChunkManager::promoteIfReady(const glm::ivec2& chunkPos) {
-    auto it = m_pendingChunks.find(chunkPosToKey(chunkPos));
-    if (it == m_pendingChunks.end()) return;
-    Chunk* raw = it->second.get();
-
-    // 检查 4 方向是否全部 stitch done。
-    // 网络客户端模式下，无邻居的方向也视作完成（外侧全空气，打开边界面即可）。
-    static const BlockFace dirToFace[4] = { RIGHT, LEFT, FRONT, BACK };
-    bool ready = true;
-    for (int d = 0; d < 4; ++d) {
-        if (!raw->isStitchDone(d) && raw->m_neighbors[d] != nullptr) {
-            ready = false;
-            break;
-        }
-    }
-    if (!ready) return;
-
-    // 无邻居的方向：打开边界面（外侧视为全空气）
-    for (int d = 0; d < 4; ++d) {
-        if (!raw->isStitchDone(d) && raw->m_neighbors[d] == nullptr) {
-            raw->openBoundaryFace(dirToFace[d]);
-            raw->markStitchDone(d);
-        }
-    }
-
-    if (!raw->allStitchDone()) return;  // 安全断言，理论上不会到此
-
-    // 4 方向都 stitch 完毕 → 晋升。
-    auto node = m_pendingChunks.extract(it);
-    ChunkKey key = chunkPosToKey(chunkPos);
-    m_loadedChunks[key] = std::move(node.mapped());
-    if (isWithinActiveRadius(chunkPos, m_currentCenterChunk)) {
-        m_activeChunks.push_back(raw);
-    }
-}
+// ============================================================================
+// 渲染指令构建 & GPU 上传
+// ============================================================================
 
 void ChunkManager::releaseSectionSlot(SectionKey key) {
     auto it = m_sectionSlots.find(key);
@@ -631,7 +741,6 @@ void ChunkManager::rebuildDrawCommands() {
 
     {
         PROFILE_SCOPE("rdc.uploadPass");
-        // 第一遍：evict 半径内的脏 section 上传。
         for (auto& kv : m_loadedChunks) {
             Chunk* chunk = kv.second.get();
             if (!chunk->isMeshReady()) continue;
@@ -716,7 +825,7 @@ void ChunkManager::rebuildDrawCommands() {
         Profiler::addSample("rdc.cull.emitCmd", emitCmdUs);
         Profiler::addCounter("rdc.chunkTotal", chunkTotal);
         Profiler::addCounter("rdc.chunkCoarseCull", chunkCoarseCull);
-    } // rdc.cullPass
+    }
 
     Profiler::addCounter("rdc.drawCmdCount", (int64_t)m_drawCommands.size());
     Profiler::addCounter("rdc.visibleInstances", (int64_t)m_visibleInstanceCount);
@@ -752,6 +861,10 @@ void ChunkManager::syncSectionBaseSSBO() {
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 }
 
+// ============================================================================
+// 方块操作
+// ============================================================================
+
 bool ChunkManager::setBlock(const glm::ivec3& worldPos, BlockState state) {
     glm::ivec2 chunkPos(
         (int)std::floor(worldPos.x / (float)Chunk::WIDTH),
@@ -776,23 +889,27 @@ BlockState ChunkManager::getBlockAt(const glm::ivec3& worldPos) {
         (int)std::floor(worldPos.x / (float)Chunk::WIDTH),
         (int)std::floor(worldPos.z / (float)Chunk::DEPTH)
     );
-    Chunk* chunk = getChunk(chunkPos);
-    if (!chunk) return BlockState{};
+    // 查询 loaded 或 block-ready 中的方块数据（碰撞检测需要 block-ready 的方块）
+    const BlockState* data = getChunkBlockData(chunkPos);
+    if (!data) return BlockState{};
     glm::ivec3 localPos(
         ((worldPos.x % Chunk::WIDTH) + Chunk::WIDTH) % Chunk::WIDTH,
         worldPos.y,
         ((worldPos.z % Chunk::DEPTH) + Chunk::DEPTH) % Chunk::DEPTH
     );
     if (localPos.y < 0 || localPos.y >= Chunk::HEIGHT) return BlockState{};
-    return chunk->getBlock(localPos.x, localPos.y, localPos.z);
+    int idx = (localPos.y * Chunk::DEPTH + localPos.z) * Chunk::WIDTH + localPos.x;
+    return data[idx];
 }
+
+// ============================================================================
+// 存档
+// ============================================================================
 
 void ChunkManager::setSaveManager(ChunkSaveManager* sm) {
     m_saveManager = sm;
     m_workerPool.setSaveManager(sm);
 }
-
-// ====================== 存档 ======================
 
 bool ChunkManager::isWithinUnloadRadius(const glm::ivec2& chunkPos,
     const glm::ivec2& centerChunk) const {
@@ -809,7 +926,6 @@ void ChunkManager::saveChunkToDisk(Chunk* chunk) {
     constexpr int W = Chunk::WIDTH;
     constexpr int D = Chunk::DEPTH;
 
-    // 拼装 flat buffer：(y * D + z) * W + x
     auto buf = std::make_unique<BlockState[]>(VOL);
     BlockState* dst = buf.get();
     for (int sy = 0; sy < Chunk::SECTION_COUNT; ++sy) {
@@ -864,7 +980,7 @@ void ChunkManager::unloadDistantChunks() {
         ChunkKey key = chunkPosToKey(cp);
         auto it = m_loadedChunks.find(key);
         if (it == m_loadedChunks.end()) continue;
-        it->second->unload();  // 清理邻居指针
+        it->second->unload();
         m_loadedChunks.erase(it);
     }
 
@@ -874,11 +990,4 @@ void ChunkManager::unloadDistantChunks() {
 void ChunkManager::saveAllDirtyChunks() {
     if (!m_saveManager) return;
     doAutoSave();
-    // 也保存 pending 中的脏 chunk
-    for (auto& kv : m_pendingChunks) {
-        Chunk* c = kv.second.get();
-        if (c && c->isSaveDirty()) {
-            saveChunkToDisk(c);
-        }
-    }
 }

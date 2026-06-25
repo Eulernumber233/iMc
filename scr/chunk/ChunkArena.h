@@ -74,13 +74,14 @@ public:
     static constexpr uint32_t MAX_SLOT_INSTANCES = 12288;
 
 private:
+    // VBO 总容量不足时扩容。
     bool grow(uint32_t newCapacity);
     static int classFor(uint32_t needed);
 
     GLuint m_vbo = 0;
     uint32_t m_capacity = 0;       // VBO 总容量（实例）
     uint32_t m_cursor = 0;         // 未切区起点：[m_cursor, m_capacity) 是从未分配过的空间
-    uint32_t m_inUse = 0;
+    uint32_t m_inUse = 0;          // 已经使用的容量
 
     // 每个 size class 一个 free list，存 offset
     std::array<std::vector<uint32_t>, CLASS_COUNT> m_freeLists;

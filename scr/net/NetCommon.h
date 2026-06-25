@@ -43,6 +43,8 @@ enum class NetMsgType : uint8_t {
 
     // === 游戏数据 ===
     CHUNK_DATA    = 0x20,  // 服务端→客户端: chunk 方块数据 (LZ4 压缩)
+    CHUNK_REQUEST = 0x21,  // 客户端→服务端: 请求 chunk 数据
+    CHUNK_RESPONSE= 0x22,  // 服务端→客户端: chunk 数据响应
     BLOCK_CHANGE  = 0x23,  // 双向: 方块修改 (MVP 后实现)
     CHAT_MESSAGE  = 0x30,  // 双向: 聊天 (MVP 后实现)
 

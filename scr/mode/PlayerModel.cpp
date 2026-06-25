@@ -144,8 +144,18 @@ void PlayerModel::createBoxPart(Part part, glm::vec3 size,
         glm::vec3(x1, y1, z0),   // 右上后
         glm::vec3(x1, y1, z1),   // 右上前
         glm::vec3(1, 0, 0),
-        u0 / TEX_W,         (v0 + D) / TEX_H,
+        u0 / TEX_W, (v0 + D) / TEX_H,
         (u0 + D) / TEX_W,   (v0 + D + H) / TEX_H);
+
+    // Left face (-X): UV区域 (u0+D+W, v0+D, u0+D+W+D, v0+D+H)
+    addFace(vertices, indices,
+        glm::vec3(x0, y0, z0),   // 左下后
+        glm::vec3(x0, y0, z1),   // 左下前
+        glm::vec3(x0, y1, z1),   // 左上前
+        glm::vec3(x0, y1, z0),   // 左上后
+        glm::vec3(-1, 0, 0),
+        (u0 + D + W) / TEX_W, (v0 + D) / TEX_H,
+        (u0 + D + W + D) / TEX_W, (v0 + D + H) / TEX_H);
 
     // Front face (+Z): UV区域 (u0+D, v0+D, u0+D+W, v0+D+H)
     addFace(vertices, indices,
@@ -156,16 +166,6 @@ void PlayerModel::createBoxPart(Part part, glm::vec3 size,
         glm::vec3(0, 0, 1),
         (u0 + D) / TEX_W,       (v0 + D) / TEX_H,
         (u0 + D + W) / TEX_W,   (v0 + D + H) / TEX_H);
-
-    // Left face (-X): UV区域 (u0+D+W, v0+D, u0+D+W+D, v0+D+H)
-    addFace(vertices, indices,
-        glm::vec3(x0, y0, z0),   // 左下后
-        glm::vec3(x0, y0, z1),   // 左下前
-        glm::vec3(x0, y1, z1),   // 左上前
-        glm::vec3(x0, y1, z0),   // 左上后
-        glm::vec3(-1, 0, 0),
-        (u0 + D + W) / TEX_W,       (v0 + D) / TEX_H,
-        (u0 + D + W + D) / TEX_W,   (v0 + D + H) / TEX_H);
 
     // Back face (-Z): UV区域 (u0+D+W+D, v0+D, u0+2D+2W, v0+D+H)
     addFace(vertices, indices,

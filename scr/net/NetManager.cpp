@@ -31,6 +31,7 @@ bool NetManager::host(uint16_t port, const std::string& worldName, uint32_t seed
     player->playerName = "Host";
     player->peer = nullptr;  // 本地玩家无 peer
     m_localNetState = player->netState.get();
+    player->netState->setOwner(player.get());
 
     // 注册到 ObjectManager
     m_objManager.addObject(m_localPlayerId, std::move(player->netState));
@@ -100,6 +101,14 @@ bool NetManager::join(const std::string& ip, uint16_t port, const std::string& p
                                 payload.writeBytes(netMsg.payload.data(), netMsg.payload.size());
                             m_localPlayerId = payload.readPod<uint16_t>();
                             m_worldSeed = payload.readPod<uint32_t>();
+                            // 读取服务端玩家初始位置（新格式；兼容旧格式：若 payload 不够则用默认值）
+                            float spawnX = 0.0f, spawnY = 500.0f, spawnZ = 0.0f, spawnYaw = 0.0f;
+                            if (payload.remaining() >= sizeof(float) * 4) {
+                                spawnX = payload.readPod<float>();
+                                spawnY = payload.readPod<float>();
+                                spawnZ = payload.readPod<float>();
+                                spawnYaw = payload.readPod<float>();
+                            }
 
                             // 创建本地玩家
                             auto player = std::make_unique<NetPlayer>();
@@ -107,12 +116,16 @@ bool NetManager::join(const std::string& ip, uint16_t port, const std::string& p
                             player->playerName = playerName;
                             player->peer = nullptr;
                             m_localNetState = player->netState.get();
+                            player->netState->setOwner(player.get());
+                            // 设置初始位置（来自服务端）
+                            player->updateCachedPosition(glm::vec3(spawnX, spawnY, spawnZ));
+                            player->updateCachedLook(spawnYaw, 0.0f);
                             m_objManager.addObject(m_localPlayerId, std::move(player->netState));
                             player->netState.release();
                             m_players[m_localPlayerId] = std::move(player);
 
-                            printf("[NetManager] joined, local player id=%u, world seed=%u\n",
-                                m_localPlayerId, m_worldSeed);
+                            printf("[NetManager] joined, local player id=%u, world seed=%u, spawn=(%.1f,%.1f,%.1f)\n",
+                                m_localPlayerId, m_worldSeed, spawnX, spawnY, spawnZ);
                             gotAccept = true;
                         } else if (netMsg.type == NetMsgType::JOIN_DENY) {
                             MemoryStream payload;
@@ -261,6 +274,9 @@ void NetManager::dispatchEvents() {
                 m_players.erase(pid);
                 m_peerToPlayer.erase(it);
 
+                // 清理地形同步中的 pending 请求
+                m_chunkSync.onPeerDisconnected(ev.peer);
+
                 // 广播给其他人
                 if (m_isHost) {
                     auto msg = NetMessage::playerLeft(pid);
@@ -324,10 +340,15 @@ void NetManager::dispatchMessage(ENetPeer* peer, const NetMessage& msg) {
         break;
 
     case NetMsgType::CHUNK_DATA:
+    case NetMsgType::CHUNK_RESPONSE:
         if (!m_isHost) {
-            printf("[NetManager] received CHUNK_DATA (%zu bytes)\n", payload.size());
+            printf("[NetManager] received CHUNK_DATA/CHUNK_RESPONSE (%zu bytes)\n", payload.size());
             handleChunkData(payload);
         }
+        break;
+
+    case NetMsgType::CHUNK_REQUEST:
+        if (m_isHost) handleChunkRequest(peer, payload);
         break;
 
     default:
@@ -351,6 +372,7 @@ void NetManager::handleJoinRequest(ENetPeer* peer, MemoryStream& payload) {
     player->playerId = newId;
     player->peer = peer;
     player->playerName = playerName;
+    player->netState->setOwner(player.get());
 
     m_objManager.addObject(newId, std::move(player->netState));
     player->netState.release();
@@ -361,29 +383,72 @@ void NetManager::handleJoinRequest(ENetPeer* peer, MemoryStream& payload) {
     printf("[NetManager] player \"%s\" joined, assigned id=%u\n",
         playerName.c_str(), newId);
 
-    // 发送 JOIN_ACCEPT
+    // 设置新玩家的初始渲染位置（使用宿主位置作为近似出生点，
+    // 避免 renderRemotePlayers 的 (0,0,0) 过滤导致远程玩家不可见）
     {
-        auto msg = NetMessage::joinAccept(newId, m_worldSeed);
+        auto it = m_players.find(newId);
+        if (it != m_players.end()) {
+            float hx = 0.0f, hy = 500.0f, hz = 0.0f, hyaw = 0.0f;
+            if (m_localNetState) {
+                hx = m_localNetState->m_position.x;
+                hy = m_localNetState->m_position.y;
+                hz = m_localNetState->m_position.z;
+                hyaw = m_localNetState->m_yaw;
+            }
+            it->second->updateCachedPosition(glm::vec3(hx, hy, hz));
+            it->second->updateCachedLook(hyaw, 0.0f);
+        }
+    }
+
+    // 发送 JOIN_ACCEPT（含宿主当前位置，用于初始化远程玩家渲染位置）
+    {
+        float hx = 0.0f, hy = 500.0f, hz = 0.0f, hyaw = 0.0f;
+        if (m_localNetState) {
+            hx = m_localNetState->m_position.x;
+            hy = m_localNetState->m_position.y;
+            hz = m_localNetState->m_position.z;
+            hyaw = m_localNetState->m_yaw;
+        }
+        auto msg = NetMessage::joinAccept(newId, m_worldSeed, hx, hy, hz, hyaw);
         std::vector<uint8_t> buf;
         msg.encode(buf);
         m_transport.sendReliable(peer, buf.data(), buf.size());
     }
 
-    // 发送当前在线玩家列表给新玩家
+    // 发送当前在线玩家列表给新玩家（含位置信息）
     {
         std::vector<std::pair<uint16_t, std::string>> list;
+        std::vector<float> posData;
+        std::vector<float> yawData;
         for (auto& [id, p] : m_players) {
             list.emplace_back(id, p->playerName);
+            if (p->netState) {
+                posData.push_back(p->netState->m_position.x);
+                posData.push_back(p->netState->m_position.y);
+                posData.push_back(p->netState->m_position.z);
+                yawData.push_back(p->netState->m_yaw);
+            } else {
+                posData.push_back(0.0f); posData.push_back(500.0f); posData.push_back(0.0f);
+                yawData.push_back(0.0f);
+            }
         }
-        auto msg = NetMessage::playerList(list);
+        auto msg = NetMessage::playerList(list, posData.data(), yawData.data());
         std::vector<uint8_t> buf;
         msg.encode(buf);
         m_transport.sendReliable(peer, buf.data(), buf.size());
     }
 
-    // 广播 PLAYER_JOINED 给其他人
+    // 广播 PLAYER_JOINED 给其他人（含初始位置）
     {
-        auto msg = NetMessage::playerJoined(newId, playerName);
+        float px = 0.0f, py = 500.0f, pz = 0.0f, pyaw = 0.0f;
+        auto it = m_players.find(newId);
+        if (it != m_players.end() && it->second->netState) {
+            px = it->second->netState->m_position.x;
+            py = it->second->netState->m_position.y;
+            pz = it->second->netState->m_position.z;
+            pyaw = it->second->netState->m_yaw;
+        }
+        auto msg = NetMessage::playerJoined(newId, playerName, px, py, pz, pyaw);
         sendToAll(peer, msg, true);  // 排除新玩家自己
     }
 
@@ -418,6 +483,13 @@ void NetManager::handleJoinAccept(MemoryStream& payload) {
 
     m_localPlayerId = payload.readPod<uint16_t>();
     m_worldSeed = payload.readPod<uint32_t>();
+    float spawnX = 0.0f, spawnY = 500.0f, spawnZ = 0.0f, spawnYaw = 0.0f;
+    if (payload.remaining() >= sizeof(float) * 4) {
+        spawnX = payload.readPod<float>();
+        spawnY = payload.readPod<float>();
+        spawnZ = payload.readPod<float>();
+        spawnYaw = payload.readPod<float>();
+    }
 
     // 创建本地玩家
     auto player = std::make_unique<NetPlayer>();
@@ -425,13 +497,16 @@ void NetManager::handleJoinAccept(MemoryStream& payload) {
     player->playerName = "Client";
     player->peer = nullptr;
     m_localNetState = player->netState.get();
+    player->netState->setOwner(player.get());
+    player->updateCachedPosition(glm::vec3(spawnX, spawnY, spawnZ));
+    player->updateCachedLook(spawnYaw, 0.0f);
 
     m_objManager.addObject(m_localPlayerId, std::move(player->netState));
     player->netState.release();
     m_players[m_localPlayerId] = std::move(player);
 
-    printf("[NetManager] joined, local player id=%u, world seed=%u\n",
-        m_localPlayerId, m_worldSeed);
+    printf("[NetManager] joined, local player id=%u, world seed=%u, spawn=(%.1f,%.1f,%.1f)\n",
+        m_localPlayerId, m_worldSeed, spawnX, spawnY, spawnZ);
 }
 
 void NetManager::handleJoinDeny(MemoryStream& payload) {
@@ -443,17 +518,28 @@ void NetManager::handleJoinDeny(MemoryStream& payload) {
 void NetManager::handlePlayerJoined(MemoryStream& payload) {
     uint16_t playerId = payload.readPod<uint16_t>();
     std::string name = payload.readString();
+    float px = 0.0f, py = 500.0f, pz = 0.0f, pyaw = 0.0f;
+    if (payload.remaining() >= sizeof(float) * 4) {
+        px = payload.readPod<float>();
+        py = payload.readPod<float>();
+        pz = payload.readPod<float>();
+        pyaw = payload.readPod<float>();
+    }
 
     auto player = std::make_unique<NetPlayer>();
     player->playerId = playerId;
     player->playerName = name;
     player->peer = nullptr;
+    player->netState->setOwner(player.get());
+    player->updateCachedPosition(glm::vec3(px, py, pz));
+    player->updateCachedLook(pyaw, 0.0f);
 
     m_objManager.addObject(playerId, std::move(player->netState));
     player->netState.release();
     m_players[playerId] = std::move(player);
 
-    printf("[NetManager] remote player %u (\"%s\") joined\n", playerId, name.c_str());
+    printf("[NetManager] remote player %u (\"%s\") joined, pos=(%.1f,%.1f,%.1f)\n",
+        playerId, name.c_str(), px, py, pz);
 }
 
 void NetManager::handlePlayerLeft(MemoryStream& payload) {
@@ -469,6 +555,13 @@ void NetManager::handlePlayerList(MemoryStream& payload) {
     for (uint16_t i = 0; i < count; ++i) {
         uint16_t playerId = payload.readPod<uint16_t>();
         std::string name = payload.readString();
+        float px = 0.0f, py = 500.0f, pz = 0.0f, pyaw = 0.0f;
+        if (payload.remaining() >= sizeof(float) * 4) {
+            px = payload.readPod<float>();
+            py = payload.readPod<float>();
+            pz = payload.readPod<float>();
+            pyaw = payload.readPod<float>();
+        }
 
         if (playerId == m_localPlayerId) continue;
         if (m_players.count(playerId)) continue;
@@ -477,12 +570,16 @@ void NetManager::handlePlayerList(MemoryStream& payload) {
         player->playerId = playerId;
         player->playerName = name;
         player->peer = nullptr;
+        player->netState->setOwner(player.get());
+        player->updateCachedPosition(glm::vec3(px, py, pz));
+        player->updateCachedLook(pyaw, 0.0f);
 
         m_objManager.addObject(playerId, std::move(player->netState));
         player->netState.release();
         m_players[playerId] = std::move(player);
 
-        printf("[NetManager] player in list: %u (\"%s\")\n", playerId, name.c_str());
+        printf("[NetManager] player in list: %u (\"%s\") pos=(%.1f,%.1f,%.1f)\n",
+            playerId, name.c_str(), px, py, pz);
     }
 }
 
@@ -502,6 +599,19 @@ void NetManager::handlePropertySyncClient(MemoryStream& payload) {
 
 void NetManager::handleChunkData(MemoryStream& payload) {
     m_chunkSync.onChunkData(payload.data(), payload.size());
+}
+
+void NetManager::handleChunkRequest(ENetPeer* peer, MemoryStream& payload) {
+    if (!peer || payload.remaining() < 8) return;
+    int32_t chunkX = payload.readPod<int32_t>();
+    int32_t chunkZ = payload.readPod<int32_t>();
+    printf("[NetManager] CHUNK_REQUEST for (%d,%d)\n", chunkX, chunkZ);
+    m_chunkSync.handleChunkRequest(peer, chunkX, chunkZ);
+}
+
+void NetManager::handleChunkResponse(MemoryStream& payload) {
+    // Same format as CHUNK_DATA
+    handleChunkData(payload);
 }
 
 // ============================================================================
@@ -553,4 +663,13 @@ void NetManager::broadcastChunkData(const std::vector<uint8_t>& compressedData) 
         if (!player->peer) continue;
         m_transport.sendReliable(player->peer, buf.data(), buf.size());
     }
+}
+
+void NetManager::sendChunkRequest(int32_t chunkX, int32_t chunkZ) {
+    if (m_isHost || !m_serverPeer) return;
+    auto msg = NetMessage::chunkRequest(chunkX, chunkZ);
+    std::vector<uint8_t> buf;
+    msg.encode(buf);
+    m_transport.sendReliable(m_serverPeer, buf.data(), buf.size());
+    m_transport.flush();
 }

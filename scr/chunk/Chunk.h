@@ -76,37 +76,14 @@ public:
                                     int cameraSectionY, int maxDownSections,
                                     const std::array<glm::vec4, 6>* frustumPlanes = nullptr) const;
 
-    // 给 ChunkManager / worker 调用：把本 chunk 在 face 方向的边界面与 other 缝合（双向）。
-    // face: 本 chunk 视角的方向（RIGHT/LEFT/FRONT/BACK 之一）
-    void stitchWithNeighbor(Chunk* other, BlockFace faceFromSelf);
-
-    // 打开某方向的边界面（无邻居时视为外侧全空气，边界方块面全部可见）。
-    // 仅被 ChunkManager 在确认该方向无邻居后调用。
-    void openBoundaryFace(BlockFace face);
-
-    // ---------------- 异步 stitch 状态位（4 方向：0:+X 1:-X 2:+Z 3:-Z） ----------------
-    // 主线程独占读写。仅在 chunk 处于 ChunkManager::m_pendingChunks 时有意义。
-    //   m_stitchDone[i]    = 1 表示该方向已与对应邻居缝合完成
-    //   m_stitchPending[i] = 1 表示该方向 stitch 任务已投递、未完成
-    // 全部 4 位 done 之后该 chunk 才会被晋升到 m_loadedChunks 进入显示。
-    bool isStitchDone(int dir) const { return (m_stitchDone & (uint8_t)(1u << dir)) != 0; }
-    bool isStitchPending(int dir) const { return (m_stitchPending & (uint8_t)(1u << dir)) != 0; }
-    void markStitchPending(int dir) { m_stitchPending |= (uint8_t)(1u << dir); }
-    void markStitchDone(int dir) {
-        m_stitchDone |= (uint8_t)(1u << dir);
-        m_stitchPending &= (uint8_t)~(1u << dir);
-    }
-    bool allStitchDone() const { return m_stitchDone == 0x0F; }
-
-    // 同一 chunk 同时只能参与一个 stitch 任务（4 方向需串行投递），
-    // 否则两个 worker 会同时改它的 mesh 导致数据竞争。
-    bool isStitchBusy() const { return m_stitchBusy; }
-    void setStitchBusy(bool b) { m_stitchBusy = b; }
-
     // 区块数据是否被玩家修改过（新建 / 放置 / 破坏 → true，写入磁盘后 → false）
     bool isSaveDirty() const { return m_saveDirty; }
     void markSaveDirty() { m_saveDirty = true; }
     void clearSaveDirty() { m_saveDirty = false; }
+
+    // 完整 chunk 方块数据指针（供邻居 mesh 构建时读取，worker 线程安全只读访问）
+    const BlockState* fullBlockData() const { return m_fullBlockData.get(); }
+    void setFullBlockData(std::unique_ptr<BlockState[]> data) { m_fullBlockData = std::move(data); }
 
 private:
     ChunkManager* m_chunkManager = nullptr;
@@ -123,11 +100,11 @@ private:
     // 4 横向邻居（z+/z-/x+/x-，与原 NeighborChunk 顺序一致：0:+X 1:-X 2:+Z 3:-Z）
     std::array<Chunk*, 4> m_neighbors{ {nullptr, nullptr, nullptr, nullptr} };
 
-    // 异步 stitch 状态位：bit i 对应 m_neighbors[i] 方向。
-    uint8_t m_stitchDone = 0;
-    uint8_t m_stitchPending = 0;
-    bool m_stitchBusy = false;
     bool m_saveDirty = true; // 新生成/修改过的区块需要存档；写入磁盘后清零
+
+    // 完整 chunk 方块数据（CHUNK_VOLUME 连续数组），供邻居 mesh 构建读取。
+    // 从 BlockReadyEntry 移动过来，与各 Section 各自的 m_blocks 并存。
+    std::unique_ptr<BlockState[]> m_fullBlockData;
 
     // 可见性缓存（chunk 粗剔结果）。用 ChunkManager 的 visGeneration 做版本号，
     // 代替每 chunk 各自 glm::distance 比较相机是否移动。0 表示首次需计算。

@@ -528,6 +528,7 @@ void Player::processMouseMovement(float xoffset, float yoffset) {
     m_lastY = static_cast<float>(yoffset);
 
     m_camera->Yaw += xoffsetActual * m_camera->MouseSensitivity;
+    m_camera->Yaw = std::fmod(m_camera->Yaw, 360.0f); // 保持在 [0, 360) 范围内
     m_camera->Pitch += yoffsetActual * m_camera->MouseSensitivity;
 
     if (m_camera->Pitch > 89.0f) m_camera->Pitch = 89.0f;

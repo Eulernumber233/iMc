@@ -123,6 +123,14 @@ int World::run() {
     if (m_netManager) {
         m_netManager->setChunkManager(m_chunkManager.get());
 
+        // 客户端：设置网络 chunk 请求回调（ChunkManager 需要 chunk 时发送 CHUNK_REQUEST）
+        if (m_netMode == NetMode::Join) {
+            m_chunkManager->setNetworkChunkRequester(
+                [this](int chunkX, int chunkZ) {
+                    m_netManager->sendChunkRequest(chunkX, chunkZ);
+                });
+        }
+
         // 服务端：处理在初始化期间连接的客户端（着色器编译等耗时操作
         // 可能持续数秒，客户端在此期间发送 JOIN_REQUEST 会超时）
         // 使用时间循环而非固定次数，给予 ENET 握手往返足够的间隔
@@ -143,12 +151,45 @@ int World::run() {
         if (m_netMode == NetMode::Join) {
             std::cout << "[World] Receiving initial chunk data..." << std::endl;
             auto start = std::chrono::steady_clock::now();
+            auto lastLog = start;
+            int prevLoaded = 0;
             while (std::chrono::duration_cast<std::chrono::milliseconds>(
-                       std::chrono::steady_clock::now() - start).count() < 5000) {
+                       std::chrono::steady_clock::now() - start).count() < 15000) {
                 m_netManager->update();
                 m_chunkManager->update(m_player->getCamera());
-                // 中心 3x3 loaded 即可开始游戏（出生点所在 chunk + 周围一圈）
-                if (m_chunkManager->getLoadedChunkCount() >= 9) break;
+
+                int loaded = m_chunkManager->getLoadedChunkCount();
+
+                // 每 1 秒输出一次加载进度
+                auto now = std::chrono::steady_clock::now();
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - lastLog).count() > 1000) {
+                    auto pos = m_chunkManager->getLoadedChunkPositions();
+                    std::cout << "[World] Init progress: loaded=" << loaded
+                              << ", inflight=" << m_chunkManager->getInFlightCount()
+                              << ", elapsed="
+                              << std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     now - start).count() << "ms";
+                    if (!pos.empty()) {
+                        // 输出已加载区块范围
+                        int minX = pos[0].x, maxX = pos[0].x;
+                        int minZ = pos[0].y, maxZ = pos[0].y;
+                        for (auto& p : pos) {
+                            if (p.x < minX) minX = p.x;
+                            if (p.x > maxX) maxX = p.x;
+                            if (p.y < minZ) minZ = p.y;
+                            if (p.y > maxZ) maxZ = p.y;
+                        }
+                        std::cout << " range=[" << minX << "," << minZ
+                                  << "] to [" << maxX << "," << maxZ << "]";
+                    }
+                    std::cout << std::endl;
+                    lastLog = now;
+                    prevLoaded = loaded;
+                }
+
+                // 玩家周围 5x5 = 25 chunks 全部 loaded 即可开始
+                if (loaded >= 25) break;
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }
             std::cout << "[World] Initial sync done, loaded chunks="
@@ -206,7 +247,7 @@ int World::run() {
         if (m_netManager && (m_netMode == NetMode::Host || m_netMode == NetMode::Join)) {
             auto* netState = m_netManager->getLocalNetState();
             if (netState) {
-                netState->setPosition(camera->Position);
+                netState->setPosition(m_player->getPosition());
                 netState->setLook(camera->Yaw, camera->Pitch);
             }
         }
@@ -246,7 +287,8 @@ int World::run() {
             (float)SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, 1000.0f);
 
         // 渲染帧
-        renderSystem.render(*m_chunkManager, view, projection, camera, deltaTime, m_player.get());
+        renderSystem.render(*m_chunkManager, view, projection, camera, deltaTime, m_player.get(),
+                            m_netManager.get());
 
         {
             PROFILE_SCOPE("swapBuffers");

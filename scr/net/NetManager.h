@@ -68,6 +68,8 @@ public:
     void sendChunkData(ENetPeer* peer, const std::vector<uint8_t>& compressedData);
     // 广播给所有客户端
     void broadcastChunkData(const std::vector<uint8_t>& compressedData);
+    // 客户端向服务端请求 chunk
+    void sendChunkRequest(int32_t chunkX, int32_t chunkZ);
 
 private:
     NetTransport m_transport;
@@ -109,6 +111,8 @@ private:
     void handlePlayerList(MemoryStream& payload);
     void handlePropertySyncClient(MemoryStream& payload);
     void handleChunkData(MemoryStream& payload);
+    void handleChunkRequest(ENetPeer* peer, MemoryStream& payload);
+    void handleChunkResponse(MemoryStream& payload);
 
     // P2P 辅助
     void sendToAll(ENetPeer* exclude, const NetMessage& msg, bool reliable);

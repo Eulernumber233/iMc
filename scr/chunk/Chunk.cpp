@@ -112,64 +112,6 @@ void Chunk::updateFaceAt(int x, int y, int z, BlockFace face) {
     m_sections[sy].updateFaceWithNeighbor(x, ly, z, face, nb);
 }
 
-void Chunk::stitchWithNeighbor(Chunk* other, BlockFace faceFromSelf) {
-    if (!other || !m_meshReady || !other->m_meshReady) return;
-
-    // 在 self 一侧的边界（x=WIDTH-1 等）和 other 一侧（对面）双向更新。
-    BlockFace oppFace;
-    int selfX = -1, selfZ = -1;     // -1 表示该轴遍历
-    int otherX = -1, otherZ = -1;
-    switch (faceFromSelf) {
-    case RIGHT: oppFace = LEFT;  selfX = WIDTH - 1; otherX = 0; break;
-    case LEFT:  oppFace = RIGHT; selfX = 0;         otherX = WIDTH - 1; break;
-    case FRONT: oppFace = BACK;  selfZ = DEPTH - 1; otherZ = 0; break;
-    case BACK:  oppFace = FRONT; selfZ = 0;         otherZ = DEPTH - 1; break;
-    default: return;
-    }
-
-    auto runRange = [](int fixedX, int fixedZ, auto&& fn) {
-        for (int y = 0; y < HEIGHT; ++y) {
-            if (fixedX >= 0) {
-                for (int z = 0; z < DEPTH; ++z) fn(fixedX, y, z);
-            } else {
-                for (int x = 0; x < WIDTH; ++x) fn(x, y, fixedZ);
-            }
-        }
-    };
-
-    // self 边界面更新
-    runRange(selfX, selfZ, [&](int x, int y, int z) {
-        updateFaceAt(x, y, z, faceFromSelf);
-    });
-    // other 边界面更新
-    runRange(otherX, otherZ, [&](int x, int y, int z) {
-        other->updateFaceAt(x, y, z, oppFace);
-    });
-}
-
-void Chunk::openBoundaryFace(BlockFace face) {
-    int fixedX = -1, fixedZ = -1;
-    switch (face) {
-    case RIGHT: fixedX = WIDTH - 1; break;
-    case LEFT:  fixedX = 0; break;
-    case FRONT: fixedZ = DEPTH - 1; break;
-    case BACK:  fixedZ = 0; break;
-    default: return;
-    }
-
-    for (int y = 0; y < HEIGHT; ++y) {
-        if (fixedX >= 0) {
-            for (int z = 0; z < DEPTH; ++z) {
-                updateFaceAt(fixedX, y, z, face);
-            }
-        } else {
-            for (int x = 0; x < WIDTH; ++x) {
-                updateFaceAt(x, y, fixedZ, face);
-            }
-        }
-    }
-}
-
 // 未来进一步优化：TODO
 // 持久映射（GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT）
 // addFaceLocal/removeFaceLocal 直接写映射内存，省掉 staging vector。

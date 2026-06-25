@@ -1,6 +1,6 @@
 {
   // ── 渲染 ──────────────────────────────────────────
-  "render_radius": 8,
+  "render_radius": 16,
   //   视野半径（chunk），实际加载 (2r+1)^2 个 chunk
 
   "vertical_cull_ratio": 0.5,

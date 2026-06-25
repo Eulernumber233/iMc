@@ -39,10 +39,15 @@ NetMessage NetMessage::joinRequest(const std::string& playerName) {
     return msg;
 }
 
-NetMessage NetMessage::joinAccept(uint16_t playerId, uint32_t seed) {
+NetMessage NetMessage::joinAccept(uint16_t playerId, uint32_t seed,
+                                   float posX, float posY, float posZ, float yaw) {
     NetMessage msg(NetMsgType::JOIN_ACCEPT);
     msg.payload.writePod(playerId);
     msg.payload.writePod(seed);
+    msg.payload.writePod(posX);
+    msg.payload.writePod(posY);
+    msg.payload.writePod(posZ);
+    msg.payload.writePod(yaw);
     return msg;
 }
 
@@ -52,10 +57,15 @@ NetMessage NetMessage::joinDeny(const std::string& reason) {
     return msg;
 }
 
-NetMessage NetMessage::playerJoined(uint16_t playerId, const std::string& name) {
+NetMessage NetMessage::playerJoined(uint16_t playerId, const std::string& name,
+                                      float posX, float posY, float posZ, float yaw) {
     NetMessage msg(NetMsgType::PLAYER_JOINED);
     msg.payload.writePod(playerId);
     msg.payload.writeString(name);
+    msg.payload.writePod(posX);
+    msg.payload.writePod(posY);
+    msg.payload.writePod(posZ);
+    msg.payload.writePod(yaw);
     return msg;
 }
 
@@ -65,12 +75,28 @@ NetMessage NetMessage::playerLeft(uint16_t playerId) {
     return msg;
 }
 
-NetMessage NetMessage::playerList(const std::vector<std::pair<uint16_t, std::string>>& players) {
+NetMessage NetMessage::playerList(const std::vector<std::pair<uint16_t, std::string>>& players,
+                                   const float* positions, const float* yaws) {
     NetMessage msg(NetMsgType::PLAYER_LIST);
     msg.payload.writePod(static_cast<uint16_t>(players.size()));
-    for (auto& [id, name] : players) {
+    for (size_t i = 0; i < players.size(); ++i) {
+        auto& [id, name] = players[i];
         msg.payload.writePod(id);
         msg.payload.writeString(name);
+        if (positions) {
+            msg.payload.writePod(positions[i * 3 + 0]);
+            msg.payload.writePod(positions[i * 3 + 1]);
+            msg.payload.writePod(positions[i * 3 + 2]);
+        } else {
+            msg.payload.writePod(0.0f);
+            msg.payload.writePod(500.0f);
+            msg.payload.writePod(0.0f);
+        }
+        if (yaws) {
+            msg.payload.writePod(yaws[i]);
+        } else {
+            msg.payload.writePod(0.0f);
+        }
     }
     return msg;
 }
@@ -87,5 +113,18 @@ NetMessage NetMessage::propertySync(uint16_t netObjId, MemoryStream& propData) {
 NetMessage NetMessage::chunkData(const std::vector<uint8_t>& compressedChunks) {
     NetMessage msg(NetMsgType::CHUNK_DATA);
     msg.payload.writeBytes(compressedChunks.data(), compressedChunks.size());
+    return msg;
+}
+
+NetMessage NetMessage::chunkRequest(int32_t chunkX, int32_t chunkZ) {
+    NetMessage msg(NetMsgType::CHUNK_REQUEST);
+    msg.payload.writePod(chunkX);
+    msg.payload.writePod(chunkZ);
+    return msg;
+}
+
+NetMessage NetMessage::chunkResponse(const std::vector<uint8_t>& compressedData) {
+    NetMessage msg(NetMsgType::CHUNK_RESPONSE);
+    msg.payload.writeBytes(compressedData.data(), compressedData.size());
     return msg;
 }

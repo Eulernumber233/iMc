@@ -57,7 +57,8 @@
       "Bash(taskkill //F //IM iMc.exe)",
       "Bash(msbuild \"e:\\\\opengl\\\\iMc\\\\iMc.vcxproj\" /t:Build /p:Configuration=Debug /p:Platform=x64 /m)",
       "PowerShell(& \"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"e:\\\\opengl\\\\iMc\\\\iMc.vcxproj\" /t:Build /p:Configuration=Debug /p:Platform=x64 /m 2>&1)",
-      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"e:\\\\opengl\\\\iMc\\\\iMc.vcxproj\" /t:Build /p:Configuration=Debug /p:Platform=x64 /m 2>&1)"
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"e:\\\\opengl\\\\iMc\\\\iMc.vcxproj\" /t:Build /p:Configuration=Debug /p:Platform=x64 /m 2>&1)",
+      "Bash(msbuild iMc.vcxproj /p:Configuration=Debug /p:Platform=x64 /t:Build /m /v:minimal)"
     ],
     "additionalDirectories": [
       "e:\\opengl\\iMc\\scr"

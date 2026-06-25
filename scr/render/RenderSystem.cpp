@@ -7,6 +7,8 @@
 #include "../Player.h"
 #include "../mode/PlayerModel.h"
 #include "../Profiler.h"
+#include "../net/NetManager.h"
+#include "../collision/PhysicsConstants.h"
 #include <random>
 BlockRenderer::BlockRenderer()
     : VAO(0), VBO(0), EBO(0) {
@@ -118,14 +120,14 @@ void BlockRenderer::render(GLuint indirectBuffer, int cmdCount,
 }
 
 void BlockRenderer::renderDepth(GLuint indirectBuffer, int cmdCount,
-    const glm::mat4& lightSpaceMatrix, float near, float far)
+    const glm::mat4& lightSpaceMatrix, float nearPlane, float farPlane)
 {
     if (cmdCount <= 0 || indirectBuffer == 0) return;
 
     m_depthShader.use();
     m_depthShader.setMat4("lightSpaceMatrix", lightSpaceMatrix);
-    m_depthShader.setFloat("dir_near", near);
-    m_depthShader.setFloat("dir_far", far);
+    m_depthShader.setFloat("dir_near", nearPlane);
+    m_depthShader.setFloat("dir_far", farPlane);
 
     glBindVertexArray(VAO);
     glBindBuffer(GL_DRAW_INDIRECT_BUFFER, indirectBuffer);
@@ -232,7 +234,8 @@ bool RenderSystem::initialize() {
         return false;
     }
 
-    // 玩家模型由 Player 自己持有和初始化，此处不再加载
+    // 远程玩家模型（共享几何体，不同皮肤可后续扩展）
+    m_remotePlayerModel.initialize("assert/mode/player/wide/steve.png");
 
     // 配置边框
     BlockOutlineRenderer::OutlineConfig outlineConfig;
@@ -681,7 +684,8 @@ void RenderSystem::render(const ChunkManager& chunkManager,
     const glm::mat4& projection,
     std::shared_ptr<Camera> camera,
     float deltaTime,
-    Player* player
+    Player* player,
+    NetManager* netManager
 ) {
       //glBindFramebuffer(GL_FRAMEBUFFER, 0);
       //glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
@@ -741,6 +745,11 @@ void RenderSystem::render(const ChunkManager& chunkManager,
     // （Camera::GetProjectionMatrix() 的 AspectRatio 可能与窗口实际比例不同）
     renderModel(camera, view, projection, player);  // 内部已开启深度测试和深度写入
     //renderModel_test(camera, view, projection);
+
+    // 远程玩家模型
+    if (netManager) {
+        renderRemotePlayers(netManager, view, projection, camera);
+    }
 
     // 6.2 渲染粒子（半透明，深度测试开启，深度写入关闭）
     // 确保粒子系统内部已设置 glDepthMask(GL_FALSE)
@@ -1015,6 +1024,60 @@ void RenderSystem::renderModel(const std::shared_ptr<Camera> camera,
 
     // 使用动画姿态绘制
     model->drawPosed(m_modeShader, player->getModelFootPosition(), player->getPose());
+}
+
+void RenderSystem::renderRemotePlayers(NetManager* netManager,
+    const glm::mat4& view, const glm::mat4& projection,
+    const std::shared_ptr<Camera>& camera)
+{
+    if (!netManager || !netManager->isConnected()) return;
+
+    const auto& players = netManager->getPlayers();
+    uint16_t localId = netManager->getLocalPlayerId();
+
+    for (const auto& [id, player] : players) {
+        if (id == localId) continue;  // 跳过本地玩家
+
+        // 使用缓存的渲染位置（由 OnRep 回调或 join 消息设置）
+        glm::vec3 pos = player->getRenderPosition();
+        // 跳过尚未收到位置同步的玩家
+        if (pos.x == 0.0f && pos.y == 0.0f && pos.z == 0.0f) continue;
+        float yawDeg = player->getRenderYaw();
+
+        // 身体朝向：Camera.Yaw → bodyYaw 转换（与 PlayerAnimator 一致）
+        float bodyYaw = glm::half_pi<float>() - glm::radians(yawDeg);
+
+        // 脚底位置：碰撞箱中心减半高
+        glm::vec3 footPos = pos;
+        footPos.y -= PhysicsConstants::PLAYER_HEIGHT_STANDING * 0.5f;
+
+        // 简单站立姿态
+        PlayerPose idlePose{};
+        idlePose.bodyYaw = bodyYaw;
+
+        // 绑定皮肤纹理 + 绘制模型
+        glEnable(GL_DEPTH_TEST);
+        glDepthMask(GL_TRUE);
+        glEnable(GL_CULL_FACE);
+
+        for (int i = 0; i < 6; i++) {
+            glActiveTexture(GL_TEXTURE0 + i);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+        glActiveTexture(GL_TEXTURE0);
+
+        m_modeShader.use();
+        m_modeShader.setMat4("projection", projection);
+        m_modeShader.setMat4("view", view);
+        m_modeShader.setVec3("viewPos", camera->Position);
+        m_modeShader.setVec3("light.direction", lightDir);
+        m_modeShader.setVec3("light.ambient", 0.4f, 0.4f, 0.4f);
+        m_modeShader.setVec3("light.diffuse", 0.9f, 0.9f, 0.9f);
+        m_modeShader.setVec3("light.specular", 1.0f, 1.0f, 1.0f);
+        m_modeShader.setFloat("shininess", 256.0f);
+
+        m_remotePlayerModel.drawPosed(m_modeShader, footPos, idlePose);
+    }
 }
 
 void RenderSystem::renderModel_test(const std::shared_ptr<Camera> camera,

@@ -10,9 +10,11 @@
 #include "../collision/Ray.h"
 #include "../UI/UIManager.h"
 #include "../mode/Model.h"
+#include "../mode/PlayerModel.h"
 #include "../particle/ParticleManager.h"
 
 class Player;
+class NetManager;
 
 struct FaceVertex {
     glm::vec3 position;
@@ -31,7 +33,7 @@ public:
     void render(GLuint indirectBuffer, int cmdCount,
         const glm::mat4& view, const glm::mat4& projection);
     void renderDepth(GLuint indirectBuffer, int cmdCount,
-        const glm::mat4& lightSpaceMatrix, float near, float far);
+        const glm::mat4& lightSpaceMatrix, float nearPlane, float farPlane);
     GLuint getVAO() const { return VAO; }
     void setTextureArray(GLuint texArray) { m_textureArray = texArray; }
     // 一次性上传"每种 BlockType 的端面纹理层"查表给 g_buffer shader。
@@ -71,7 +73,8 @@ public:
         const glm::mat4& projection,
         std::shared_ptr<Camera> camera,
         float deltaTime,
-        Player* player = nullptr);
+        Player* player = nullptr,
+        NetManager* netManager = nullptr);
 
     void setSelectedBlock(const glm::ivec3& blockPos) {
         m_selectedBlockPos = blockPos;
@@ -250,4 +253,10 @@ private:
         const glm::mat4& view, const glm::mat4& projection, Player* player);
     void renderModel_test(const std::shared_ptr<Camera> camera,
         const glm::mat4& view, const glm::mat4& projection);
+    void renderRemotePlayers(NetManager* netManager,
+        const glm::mat4& view, const glm::mat4& projection,
+        const std::shared_ptr<Camera>& camera);
+
+    // 远程玩家模型（共享几何体，逐玩家设置变换矩阵）
+    PlayerModel m_remotePlayerModel;
 };

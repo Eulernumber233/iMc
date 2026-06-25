@@ -47,6 +47,14 @@ void ChunkArena::shutdown() {
     for (auto& fl : m_freeLists) fl.clear();
 }
 
+//
+// TODO 还需要优化
+// 1. 目前 free list 是 vector，pop_back/push_back；如果频繁分配/释放，可能导致内存碎片化。
+// 2. 目前没有合并相邻空闲块的逻辑，可能导致大量小块空闲，无法满足大块请求。
+// 3. 可以考虑使用更复杂的数据结构（如 std::set 或自定义的 free list）来管理空闲块，支持合并和按大小查找。
+// 4. 可以考虑在 allocate 时，如果 free list 没有合适的块，尝试从 larger class 的 free list 中拆分一个块。
+// 5. 可以考虑在 free 时，如果相邻的块也空闲，尝试合并成一个更大的块。
+// 6. 没有VBO缩容的逻辑，可能导致VBO占用过大内存。可以考虑在一定条件下缩小VBO容量。
 ChunkArena::Slot ChunkArena::allocate(uint32_t requestedInstances) {
     Slot slot{};
     if (requestedInstances == 0) return slot;
@@ -91,9 +99,13 @@ ChunkArena::Slot ChunkArena::allocate(uint32_t requestedInstances) {
 
 void ChunkArena::free(const Slot& slot) {
     if (!slot.valid()) return;
-    if (slot.sizeClass < 0 || slot.sizeClass >= CLASS_COUNT) return;
+    if (slot.sizeClass < 0 || slot.sizeClass >= CLASS_COUNT) 
+        return;
+    
     m_freeLists[slot.sizeClass].push_back(slot.offset);
-    if (m_inUse >= slot.capacity) m_inUse -= slot.capacity;
+    if (m_inUse >= slot.capacity) {
+        m_inUse -= slot.capacity;
+    } 
     else m_inUse = 0;
 }
 

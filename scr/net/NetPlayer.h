@@ -11,6 +11,8 @@
 // PlayerNetState: 玩家可同步属性（NetObject 子类）
 // ============================================================================
 
+class NetPlayer; // 前向声明
+
 class PlayerNetState : public NetObject {
 public:
     PlayerNetState();
@@ -28,9 +30,11 @@ public:
     void setPosition(const glm::vec3& pos);
     void setLook(float yaw, float pitch);
 
+    // 设置所属 NetPlayer（OnRep 回调需要）
+    void setOwner(NetPlayer* owner) { m_owner = owner; }
+
 private:
-    // 提供给外部读取回调结果的接口
-    // （远程玩家渲染时读取这些值来摆模型/相机）
+    NetPlayer* m_owner = nullptr;
     friend class NetPlayer;
 };
 

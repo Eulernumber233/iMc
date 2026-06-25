@@ -4,6 +4,7 @@
 #include "../chunk/Chunk.h"
 #include "../chunk/Section.h"
 #include "lz4.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -19,6 +20,9 @@ void NetChunkSync::init(ChunkManager* cm, NetManager* net) {
 void NetChunkSync::pushChunks() {
     if (!m_chunkManager || !m_netManager) return;
     if (!m_netManager->isHosting()) return;
+
+    // 先处理等待中的客户端请求：区块数据就绪后立即响应
+    pollPendingRequests();
 
     auto& players = m_netManager->getPlayers();
 
@@ -70,6 +74,14 @@ void NetChunkSync::pushAllChunks(ENetPeer* peer) {
 
     auto positions = m_chunkManager->getLoadedChunkPositions();
 
+    // 按 Chebyshev 距离排序（从近到远），保证空间局部性
+    std::sort(positions.begin(), positions.end(),
+        [](const glm::ivec2& a, const glm::ivec2& b) {
+            int da = (std::max)(std::abs(a.x), std::abs(a.y));
+            int db = (std::max)(std::abs(b.x), std::abs(b.y));
+            return da < db;
+        });
+
     std::vector<uint8_t> batch;
     static constexpr size_t BATCH_SIZE_LIMIT = 16384;
 
@@ -102,6 +114,126 @@ void NetChunkSync::pushAllChunks(ENetPeer* peer) {
     printf("[NetChunkSync] pushAllChunks: sent %d chunks to peer\n", count);
 }
 
+void NetChunkSync::handleChunkRequest(ENetPeer* peer, int chunkX, int chunkZ) {
+    if (!m_chunkManager || !m_netManager || !peer) return;
+
+    glm::ivec2 pos(chunkX, chunkZ);
+
+    // 优先从 loaded chunk 序列化（有完整 mesh 的区块）
+    Chunk* chunk = m_chunkManager->getChunkAnyState(pos);
+    if (chunk) {
+        std::vector<uint8_t> data;
+        serializeChunk(chunkX, chunkZ, data);
+        if (!data.empty()) {
+            auto msg = NetMessage::chunkResponse(data);
+            std::vector<uint8_t> buf;
+            msg.encode(buf);
+            m_netManager->getTransport().sendReliable(peer, buf.data(), buf.size());
+            ChunkKey key = makeKey(chunkX, chunkZ);
+            m_sentChunks[peer].insert(key);
+            printf("[NetChunkSync] sent CHUNK_RESPONSE for (%d,%d), %zu bytes\n",
+                chunkX, chunkZ, data.size());
+        }
+        m_netManager->getTransport().flush();
+        return;
+    }
+
+    // 尝试从 block-ready 数据序列化（有方块数据但还没有 mesh）
+    const BlockState* blocks = m_chunkManager->getChunkBlockData(pos);
+    if (blocks) {
+        std::vector<uint8_t> data;
+        serializeChunkFromBlocks(chunkX, chunkZ, blocks, data);
+        if (!data.empty()) {
+            auto msg = NetMessage::chunkResponse(data);
+            std::vector<uint8_t> buf;
+            msg.encode(buf);
+            m_netManager->getTransport().sendReliable(peer, buf.data(), buf.size());
+            ChunkKey key = makeKey(chunkX, chunkZ);
+            m_sentChunks[peer].insert(key);
+            printf("[NetChunkSync] sent CHUNK_RESPONSE (from block-ready) for (%d,%d), %zu bytes\n",
+                chunkX, chunkZ, data.size());
+        }
+        m_netManager->getTransport().flush();
+        return;
+    }
+
+    // 区块不存在：记录 pending 请求，然后投递 Task 1（仅生成方块数据）
+    // forceChunkLoad 可能因为已 in-flight 而跳过投递，这没关系——
+    // pollPendingRequests 会在区块数据就绪后轮询到并发送响应
+    ChunkKey key = makeKey(chunkX, chunkZ);
+    m_pendingRequests[key].push_back(peer);
+
+    printf("[NetChunkSync] chunk (%d,%d) not found, force-generating + 4 neighbors, pending=%zu\n",
+        chunkX, chunkZ, m_pendingRequests.size());
+    m_chunkManager->forceChunkLoad(pos);
+    static const glm::ivec2 nbOffsets[4] = {
+        { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 }
+    };
+    for (int d = 0; d < 4; ++d) {
+        glm::ivec2 nbPos = pos + nbOffsets[d];
+        if (!m_chunkManager->getChunkBlockData(nbPos))
+            m_chunkManager->forceChunkLoad(nbPos);
+    }
+    m_netManager->getTransport().flush();
+}
+
+void NetChunkSync::pollPendingRequests() {
+    if (m_pendingRequests.empty()) return;
+    if (!m_chunkManager || !m_netManager) return;
+
+    std::vector<ChunkKey> resolved;
+
+    for (auto& [key, peers] : m_pendingRequests) {
+        int32_t cx = static_cast<int32_t>(key >> 32);
+        int32_t cz = static_cast<int32_t>(key & 0xFFFFFFFFLL);
+        const BlockState* blocks = m_chunkManager->getChunkBlockData(glm::ivec2(cx, cz));
+        if (!blocks) continue;
+
+        // 区块数据已就绪（在 m_blockReady 或 m_loadedChunks 中），序列化并发送
+        std::vector<uint8_t> data;
+        serializeChunkFromBlocks(cx, cz, blocks, data);
+        if (data.empty()) continue;
+
+        auto msg = NetMessage::chunkResponse(data);
+        std::vector<uint8_t> buf;
+        msg.encode(buf);
+
+        for (ENetPeer* peer : peers) {
+            if (!peer) continue;
+            m_netManager->getTransport().sendReliable(peer, buf.data(), buf.size());
+            m_sentChunks[peer].insert(key);
+        }
+        m_netManager->getTransport().flush();
+
+        printf("[NetChunkSync] pollPending: sent CHUNK_RESPONSE for (%d,%d) to %zu peers\n",
+            cx, cz, peers.size());
+
+        resolved.push_back(key);
+    }
+
+    for (auto& key : resolved) {
+        m_pendingRequests.erase(key);
+    }
+}
+
+void NetChunkSync::onPeerDisconnected(ENetPeer* peer) {
+    if (!peer) return;
+
+    // 从所有 pending 请求中移除该 peer
+    for (auto it = m_pendingRequests.begin(); it != m_pendingRequests.end(); ) {
+        auto& peers = it->second;
+        peers.erase(std::remove(peers.begin(), peers.end(), peer), peers.end());
+        if (peers.empty()) {
+            it = m_pendingRequests.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    // 清理该 peer 的已推送记录
+    m_sentChunks.erase(peer);
+}
+
 void NetChunkSync::serializeChunk(int chunkX, int chunkZ, std::vector<uint8_t>& out) {
     // 格式: [chunkX:int32][chunkZ:int32][numSections:uint8][sections...]
     // section: [sectionY:uint8][flags:uint8][dataLen:uint16][blocks (lz4)]
@@ -121,7 +253,7 @@ void NetChunkSync::serializeChunk(int chunkX, int chunkZ, std::vector<uint8_t>& 
     out.push_back(0);  // placeholder for numSections
     uint8_t numSections = 0;
 
-    Chunk* chunk = m_chunkManager->getChunk(glm::ivec2(chunkX, chunkZ));
+    Chunk* chunk = m_chunkManager->getChunkAnyState(glm::ivec2(chunkX, chunkZ));
     if (!chunk) {
         out[numSectionsPos] = 0;
         return;
@@ -177,6 +309,76 @@ void NetChunkSync::serializeChunk(int chunkX, int chunkZ, std::vector<uint8_t>& 
     out[numSectionsPos] = numSections;
 }
 
+void NetChunkSync::serializeChunkFromBlocks(int chunkX, int chunkZ,
+                                             const BlockState* blocks,
+                                             std::vector<uint8_t>& out) {
+    // 与 serializeChunk 相同的 header 格式
+    size_t headerPos = out.size();
+    out.push_back(static_cast<uint8_t>(chunkX & 0xFF));
+    out.push_back(static_cast<uint8_t>((chunkX >> 8) & 0xFF));
+    out.push_back(static_cast<uint8_t>((chunkX >> 16) & 0xFF));
+    out.push_back(static_cast<uint8_t>((chunkX >> 24) & 0xFF));
+    out.push_back(static_cast<uint8_t>(chunkZ & 0xFF));
+    out.push_back(static_cast<uint8_t>((chunkZ >> 8) & 0xFF));
+    out.push_back(static_cast<uint8_t>((chunkZ >> 16) & 0xFF));
+    out.push_back(static_cast<uint8_t>((chunkZ >> 24) & 0xFF));
+
+    size_t numSectionsPos = out.size();
+    out.push_back(0);
+    uint8_t numSections = 0;
+
+    static constexpr int SECTION_COUNT = ChunkConstants::CHUNK_HEIGHT / Section::HEIGHT;
+    static constexpr int SEC_VOL = Section::VOLUME;
+    static constexpr int BLOCK_SIZE = SEC_VOL * sizeof(BlockState);
+    static constexpr int MAX_COMPRESSED = LZ4_COMPRESSBOUND(BLOCK_SIZE);
+
+    std::vector<uint8_t> compressBuf(MAX_COMPRESSED);
+
+    for (int sy = 0; sy < SECTION_COUNT; ++sy) {
+        const BlockState* sectionBlocks = blocks + sy * SEC_VOL;
+
+        // 检测全空气 section
+        bool allAir = true;
+        for (int i = 0; i < SEC_VOL; ++i) {
+            if (sectionBlocks[i].type() != BLOCK_AIR) {
+                allAir = false;
+                break;
+            }
+        }
+
+        if (allAir) {
+            out.push_back(static_cast<uint8_t>(sy));
+            out.push_back(0);
+            ++numSections;
+            continue;
+        }
+
+        int srcSize = static_cast<int>(SEC_VOL * sizeof(BlockState));
+        int compressedSize = LZ4_compress_default(
+            reinterpret_cast<const char*>(sectionBlocks),
+            reinterpret_cast<char*>(compressBuf.data()),
+            srcSize,
+            static_cast<int>(compressBuf.size()));
+
+        if (compressedSize <= 0 || compressedSize > 0xFFFF) {
+            fprintf(stderr, "[NetChunkSync] LZ4 compress failed for (%d,%d) sy=%d (block-data)\n",
+                chunkX, chunkZ, sy);
+            continue;
+        }
+
+        out.push_back(static_cast<uint8_t>(sy));
+        out.push_back(ChunkSyncFormat::FLAG_HAS_DATA);
+        uint16_t dataLen = static_cast<uint16_t>(compressedSize);
+        out.push_back(static_cast<uint8_t>(dataLen & 0xFF));
+        out.push_back(static_cast<uint8_t>((dataLen >> 8) & 0xFF));
+        out.insert(out.end(), compressBuf.data(), compressBuf.data() + compressedSize);
+
+        ++numSections;
+    }
+
+    out[numSectionsPos] = numSections;
+}
+
 // ============================================================================
 // 客户端
 // ============================================================================
@@ -190,79 +392,82 @@ void NetChunkSync::onChunkData(const uint8_t* data, size_t len) {
 }
 
 void NetChunkSync::deserializeAndImport(const uint8_t* data, size_t len) {
+    // 一个 CHUNK_DATA 消息可能包含多个拼接的 chunk（pushChunks 按 16KB 批次打包）。
+    // 循环解析直到全部消费，避免批次中第 2 个及以后的 chunk 被静默丢弃。
     size_t pos = 0;
+    int chunkCount = 0;
 
-    auto readI32 = [&]() -> int32_t {
-        int32_t v = static_cast<int32_t>(data[pos])
-            | (static_cast<int32_t>(data[pos + 1]) << 8)
-            | (static_cast<int32_t>(data[pos + 2]) << 16)
-            | (static_cast<int32_t>(data[pos + 3]) << 24);
-        pos += 4;
-        return v;
-    };
+    while (pos + 9 <= len) {  // 至少需要 4+4+1 = 9 字节 header
+        auto readI32 = [&]() -> int32_t {
+            int32_t v = static_cast<int32_t>(data[pos])
+                | (static_cast<int32_t>(data[pos + 1]) << 8)
+                | (static_cast<int32_t>(data[pos + 2]) << 16)
+                | (static_cast<int32_t>(data[pos + 3]) << 24);
+            pos += 4;
+            return v;
+        };
 
-    int chunkX = readI32();
-    int chunkZ = readI32();
-
-    if (pos >= len) return;
-    uint8_t numSections = data[pos++];
-
-    static constexpr int VOL = ChunkConstants::CHUNK_VOLUME;
-    static constexpr int BLOCK_SIZE = Section::VOLUME * sizeof(BlockState);
-    auto blockBuf = std::make_unique<BlockState[]>(VOL);
-    std::memset(blockBuf.get(), 0, VOL * sizeof(BlockState));  // 默认 AIR
-
-    std::vector<uint8_t> decompressBuf(BLOCK_SIZE);
-
-    for (uint8_t i = 0; i < numSections && pos < len; ++i) {
+        int chunkX = readI32();
+        int chunkZ = readI32();
         if (pos >= len) break;
-        uint8_t sy = data[pos++];
+        uint8_t numSections = data[pos++];
 
-        if (pos >= len) break;
-        uint8_t flags = data[pos++];
+        static constexpr int VOL = ChunkConstants::CHUNK_VOLUME;
+        static constexpr int BLOCK_SIZE = Section::VOLUME * sizeof(BlockState);
+        auto blockBuf = std::make_unique<BlockState[]>(VOL);
+        std::memset(blockBuf.get(), 0, VOL * sizeof(BlockState));  // 默认 AIR
 
-        if ((flags & ChunkSyncFormat::FLAG_HAS_DATA) == 0) {
-            // 全空气 section：已经清零，无需操作
-            continue;
+        std::vector<uint8_t> decompressBuf(BLOCK_SIZE);
+        bool parseOk = true;
+
+        for (uint8_t i = 0; i < numSections && pos < len; ++i) {
+            if (pos >= len) { parseOk = false; break; }
+            uint8_t sy = data[pos++];
+
+            if (pos >= len) { parseOk = false; break; }
+            uint8_t flags = data[pos++];
+
+            if ((flags & ChunkSyncFormat::FLAG_HAS_DATA) == 0) {
+                continue;
+            }
+
+            if (pos + 2 > len) { parseOk = false; break; }
+            uint16_t dataLen = static_cast<uint16_t>(data[pos])
+                | (static_cast<uint16_t>(data[pos + 1]) << 8);
+            pos += 2;
+
+            if (pos + dataLen > len) { parseOk = false; break; }
+
+            int decompressedSize = LZ4_decompress_safe(
+                reinterpret_cast<const char*>(data + pos),
+                reinterpret_cast<char*>(decompressBuf.data()),
+                dataLen,
+                BLOCK_SIZE);
+
+            pos += dataLen;
+
+            if (decompressedSize != BLOCK_SIZE) {
+                fprintf(stderr, "[NetChunkSync] LZ4 decompress failed for (%d,%d) sy=%d: "
+                    "expected %d, got %d\n", chunkX, chunkZ, sy, BLOCK_SIZE, decompressedSize);
+                continue;
+            }
+
+            int sectionStart = sy * Section::VOLUME;
+            std::memcpy(blockBuf.get() + sectionStart,
+                decompressBuf.data(), BLOCK_SIZE);
         }
 
-        // 读取压缩数据
-        if (pos + 2 > len) break;
-        uint16_t dataLen = static_cast<uint16_t>(data[pos])
-            | (static_cast<uint16_t>(data[pos + 1]) << 8);
-        pos += 2;
-
-        if (pos + dataLen > len) break;
-
-        // LZ4 解压
-        int decompressedSize = LZ4_decompress_safe(
-            reinterpret_cast<const char*>(data + pos),
-            reinterpret_cast<char*>(decompressBuf.data()),
-            dataLen,
-            BLOCK_SIZE);
-
-        pos += dataLen;
-
-        if (decompressedSize != BLOCK_SIZE) {
-            fprintf(stderr, "[NetChunkSync] LZ4 decompress failed for (%d,%d) sy=%d: "
-                "expected %d, got %d\n", chunkX, chunkZ, sy, BLOCK_SIZE, decompressedSize);
-            continue;
+        if (parseOk && m_chunkManager) {
+            m_chunkManager->importChunkData(chunkX, chunkZ, std::move(blockBuf));
+            ++chunkCount;
+        } else if (!m_chunkManager) {
+            static int nullCmWarnCount = 0;
+            if (nullCmWarnCount < 5) {
+                fprintf(stderr, "[NetChunkSync] deserializeAndImport: m_chunkManager is null!\n");
+                ++nullCmWarnCount;
+            }
+            break;
         }
-
-        // 将 section 数据写入 chunk buffer 对应位置
-        int sectionStart = sy * Section::VOLUME;
-        std::memcpy(blockBuf.get() + sectionStart,
-            decompressBuf.data(), BLOCK_SIZE);
-    }
-
-    // 提交导入
-    if (m_chunkManager) {
-        m_chunkManager->importChunkData(chunkX, chunkZ, std::move(blockBuf));
-    } else {
-        static int nullCmWarnCount = 0;
-        if (nullCmWarnCount < 5) {
-            fprintf(stderr, "[NetChunkSync] deserializeAndImport: m_chunkManager is null!\n");
-            ++nullCmWarnCount;
-        }
+        // 解析失败（数据损坏或截断）：跳过本轮，while 条件会阻止继续
     }
 }

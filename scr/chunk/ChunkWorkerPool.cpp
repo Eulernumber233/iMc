@@ -3,6 +3,7 @@
 #include "../generate/TerrainGenerator.h"
 #include "../save/ChunkSaveManager.h"
 #include <iostream>
+#include <cstring>
 
 ChunkWorkerPool::ChunkWorkerPool() = default;
 
@@ -16,7 +17,6 @@ void ChunkWorkerPool::start(const TerrainGenerator* generator, int numThreads) {
     m_stop.store(false);
 
     if (numThreads <= 0) numThreads = 2;
-    //if (numThreads > 8) numThreads = 8;
 
     m_workers.reserve(numThreads);
     for (int i = 0; i < numThreads; ++i) {
@@ -38,76 +38,60 @@ void ChunkWorkerPool::stop() {
         m_jobs.clear();
     }
     {
-        std::lock_guard<std::mutex> lk(m_buildDoneMutex);
-        m_buildDone.clear();
+        std::lock_guard<std::mutex> lk(m_blockDoneMutex);
+        m_blockDone.clear();
     }
     {
-        std::lock_guard<std::mutex> lk(m_stitchDoneMutex);
-        m_stitchDone.clear();
+        std::lock_guard<std::mutex> lk(m_meshDoneMutex);
+        m_meshDone.clear();
     }
     m_pending.store(0);
 }
 
-void ChunkWorkerPool::submit(const glm::ivec2& pos) {
+void ChunkWorkerPool::submitBuild(const glm::ivec2& pos) {
+    Job j;
+    j.kind = JOB_BUILD;
+    j.pos = pos;
     {
         std::lock_guard<std::mutex> lk(m_jobMutex);
-        Job j; 
-        j.kind = JOB_BUILD; 
-        j.pos = pos;
         m_jobs.push_back(std::move(j));
     }
     m_pending.fetch_add(1, std::memory_order_relaxed);
     m_jobCV.notify_one();
 }
 
-void ChunkWorkerPool::submitStitch(Chunk* a, Chunk* b, uint8_t dirAtoB) {
+void ChunkWorkerPool::submitMeshBuild(const MeshBuildInput& input) {
     {
         std::lock_guard<std::mutex> lk(m_jobMutex);
         Job j;
-        j.kind = JOB_STITCH;
-        j.a = a;
-        j.b = b;
-        j.dirAtoB = dirAtoB;
+        j.kind = JOB_MESH;
+        j.meshInput = input;
         m_jobs.push_back(std::move(j));
     }
     m_jobCV.notify_one();
 }
 
-void ChunkWorkerPool::submitImport(const glm::ivec2& pos, std::unique_ptr<BlockState[]> buffer) {
+std::vector<BlockDataResult> ChunkWorkerPool::drainBlockData() {
+    std::deque<std::unique_ptr<BlockDataResult>> tmp;
     {
-        std::lock_guard<std::mutex> lk(m_jobMutex);
-        Job j;
-        j.kind = JOB_IMPORT;
-        j.pos = pos;
-        j.importBuffer = std::move(buffer);
-        m_jobs.push_back(std::move(j));
+        std::lock_guard<std::mutex> lk(m_blockDoneMutex);
+        tmp.swap(m_blockDone);
     }
-    m_pending.fetch_add(1, std::memory_order_relaxed);
-    m_jobCV.notify_one();
-}
-
-std::vector<ChunkBuildResult> ChunkWorkerPool::drainCompleted() {
-    // 持锁只做 deque 的 O(1) swap；锁外解 unique_ptr、组装 vector。
-    std::deque<std::unique_ptr<ChunkBuildResult>> tmp;
-    {
-        std::lock_guard<std::mutex> lk(m_buildDoneMutex);
-        tmp.swap(m_buildDone);
-    }
-    std::vector<ChunkBuildResult> out;
+    std::vector<BlockDataResult> out;
     out.reserve(tmp.size());
     for (auto& p : tmp) out.push_back(std::move(*p));
     return out;
 }
 
-std::vector<StitchResult> ChunkWorkerPool::drainStitchResults() {
-    std::deque<StitchResult> tmp;
+std::vector<ChunkBuildResult> ChunkWorkerPool::drainMeshResults() {
+    std::deque<std::unique_ptr<ChunkBuildResult>> tmp;
     {
-        std::lock_guard<std::mutex> lk(m_stitchDoneMutex);
-        tmp.swap(m_stitchDone);
+        std::lock_guard<std::mutex> lk(m_meshDoneMutex);
+        tmp.swap(m_meshDone);
     }
-    std::vector<StitchResult> out;
+    std::vector<ChunkBuildResult> out;
     out.reserve(tmp.size());
-    for (auto& r : tmp) out.push_back(r);
+    for (auto& p : tmp) out.push_back(std::move(*p));
     return out;
 }
 
@@ -123,132 +107,128 @@ void ChunkWorkerPool::workerMain() {
         }
 
         if (job.kind == JOB_BUILD) {
-            auto result = std::make_unique<ChunkBuildResult>();
+            auto result = std::make_unique<BlockDataResult>();
             result->pos = job.pos;
             buildOne(job.pos, *result);
-
             {
-                std::lock_guard<std::mutex> lk(m_buildDoneMutex);
-                m_buildDone.push_back(std::move(result));
-            }
-            m_pending.fetch_sub(1, std::memory_order_relaxed);
-        } else if (job.kind == JOB_IMPORT) {
-            auto result = std::make_unique<ChunkBuildResult>();
-            result->pos = job.pos;
-            importOne(job.pos, job.importBuffer.get(), *result);
-            job.importBuffer.reset();
-
-            {
-                std::lock_guard<std::mutex> lk(m_buildDoneMutex);
-                m_buildDone.push_back(std::move(result));
+                std::lock_guard<std::mutex> lk(m_blockDoneMutex);
+                m_blockDone.push_back(std::move(result));
             }
             m_pending.fetch_sub(1, std::memory_order_relaxed);
         } else {
-            StitchResult sr;
-            stitchOne(job.a, job.b, job.dirAtoB, sr);
+            // JOB_MESH
+            auto result = std::make_unique<ChunkBuildResult>();
+            result->pos = job.meshInput.pos;
+            meshBuildOne(job.meshInput, *result);
             {
-                std::lock_guard<std::mutex> lk(m_stitchDoneMutex);
-                m_stitchDone.push_back(sr);
+                std::lock_guard<std::mutex> lk(m_meshDoneMutex);
+                m_meshDone.push_back(std::move(result));
             }
-            // stitch 不计入 pendingCount（pendingCount 只跟 build 配额有关）
         }
     }
 }
 
-void ChunkWorkerPool::buildOne(const glm::ivec2& pos, ChunkBuildResult& out) const {
-    constexpr int VOL = ChunkConstants::CHUNK_VOLUME;
-    constexpr int W = ChunkConstants::CHUNK_WIDTH;
-    constexpr int H = ChunkConstants::CHUNK_HEIGHT;
-    constexpr int D = ChunkConstants::CHUNK_DEPTH;
+// ============================================================================
+// Task 1：生成/加载方块数据（不构建 mesh）
+// ============================================================================
 
-    // 16 bit / 格 × 16×16×256 = 128KB。原 BlockType[VOL] = 64KB 已经接近 Windows 默认栈 1MB
-    // 上的舒适范围，升级到 BlockState 后稳妥起见走堆分配（worker 上下文 new 一次即可）。
-    auto bufPtr = std::make_unique<BlockState[]>(VOL);
-    BlockState* buf = bufPtr.get();
+void ChunkWorkerPool::buildOne(const glm::ivec2& pos, BlockDataResult& out) const {
+    constexpr int VOL = ChunkConstants::CHUNK_VOLUME;
+    out.blocks = std::make_unique<BlockState[]>(VOL);
 
     // 先尝试从存档加载，失败则走地形生成
     bool loadedFromDisk = false;
     if (m_saveManager) {
-        loadedFromDisk = m_saveManager->loadChunk(pos, buf);
+        loadedFromDisk = m_saveManager->loadChunk(pos, out.blocks.get());
     }
     if (!loadedFromDisk) {
-        m_generator->fillChunkBuffer(buf, pos);
-    }
-
-    // 把 buffer 切到 4 个 section
-    for (int sy = 0; sy < ChunkBuildResult::SECTION_COUNT; ++sy) {
-        out.sections[sy].setCoords(pos.x, pos.y, sy);
-        BlockState* dst = out.sections[sy].stateData();
-        for (int y = 0; y < Section::HEIGHT; ++y) {
-            int worldY = sy * Section::HEIGHT + y;
-            for (int z = 0; z < D; ++z) {
-                for (int x = 0; x < W; ++x) {
-                    dst[(y * Section::DEPTH + z) * Section::WIDTH + x] =
-                        buf[(worldY * D + z) * W + x];
-                }
-            }
-        }
-    }
-
-    // 计算每个 section 的可见性（含垂直邻居 section；横向边界默认不可见）
-    for (int sy = 0; sy < ChunkBuildResult::SECTION_COUNT; ++sy) {
-        const Section* above = (sy + 1 < ChunkBuildResult::SECTION_COUNT)
-            ? &out.sections[sy + 1] : nullptr;
-        const Section* below = (sy > 0) ? &out.sections[sy - 1] : nullptr;
-        out.sections[sy].rebuildVisibilityInternal(above, below);
+        m_generator->fillChunkBuffer(out.blocks.get(), pos);
     }
 }
 
-void ChunkWorkerPool::importOne(const glm::ivec2& pos, BlockState* buffer,
-                                ChunkBuildResult& out) const {
+// ============================================================================
+// Task 2：完整可见面生成（内部 + 全部边界）
+// ============================================================================
+
+void ChunkWorkerPool::meshBuildOne(const MeshBuildInput& in, ChunkBuildResult& out) const {
     constexpr int W = ChunkConstants::CHUNK_WIDTH;
     constexpr int H = ChunkConstants::CHUNK_HEIGHT;
     constexpr int D = ChunkConstants::CHUNK_DEPTH;
+    constexpr int VOL = ChunkConstants::CHUNK_VOLUME;
+    constexpr int SEC_H = Section::HEIGHT;
+    constexpr int SEC_VOL = Section::VOLUME;
 
-    // buffer 已由调用方预填充（网络接收），跳过地形生成
-    // 直接拷贝到 section + 重建可见性
+    // 将自身方块数据拷贝到各 section
     for (int sy = 0; sy < ChunkBuildResult::SECTION_COUNT; ++sy) {
-        out.sections[sy].setCoords(pos.x, pos.y, sy);
+        out.sections[sy].setCoords(in.pos.x, in.pos.y, sy);
         BlockState* dst = out.sections[sy].stateData();
-        for (int y = 0; y < Section::HEIGHT; ++y) {
-            int worldY = sy * Section::HEIGHT + y;
+        for (int y = 0; y < SEC_H; ++y) {
+            int worldY = sy * SEC_H + y;
             for (int z = 0; z < D; ++z) {
                 for (int x = 0; x < W; ++x) {
                     dst[(y * Section::DEPTH + z) * Section::WIDTH + x] =
-                        buffer[(worldY * D + z) * W + x];
+                        in.selfBlocks[(worldY * D + z) * W + x];
                 }
             }
         }
     }
 
+    // 计算每个 section 的可见性（含垂直邻居 + 横向邻居）
     for (int sy = 0; sy < ChunkBuildResult::SECTION_COUNT; ++sy) {
         const Section* above = (sy + 1 < ChunkBuildResult::SECTION_COUNT)
             ? &out.sections[sy + 1] : nullptr;
         const Section* below = (sy > 0) ? &out.sections[sy - 1] : nullptr;
+
+        // 内部 + 垂直边界
         out.sections[sy].rebuildVisibilityInternal(above, below);
+
+        // 横向边界：用邻居方块数据补充
+        Section& sec = out.sections[sy];
+        int baseY = sy * SEC_H;
+
+        // +X 边界 (x = W-1, face = RIGHT)
+        if (in.neighborBlocks[0]) {
+            for (int y = 0; y < SEC_H; ++y) {
+                int worldY = baseY + y;
+                for (int z = 0; z < D; ++z) {
+                    // 邻居在 (+1,0) 方向的 (0, worldY, z) 处
+                    BlockState nb = in.neighborBlocks[0][(worldY * D + z) * W + 0];
+                    sec.updateFaceWithNeighbor(W - 1, y, z, RIGHT, nb);
+                }
+            }
+        }
+
+        // -X 边界 (x = 0, face = LEFT)
+        if (in.neighborBlocks[1]) {
+            for (int y = 0; y < SEC_H; ++y) {
+                int worldY = baseY + y;
+                for (int z = 0; z < D; ++z) {
+                    BlockState nb = in.neighborBlocks[1][(worldY * D + z) * W + (W - 1)];
+                    sec.updateFaceWithNeighbor(0, y, z, LEFT, nb);
+                }
+            }
+        }
+
+        // +Z 边界 (z = D-1, face = FRONT)
+        if (in.neighborBlocks[2]) {
+            for (int y = 0; y < SEC_H; ++y) {
+                int worldY = baseY + y;
+                for (int x = 0; x < W; ++x) {
+                    BlockState nb = in.neighborBlocks[2][(worldY * D + 0) * W + x];
+                    sec.updateFaceWithNeighbor(x, y, D - 1, FRONT, nb);
+                }
+            }
+        }
+
+        // -Z 边界 (z = 0, face = BACK)
+        if (in.neighborBlocks[3]) {
+            for (int y = 0; y < SEC_H; ++y) {
+                int worldY = baseY + y;
+                for (int x = 0; x < W; ++x) {
+                    BlockState nb = in.neighborBlocks[3][(worldY * D + (D - 1)) * W + x];
+                    sec.updateFaceWithNeighbor(x, y, 0, BACK, nb);
+                }
+            }
+        }
     }
-}
-
-void ChunkWorkerPool::stitchOne(Chunk* a, Chunk* b, uint8_t dirAtoB, StitchResult& out) const {
-    // 直接调 Chunk::stitchWithNeighbor —— 双向修改 a / b 的边界 mesh。
-    // 调用方保证 a / b 在投递期间始终在 m_pendingChunks 中，主线程不会触碰，无需加锁。
-    BlockFace face = (BlockFace)dirAtoB;
-    a->stitchWithNeighbor(b, face);
-    a->refreshNonEmptyMask();
-    b->refreshNonEmptyMask();
-
-    // dirB = 反向
-    uint8_t dirB = 0;
-    switch (face) {
-    case RIGHT: dirB = LEFT; break;
-    case LEFT:  dirB = RIGHT; break;
-    case FRONT: dirB = BACK; break;
-    case BACK:  dirB = FRONT; break;
-    default: dirB = 0; break;
-    }
-
-    out.posA = a->getPosition();
-    out.posB = b->getPosition();
-    out.dirA = dirAtoB;
-    out.dirB = dirB;
 }

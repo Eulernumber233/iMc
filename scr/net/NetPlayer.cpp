@@ -26,9 +26,9 @@ void PlayerNetState::setLook(float yaw, float pitch) {
 }
 
 void PlayerNetState::OnRep_Position() {
-    // 由 NetPlayer 在外部处理
+    if (m_owner) m_owner->updateCachedPosition(m_position);
 }
 
 void PlayerNetState::OnRep_Look() {
-    // 由 NetPlayer 在外部处理
+    if (m_owner) m_owner->updateCachedLook(m_yaw, m_pitch);
 }
