@@ -394,6 +394,21 @@ void NetChunkSync::serializeChunkFromBlocks(int chunkX, int chunkZ,
     out[numSectionsPos] = numSections;
 }
 
+void NetChunkSync::broadcastBlockChange(int chunkX, int chunkZ,
+                                        const std::vector<uint8_t>& encodedMsg) {
+    if (!m_netManager) return;
+    ChunkKey key = makeKey(chunkX, chunkZ);
+
+    // 只发给"已经收到过该 chunk"的客户端（相关性过滤）。
+    // 没加载该 chunk 的客户端将来 CHUNK_REQUEST 时拿到的已是改后的最新快照，无需补发。
+    for (auto& [peer, sent] : m_sentChunks) {
+        if (!peer) continue;
+        if (sent.count(key) == 0) continue;
+        m_netManager->getTransport().sendReliable(peer, encodedMsg.data(), encodedMsg.size());
+    }
+    m_netManager->getTransport().flush();
+}
+
 // ============================================================================
 // 客户端
 // ============================================================================

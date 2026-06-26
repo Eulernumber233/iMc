@@ -73,6 +73,16 @@ public:
     // 客户端向服务端请求 chunk
     void sendChunkRequest(int32_t chunkX, int32_t chunkZ);
 
+    // ---- 方块同步 ----
+
+    // 客户端：向服务端发送方块修改"请求"（不本地应用，等服务端广播回来）。
+    // 服务端（Host 玩家本地交互）：应用到权威数据并广播给相关客户端。
+    // 该方法内部按 netMode 分流，World/Player 只需无脑调它。
+    void requestBlockChange(int32_t worldX, int32_t worldY, int32_t worldZ,
+                            uint16_t blockStateBits);
+
+    NetChunkSync& getChunkSync() { return m_chunkSync; }
+
 private:
     NetTransport m_transport;
     NetObjectManager m_objManager;
@@ -115,6 +125,10 @@ private:
     void handleChunkData(MemoryStream& payload);
     void handleChunkRequest(ENetPeer* peer, MemoryStream& payload);
     void handleChunkResponse(MemoryStream& payload);
+
+    // 方块修改：服务端权威处理（校验→应用→相关性广播）/ 客户端应用广播
+    void handleBlockChangeServer(ENetPeer* peer, MemoryStream& payload);
+    void handleBlockChangeClient(MemoryStream& payload);
 
     // P2P 辅助
     void sendToAll(ENetPeer* exclude, const NetMessage& msg, bool reliable);

@@ -1,5 +1,7 @@
 ﻿#include "NetManager.h"
 #include "../mode/SkinManager.h"
+#include "../chunk/ChunkManager.h"
+#include "../chunk/BlockType.h"
 #include <cstdio>
 #include <chrono>
 
@@ -363,6 +365,11 @@ void NetManager::dispatchMessage(ENetPeer* peer, const NetMessage& msg) {
         if (m_isHost) handleChunkRequest(peer, payload);
         break;
 
+    case NetMsgType::BLOCK_CHANGE:
+        if (m_isHost) handleBlockChangeServer(peer, payload);
+        else          handleBlockChangeClient(payload);
+        break;
+
     default:
         break;
     }
@@ -721,4 +728,79 @@ void NetManager::sendChunkRequest(int32_t chunkX, int32_t chunkZ) {
     msg.encode(buf);
     m_transport.sendReliable(m_serverPeer, buf.data(), buf.size());
     m_transport.flush();
+}
+
+// ============================================================================
+// 方块修改同步
+// ============================================================================
+
+static inline void worldToChunkXZ(int32_t wx, int32_t wz, int& cx, int& cz) {
+    constexpr int W = 16;  // Chunk::WIDTH / DEPTH
+    cx = (wx >= 0) ? (wx / W) : -(((-wx) + W - 1) / W);
+    cz = (wz >= 0) ? (wz / W) : -(((-wz) + W - 1) / W);
+}
+
+void NetManager::requestBlockChange(int32_t worldX, int32_t worldY, int32_t worldZ,
+                                    uint16_t blockStateBits) {
+    if (!m_connected) return;
+
+    if (m_isHost) {
+        // 服务端权威：直接应用到本地权威数据 + 广播给相关客户端（含 Host 自己已生效）
+        if (m_chunkManager) {
+            m_chunkManager->applyBlockChange(glm::ivec3(worldX, worldY, worldZ),
+                                             BlockState(blockStateBits));
+        }
+        auto msg = NetMessage::blockChange(worldX, worldY, worldZ, blockStateBits);
+        std::vector<uint8_t> buf;
+        msg.encode(buf);
+        int cx, cz;
+        worldToChunkXZ(worldX, worldZ, cx, cz);
+        m_chunkSync.broadcastBlockChange(cx, cz, buf);
+    } else if (m_serverPeer) {
+        // 客户端：只发请求，不本地应用，等服务端广播回来
+        auto msg = NetMessage::blockChange(worldX, worldY, worldZ, blockStateBits);
+        std::vector<uint8_t> buf;
+        msg.encode(buf);
+        m_transport.sendReliable(m_serverPeer, buf.data(), buf.size());
+        m_transport.flush();
+    }
+}
+
+void NetManager::handleBlockChangeServer(ENetPeer* peer, MemoryStream& payload) {
+    if (payload.remaining() < sizeof(int32_t) * 3 + sizeof(uint16_t)) return;
+    int32_t wx = payload.readPod<int32_t>();
+    int32_t wy = payload.readPod<int32_t>();
+    int32_t wz = payload.readPod<int32_t>();
+    uint16_t bits = payload.readPod<uint16_t>();
+
+    // TODO(校验): 距离/权限/冷却。当前局域网受信环境，先直接应用。
+    if (m_chunkManager) {
+        bool applied = m_chunkManager->applyBlockChange(
+            glm::ivec3(wx, wy, wz), BlockState(bits));
+        if (!applied) {
+            // 该 chunk 服务端未加载——理论上不该发生（客户端只改自己加载的、
+            // 即服务端推送过的 chunk）。忽略。
+            return;
+        }
+    }
+
+    // 广播给所有相关客户端（含发起者，使其通过统一广播路径生效）
+    auto msg = NetMessage::blockChange(wx, wy, wz, bits);
+    std::vector<uint8_t> buf;
+    msg.encode(buf);
+    int cx, cz;
+    worldToChunkXZ(wx, wz, cx, cz);
+    m_chunkSync.broadcastBlockChange(cx, cz, buf);
+}
+
+void NetManager::handleBlockChangeClient(MemoryStream& payload) {
+    if (payload.remaining() < sizeof(int32_t) * 3 + sizeof(uint16_t)) return;
+    int32_t wx = payload.readPod<int32_t>();
+    int32_t wy = payload.readPod<int32_t>();
+    int32_t wz = payload.readPod<int32_t>();
+    uint16_t bits = payload.readPod<uint16_t>();
+
+    if (m_chunkManager) {
+        m_chunkManager->applyBlockChange(glm::ivec3(wx, wy, wz), BlockState(bits));
+    }
 }

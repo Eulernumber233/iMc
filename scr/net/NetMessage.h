@@ -50,4 +50,7 @@ public:
     static NetMessage chunkData(const std::vector<uint8_t>& compressedChunks);
     static NetMessage chunkRequest(int32_t chunkX, int32_t chunkZ);
     static NetMessage chunkResponse(const std::vector<uint8_t>& compressedData);
+    // 单个方块修改（双向）：客户端→服务端为"请求"，服务端→客户端为"已生效广播"
+    static NetMessage blockChange(int32_t worldX, int32_t worldY, int32_t worldZ,
+                                  uint16_t blockStateBits);
 };

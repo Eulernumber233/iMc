@@ -133,6 +133,14 @@ int World::run() {
                 });
         }
 
+        // Host / Join 都设置方块修改 sink：用户发起的放置/破坏不直接本地生效，
+        // 而是交给 NetManager 走"服务端权威"流程（客户端发请求、服务端应用+广播）。
+        m_chunkManager->setBlockChangeSink(
+            [this](const glm::ivec3& worldPos, BlockState state) {
+                m_netManager->requestBlockChange(
+                    worldPos.x, worldPos.y, worldPos.z, state.bits);
+            });
+
         // 服务端：处理在初始化期间连接的客户端（着色器编译等耗时操作
         // 可能持续数秒，客户端在此期间发送 JOIN_REQUEST 会超时）
         // 使用时间循环而非固定次数，给予 ENET 握手往返足够的间隔

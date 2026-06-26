@@ -139,3 +139,13 @@ NetMessage NetMessage::chunkResponse(const std::vector<uint8_t>& compressedData)
     msg.payload.writeBytes(compressedData.data(), compressedData.size());
     return msg;
 }
+
+NetMessage NetMessage::blockChange(int32_t worldX, int32_t worldY, int32_t worldZ,
+                                   uint16_t blockStateBits) {
+    NetMessage msg(NetMsgType::BLOCK_CHANGE);
+    msg.payload.writePod(worldX);
+    msg.payload.writePod(worldY);
+    msg.payload.writePod(worldZ);
+    msg.payload.writePod(blockStateBits);
+    return msg;
+}

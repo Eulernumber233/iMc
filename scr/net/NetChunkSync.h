@@ -42,6 +42,14 @@ public:
     // 客户端断连时清理 pending 请求
     void onPeerDisconnected(ENetPeer* peer);
 
+    // ---- 服务端：方块修改广播（相关性过滤）----
+
+    // 把一条已编码好的 BLOCK_CHANGE 消息广播给所有"已加载该 chunk"的客户端
+    // （即 m_sentChunks 中含该 chunkKey 的 peer）。excludePeer 可排除发起者外的某 peer，
+    // 传 nullptr 表示发给所有相关 peer（含发起者，保证发起者也通过广播路径生效）。
+    void broadcastBlockChange(int chunkX, int chunkZ,
+                              const std::vector<uint8_t>& encodedMsg);
+
     // ---- 客户端 ----
 
     // 处理收到的 CHUNK_DATA / CHUNK_RESPONSE payload

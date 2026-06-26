@@ -9,6 +9,7 @@
 #include <iostream>
 #include <algorithm>
 #include <thread>
+#include <shared_mutex>
 #include <GLFW/glfw3.h>
 #ifdef _MSC_VER
 #include <intrin.h>
@@ -631,6 +632,12 @@ void ChunkManager::loadMeshResult(ChunkBuildResult& result) {
     // block-ready entry 的使命完成，清除（它持有的 box shared_ptr 释放，引用计数交给 Section）
     m_blockReady.erase(key);
 
+    // 若该 chunk 在 block-ready 期间被网络改动过（待存盘），把脏标记交接给新 Chunk，
+    // 由 loaded chunk 的常规存盘路径接管。
+    if (m_blockReadyDirty.erase(key) > 0) {
+        chunk->markSaveDirty();
+    }
+
     Chunk* raw = chunk.get();
     m_loadedChunks[key] = std::move(chunk);
 
@@ -873,6 +880,18 @@ void ChunkManager::syncSectionBaseSSBO() {
 // ============================================================================
 
 bool ChunkManager::setBlock(const glm::ivec3& worldPos, BlockState state) {
+    // 网络会话中：用户发起的方块修改不直接本地生效，而是交给 sink
+    // （客户端发请求 / 服务端权威应用+广播）。非会话（单机）时 sink 为空，直接本地应用。
+    // 注意：sink 内部最终通过 applyBlockChange→applyLocalSetBlock 落地，不会回到本函数，
+    // 因此无递归。
+    if (m_blockChangeSink) {
+        m_blockChangeSink(worldPos, state);
+        return true;
+    }
+    return applyLocalSetBlock(worldPos, state);
+}
+
+bool ChunkManager::applyLocalSetBlock(const glm::ivec3& worldPos, BlockState state) {
     glm::ivec2 chunkPos(
         (int)std::floor(worldPos.x / (float)Chunk::WIDTH),
         (int)std::floor(worldPos.z / (float)Chunk::DEPTH)
@@ -917,6 +936,43 @@ BlockState ChunkManager::getBlockAt(const glm::ivec3& worldPos) {
         return itLoaded->second->getBlock(lx, worldPos.y, lz);
     }
     return BlockState{};
+}
+
+bool ChunkManager::applyBlockChange(const glm::ivec3& worldPos, BlockState state) {
+    glm::ivec2 chunkPos(
+        (int)std::floor(worldPos.x / (float)Chunk::WIDTH),
+        (int)std::floor(worldPos.z / (float)Chunk::DEPTH)
+    );
+    if (worldPos.y < 0 || worldPos.y >= Chunk::HEIGHT) return false;
+
+    ChunkKey key = chunkPosToKey(chunkPos);
+
+    // 1. LOADED：走完整本地应用路径（改面 + 标脏 + GPU 增量 patch）。
+    //    注意用 applyLocalSetBlock 而非 setBlock，避免再次进入 sink 造成回环。
+    if (m_loadedChunks.find(key) != m_loadedChunks.end()) {
+        return applyLocalSetBlock(worldPos, state);
+    }
+
+    // 2. BLOCK_READY：没有 mesh，直接改对应 section 的 box
+    auto itBR = m_blockReady.find(key);
+    if (itBR != m_blockReady.end()) {
+        int lx = ((worldPos.x % Chunk::WIDTH) + Chunk::WIDTH) % Chunk::WIDTH;
+        int lz = ((worldPos.z % Chunk::DEPTH) + Chunk::DEPTH) % Chunk::DEPTH;
+        int sy = worldPos.y / Section::HEIGHT;
+        int ly = worldPos.y % Section::HEIGHT;
+        auto& box = itBR->second.boxes[sy];
+        if (!box) return false;
+        {
+            std::unique_lock<std::shared_mutex> lk(box->mutex);
+            box->blocks[(ly * Chunk::DEPTH + lz) * Chunk::WIDTH + lx] = state;
+        }
+        // 仅服务端需要持久化；客户端 m_saveManager 为空，记了也不会落盘。
+        if (m_saveManager) m_blockReadyDirty.insert(key);
+        return true;
+    }
+
+    // 3. 不存在：丢弃（正常情况下服务端不会发给未加载该 chunk 的客户端）
+    return false;
 }
 
 // ============================================================================
@@ -974,6 +1030,55 @@ void ChunkManager::doAutoSave() {
             ++saved;
         }
     }
+    saveDirtyBlockReadyChunks();
+}
+
+void ChunkManager::saveDirtyBlockReadyChunks() {
+    if (!m_saveManager || m_blockReadyDirty.empty()) return;
+
+    constexpr int VOL = ChunkConstants::CHUNK_VOLUME;
+    constexpr int W = Chunk::WIDTH;
+    constexpr int D = Chunk::DEPTH;
+    auto buf = std::make_unique<BlockState[]>(VOL);
+
+    std::vector<ChunkKey> done;
+    for (ChunkKey key : m_blockReadyDirty) {
+        auto it = m_blockReady.find(key);
+        if (it == m_blockReady.end()) {
+            // 已不在 block-ready（可能已 loaded，脏标记已交接，或已卸载）→ 移除
+            done.push_back(key);
+            continue;
+        }
+
+        BlockState* dst = buf.get();
+        const ChunkBoxes& boxes = it->second.boxes;
+        for (int sy = 0; sy < Chunk::SECTION_COUNT; ++sy) {
+            int baseY = sy * Section::HEIGHT;
+            const auto& box = boxes[sy];
+            if (!box) {
+                // 该 section 无数据：填空气
+                for (int y = 0; y < Section::HEIGHT; ++y)
+                    for (int z = 0; z < D; ++z)
+                        for (int x = 0; x < W; ++x)
+                            dst[((baseY + y) * D + z) * W + x] = BlockState{};
+                continue;
+            }
+            std::shared_lock<std::shared_mutex> lk(box->mutex);
+            const BlockState* src = box->blocks.data();
+            for (int y = 0; y < Section::HEIGHT; ++y)
+                for (int z = 0; z < D; ++z)
+                    for (int x = 0; x < W; ++x)
+                        dst[((baseY + y) * D + z) * W + x] =
+                            src[(y * D + z) * W + x];
+        }
+
+        int32_t cx = static_cast<int32_t>(key >> 32);
+        int32_t cz = static_cast<int32_t>(key & 0xFFFFFFFFLL);
+        m_saveManager->saveChunk(glm::ivec2(cx, cz), dst);
+        done.push_back(key);
+    }
+
+    for (ChunkKey key : done) m_blockReadyDirty.erase(key);
 }
 
 void ChunkManager::unloadDistantChunks() {

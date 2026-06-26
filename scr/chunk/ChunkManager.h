@@ -79,6 +79,19 @@ public:
     bool setBlock(const glm::ivec3& worldPos, BlockState state);
     BlockState getBlockAt(const glm::ivec3& worldPos);
 
+    // 网络统一点修改入口：把一次方块改动应用到本地权威数据。
+    //  - chunk 在 LOADED：走 setBlock 改面 + 标脏（GPU 增量 patch 自动跟上）
+    //  - chunk 在 BLOCK_READY：直接改对应 box（持写锁），并记入待存盘集合
+    //  - chunk 不存在：丢弃（服务端不会把改动发给没加载该 chunk 的客户端）
+    // 返回 true 表示已应用（loaded 或 block-ready 命中）。
+    bool applyBlockChange(const glm::ivec3& worldPos, BlockState state);
+
+    // 用户发起方块修改的重定向 sink。设置后，setBlock() 不再本地生效，而是转交 sink
+    // （网络会话：客户端发请求 / 服务端应用+广播）。单机模式不设置，setBlock 直接本地应用。
+    void setBlockChangeSink(std::function<void(const glm::ivec3&, BlockState)> fn) {
+        m_blockChangeSink = std::move(fn);
+    }
+
     static SectionKey makeSectionKey(int chunkX, int chunkZ, int sectionY);
 
     uint32_t getVisibilityGeneration() const { return m_visGeneration; }
@@ -176,11 +189,24 @@ private:
     double m_lastSaveCheckTime = 0.0;
     float  m_autoSaveTimer = 0.0f;
 
+    // 仍处于 BLOCK_READY（未 loaded、无 mesh）但被网络改动过的 chunk，
+    // 需要在自动保存/退出时落盘。loaded chunk 由 Chunk::isSaveDirty 跟踪，
+    // block-ready chunk 没有 Chunk 对象，故单独记一个集合（仅服务端有意义）。
+    std::unordered_set<ChunkKey> m_blockReadyDirty;
+    // 把 m_blockReadyDirty 中的 chunk 序列化落盘（从 box 直接写）。
+    void saveDirtyBlockReadyChunks();
+
     // 网络客户端
     bool m_networkClient = false;
 
     // 网络请求回调
     std::function<void(int, int)> m_onRequestChunk;
+
+    // 用户发起方块修改的重定向 sink（见 setBlockChangeSink）
+    std::function<void(const glm::ivec3&, BlockState)> m_blockChangeSink;
+
+    // setBlock 的真正本地实现（绕过 sink，供 sink 内部 / applyBlockChange 调用）
+    bool applyLocalSetBlock(const glm::ivec3& worldPos, BlockState state);
 
     // 是否需要扫描缺失 chunk
     bool m_needChunkScan = true;
