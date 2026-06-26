@@ -1,171 +1,235 @@
-﻿# CLAUDE.md
+# CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+本文件为 Claude Code (claude.ai/code) 在本仓库工作时提供指引。
 
-## Project Overview
+## 项目概述
 
-iMc is a Minecraft-inspired voxel rendering engine built with modern OpenGL (4.6 core profile) and C++17. Features:
-- Section-based chunk architecture (16×16×16 sections, stacked into 16×CHUNK_HEIGHT×16 chunks)
-- Multi-threaded chunk generation + mesh build via worker pool
-- GPU instance arena (size-class allocator) + `glMultiDrawElementsIndirect`
-- 8-byte packed `InstanceData` (`packed32 + blockType16 + textureLayer16`); world position reconstructed in-shader from `sectionBases[gl_DrawID]`
-- Incremental VBO patching via `glMapBufferRange` (UNSYNCHRONIZED) — single mesh-mutating action uploads only changed faces
-- Deferred rendering with SSAO and soft shadows (PCSS+VSSM)
-- First-person player controls with AABB physics, terrain generation, particles, UI
-- Per-section frustum/distance culling
-- GPU slot eviction outside `renderRadius + EVICT_MARGIN_CHUNKS` (CPU chunk data retained pending future save system)
+iMc 是一个用现代 OpenGL（4.6 core profile）和 C++17 编写的、受 Minecraft 启发的体素渲染引擎。核心特性：
 
-## Build System
+- 基于 section 的区块架构（16×16×16 section，沿 Y 堆叠成 16×CHUNK_HEIGHT×16 的 chunk）
+- 多线程区块管线：**两阶段任务**（Task 1 生成方块数据 → Task 2 用自身 + 4 邻居方块数据一次性构建含边界的完整 mesh），由 worker 池执行
+- GPU 实例 arena（size-class 分配器）+ `glMultiDrawElementsIndirect`
+- 8 字节紧凑 `InstanceData`（`packed32 + blockType16 + textureLayer16`）；世界坐标在 shader 内由 `sectionBases[gl_DrawID]` 重建
+- 增量 VBO patch（`glMapBufferRange` + `UNSYNCHRONIZED`）—— 单次改方块只上传变化的面
+- 延迟渲染 + SSAO + 软阴影（PCSS+VSSM）+ 昼夜动态光照
+- 第一人称玩家控制、AABB 物理、地形生成、粒子、UI、第三人称玩家模型
+- **存档系统**：Minecraft Anvil 风格的 region 文件（`.mca`）+ LZ4 压缩 + 自动保存
+- **局域网联机**：基于 ENet 的 Host/Join 架构，玩家位置同步 + 区块数据同步
+- 逐 section 视锥/距离剔除；超出 `renderRadius + EVICT_MARGIN_CHUNKS` 的 GPU slot 驱逐
 
-- **IDE**: Visual Studio 2022 with `iMc.sln`
-- **Platform**: Windows x64, C++17 (`stdcpp17`)
-- **Configurations**: Debug and Release (x64 is the primary target)
-- **Property Sheets**: `PropertySheet_debug.props` (Debug) / `PropertySheet.props` (Release) define include/lib paths and linked libraries
-- **External libraries** (linked from `D:\library\`): GLFW, GLEW, GLM, Assimp, jsoncpp 0.5.0, stb_image
-- **Linked libs**: `glew32[d].lib`, `glfw3.lib`, `opengl32.lib`, `assimp-vc143-mt[d].lib`, `unit.lib`, `json_vc71_libmt[d].lib`
-- **DLLs**: Pre-build step copies DLLs from `bin/debug/` or `bin/release/` to the output directory
-- **GL version**: Context requested at **4.6 core**. Required for `gl_DrawID` (built-in since GLSL 4.60) — the geometry / shadow vertex shaders index `sectionBases[gl_DrawID]` to recover the world-space section origin. Also relies on `glMultiDrawElementsIndirect` + `baseInstance` (in core since 4.2/4.3) and SSBOs (4.3). Both vertex shaders use `#version 460 core`.
-- **Build**: Open `iMc.sln` in VS2022, select x64 Debug/Release, build and run
-- **Line endings**: All source files must use **CRLF** (Windows) line endings. When creating new `.h`/`.cpp` files, convert them to CRLF (e.g. `unix2dos file.cpp`) before building. LF-only files can cause MSVC to misparse them, resulting in spurious errors like "identifier undeclared" or "not a member of struct" for symbols that are clearly present in the source.
-- **File encoding**: Prefer UTF-8 with BOM for files containing Chinese characters (comments), to match the existing files and avoid MSVC treating them as GBK. Pure-ASCII files can be UTF-8 without BOM.
-- **jsoncpp note**: The bundled jsoncpp is the old 0.5.0 API. Use `Json::Reader::parse(string, Value)` and `reader.getFormatedErrorMessages()` (note the typo: "Formated" with one t). The newer `CharReaderBuilder` / `parseFromStream` are NOT available.
+## 构建系统
 
-## Architecture
+- **IDE**：Visual Studio 2022，解决方案 `iMc.sln`
+- **平台**：Windows x64，C++17（`stdcpp17`）
+- **配置**：Debug 与 Release（x64 为主目标）
+- **属性表**：`PropertySheet_debug.props`（Debug）/ `PropertySheet.props`（Release）定义 include/lib 路径与链接库
+- **外部库**（从 `D:\library\` 链接）：GLFW、GLEW、GLM、Assimp、jsoncpp 0.5.0、stb_image
+- **链接的库**：`glew32[d].lib`、`glfw3.lib`、`opengl32.lib`、`assimp-vc143-mt[d].lib`、`unit.lib`、`json_vc71_libmt[d].lib`
+- **网络/压缩库**：ENet（`scr/enet/enet.h`，header-only，`iMc.cpp` 里 `#define ENET_IMPLEMENTATION`）；LZ4（`scr/net/lz4.h`）用于网络与存档的方块数据压缩。两者均随源码内置，无需外链。
+- **DLL**：预生成步骤把 `bin/debug/` 或 `bin/release/` 的 DLL 拷到输出目录
+- **GL 版本**：上下文请求 **4.6 core**。`gl_DrawID`（GLSL 4.60 内置）必需 —— geometry / shadow 顶点着色器用 `sectionBases[gl_DrawID]` 还原世界空间 section 原点。同时依赖 `glMultiDrawElementsIndirect` + `baseInstance`（4.2/4.3 起进 core）和 SSBO（4.3）。两个顶点着色器都用 `#version 460 core`。
+- **构建**：在 VS2022 打开 `iMc.sln`，选 x64 Debug/Release，编译运行
+- **换行符**：所有源文件必须用 **CRLF**（Windows）换行。新建 `.h`/`.cpp` 时先转 CRLF（如 `unix2dos file.cpp`）再编译。纯 LF 文件会让 MSVC 误解析，报出诸如 "identifier undeclared"、"not a member of struct" 这类明明源码里有的符号的假错误。
+- **文件编码**：含中文（注释）的文件优先 UTF-8 with BOM，与现有文件一致，避免 MSVC 当成 GBK。纯 ASCII 文件可用无 BOM 的 UTF-8。
+- **jsoncpp 注意**：内置的是老的 jsoncpp 0.5.0 API。用 `Json::Reader::parse(string, Value)` 和 `reader.getFormatedErrorMessages()`（注意拼写：单 t 的 "Formated"）。新版 `CharReaderBuilder` / `parseFromStream` **不可用**。
 
-### Entry Point and Game Loop
+## 架构
 
-`scr/iMc.cpp` — initializes GLFW (4.6 core context) and GLEW, creates the window, instantiates `World` with a seed, and calls `world.run()` which contains the main loop. The main loop also calls `Profiler::frame()` once per frame for the optional CPU profiler.
+### 入口与会话流程
 
-### Core Systems
+`scr/iMc.cpp` —— 仅做最小工作：导出独显标志（`NvOptimusEnablement` / `AmdPowerXpressRequestHighPerformance`）、`#define ENET_IMPLEMENTATION` 引入 ENet 实现、`srand(13)`、构造 `CliManager`、解析命令行、`cli.run()`。
 
-- **World** (`scr/World.h/.cpp`) — top-level orchestrator. Owns the Player, RenderSystem, and ChunkManager. Sets up GLFW input callbacks and delegates them to Player. Runs the main update/render loop. Reads `render_radius` from `RuntimeConfig`.
+`scr/CliManager.h/.cpp` —— 会话管理器，是真正的程序骨架：
+- **持久化 GL 上下文**：`initPersistentContext()` 创建一个 1×1 隐藏窗口作为持久上下文，纹理等容器对象加载到这里；后续每个游戏窗口都共享它（`glfwCreateWindow(..., m_persistentCtx)`），所以返回主菜单再开新世界不必重载纹理。
+- **菜单循环**（`run()`）：New World / Load Save / LAN Join / Exit。世界选择、种子输入（FNV-1a 把字符串种子哈希成 64 位）、网络模式（Single / Host）都在这里交互式收集到 `SessionConfig`。
+- **命令行直启**：支持 `--host [port]`、`--join <addr> [port]`、`--world <name>`、`--winpos <x> <y>`，跳过交互菜单（用于多开联机调试）。命令行默认端口 **60011**。
+- 每个会话：`createWindow()` → 构造 `World` → 若联网调 `world.setupNetworking()` → `runWorldSafe()`（用 SEH `__try/__except` 包住 `world.run()`，崩溃时回菜单而非退出）→ `destroyWindow()`。
 
-- **Player** (`scr/Player.h/.cpp`) — integrates camera, physics, movement (walk/run/crouch/spectator modes), inventory (hotbar), block interaction (place/break via raycasting), and AABB collision detection. Three-speed movement system with double-tap sprint.
+### 核心系统
 
-- **ChunkManager** (`scr/chunk/ChunkManager.h/.cpp`) — orchestrates chunk lifecycle. Two-phase chunk pipeline:
-  - **PHASE 1 — `m_pendingChunks`**: chunk has block data + intra-section + vertical-neighbor visible faces (worker output already adopted), but at least one of its 4 horizontal cross-chunk borders is not yet stitched. Not visible to renderer / player interaction. Worker stitch jobs only ever touch chunks in this container — that's the load-bearing invariant for the lock-free design.
-  - **PHASE 2 — `m_loadedChunks`**: chunk has all 4 directions stitched. Renderable, interactable. By invariant, a chunk in `m_loadedChunks` will never become a stitch participant again, so workers never write to its mesh.
-  - **`m_activeChunks`**: subset of `m_loadedChunks` within player render radius — logic update + rendering candidates.
-  - **`m_inFlight`**: in-flight build requests, throttled to `max_inflight_requests`.
-  - **`m_pendingIntegrate`**: build results drained from worker but not yet adopted. `integrateBuiltChunks` consumes at most `MAX_INTEGRATE_PER_FRAME` per frame to avoid 16ms `adoptSections` spikes when many workers complete simultaneously.
-  - Owns the GPU `ChunkArena` and a `SectionKey → Slot` map (slot per section).
-  - **Two job kinds in ChunkWorkerPool**: `JOB_BUILD` (terrain + internal mesh) and `JOB_STITCH` (cross-chunk boundary mesh). Build results integrated via `integrateBuiltChunks`; stitch results via `integrateStitchResults`.
-  - **Stitch radius**: build requests extend to `renderRadius + STITCH_PRELOAD_MARGIN` (= +1). The outer ring is "sparring partners" — they enter `m_pendingChunks` and let the inner-ring chunks complete all 4 directions, but they themselves stay pending forever (one of their own neighbors is outside the radius).
-  - **Stitch state per chunk** (4-bit `m_stitchDone` + 4-bit `m_stitchPending` + bool `m_stitchBusy`): each direction tracks done / in-flight / blocked-on-busy. `m_stitchBusy` enforces "one stitch task per chunk at a time" — without it, two workers could both modify the same chunk's mesh and crash on vector reallocation.
-  - **`promoteIfReady`**: when all 4 stitch directions are done, the chunk is moved from `m_pendingChunks` to `m_loadedChunks` (raw `Chunk*` stays at the same heap address — only the unique_ptr ownership transfers).
-  - **GPU slot eviction**: chunks outside `renderRadius + EVICT_MARGIN_CHUNKS` have their per-section arena slots freed (`evictFarChunkSlots` runs at the end of `updateActiveChunks`, scanning only `m_loadedChunks`). The chunk's CPU data stays; `Section::notifyGpuSlotReleased` clears incremental state and forces a full reupload when the chunk re-enters range.
-  - Each frame: `integrateBuiltChunks` (drain build queue → adopt up to N) → `integrateStitchResults` (drain stitch queue → mark done → repush blocked stitches → promote ready chunks) → `requestMissingChunks` (refill inflight queue from center outward by Chebyshev rings) → `rebuildDrawCommands`. Pass 1 uploads dirty sections (filtered by evict radius); pass 2 walks `m_activeChunks` to build the indirect command buffer alongside a parallel `m_sectionBases` array (uploaded to an SSBO at `binding=0`, indexed by `gl_DrawID` in-shader).
-  - Issues a single `glMultiDrawElementsIndirect` per pass (geometry / shadow); commands are per-section.
+- **World**（`scr/World.h/.cpp`）—— 顶层编排器。拥有 Player、ChunkManager、RenderSystem、（联网时）NetManager、（非 Join 模式时）ChunkSaveManager。设置 GLFW 输入回调并转发给 Player。`NetMode` 枚举：`None`（单机）/ `Host`（开房）/ `Join`（加入）。
+  - **构造**：Join 模式不创建存档（种子由服务端分发，客户端不本地持久化）；其余模式创建 `ChunkSaveManager` 并 `createWorld` 或 `openWorld`。
+  - **`run()` 初始化顺序**：建 RenderSystem（栈上）→ 建 ChunkManager → **Join 模式必须在 `initialize()` 前 `setNetworkClient(true)`**（否则会走本地地形生成）→ `chunkManager->initialize()` → `netManager->setChunkManager()`。
+    - Host：进 800ms 的 `netManager->update()` 循环消化握手（着色器编译等耗时操作期间客户端的 JOIN_REQUEST 不会超时）。
+    - Join：进最多 15 秒的初始地形同步循环，直到 `getLoadedChunkCount() >= 25`（玩家周围 5×5）。
+    - 读档玩家位置 / 皮肤。
+  - **主循环**（每帧严格顺序）：`netManager->update()`（帧首 poll+dispatch）→ `player->update()` → 把本地玩家位置/朝向写入 `NetState` → **`chunkManager->update(camera)`** → 新世界出生点计算 → `renderSystem.render(..., netManager)` → swap + poll → `Profiler::frame()`。
+  - **退出**：保存玩家状态 + `chunkManager->saveAllDirtyChunks()` + 关存档。
 
-- **Chunk** (`scr/chunk/Chunk.h/.cpp`) — container for `SECTION_COUNT` Sections (currently 16 for HEIGHT=256). Holds 4 horizontal neighbor pointers (`m_neighbors[4]` for ±X/±Z) for cross-chunk face stitching and player-interaction routing. `m_nonEmptyMask` is a bitmask: bit i set means section[i] has visible faces; refreshed after every mesh-mutating operation. `setBlockAndUpdate` routes to the owning section, updates 6 neighbors (handles cross-section + cross-chunk routing). `stitchWithNeighbor(other, face)` does the bidirectional boundary mesh update for one direction — called by stitch worker (when both chunks are in pending) directly without locks.
+- **Player**（`scr/Player.h/.cpp`）—— 整合相机、物理、移动（行走/奔跑/下蹲/观察者模式）、物品栏（hotbar）、方块交互（raycast 放置/破坏）、AABB 碰撞。三段速移动 + 双击冲刺。`getSaveData()` / `loadSaveData(PlayerSaveData)` 做存档；`getPosition()` / `setPosition()` 供网络同步（传送）。第三人称由 `toggleThirdPerson()`（F3）切换。
 
-- **Section** (`scr/chunk/Section.h/.cpp`) — the unit of GPU mesh storage. Holds:
-  - `m_blocks: std::unique_ptr<std::array<BlockState, VOLUME>>` — heap-allocated 16-bit/格 block state array (low 8 bits = `BlockType`, bits 8–11 = `orient` 0..5 axes + `ORIENT_NONE=0xF`, bits 12–15 reserved for future state). Public API is **`BlockState`-only** — `getBlock` returns `BlockState`, `setBlock(x,y,z, BlockState)` writes the full state. Callers needing just the type take `.type()` themselves. Same for `addFaceLocal(x,y,z, BlockFace, BlockState)` (the orient is read from the state and packed into `InstanceData.packed`). Heap-pointer-on-Section so `adoptFrom` is a pointer move, not an 8KB memcpy (which used to be the dominant cost when many workers completed at once).
-  - `m_instanceData` (visible-face vector) and `m_PosToInstanceIndex` (`BlockFaceLocKey → index` map).
-  - `isEmpty()` is the authoritative "no visible faces" signal (queries the index map, not the vector).
-  - Incremental upload state machine:
-    - `m_dirty` — section needs upload this frame
-    - `m_dirtyIndices` — indices into `m_instanceData` modified since last upload (consumed by `ChunkArena::patch`)
-    - `m_freeSlots` — `BLOCK_ERRER` placeholder positions; `addFaceLocal` pops one to reuse the slot in-place rather than appending, keeping the array compact and `slot.count` stable for incremental patches
-    - `m_fullRebuildPending` — set by `compact` / `rebuildVisibilityInternal` / `adoptFrom` / `notifyGpuSlotReleased` to force the next upload to take the full-`reupload` path; `addFaceLocal` and `removeFaceLocal` skip pushing to `m_dirtyIndices` while this flag is set
-    - `clearDirty()` resets all of the above; called by `ChunkManager::uploadSection` after a successful upload
-  - **Reserve-on-build**: `rebuildVisibilityInternal` reserves an extra 1024 entries for `m_instanceData` and `m_PosToInstanceIndex` at the end. This is done on the worker thread so the stitch phase's `addFaceLocal` calls (up to ~1024 boundary faces per section) hit no heap allocations and no rehashes — heap allocation under contention was a measurable bottleneck via the global malloc lock.
+- **ChunkManager**（`scr/chunk/ChunkManager.h/.cpp`）—— 区块生命周期编排。**两阶段任务管线**（注意：与旧的 "build + 异步 stitch" 设计不同，已重构为下列两阶段）：
+  - **Task 1（`JOB_BUILD`）**：worker 上跑 `TerrainGenerator::fillChunkBuffer`（或从磁盘 / 网络拿数据）填一个临时整 chunk buffer，再切片成 **16 个 section `BlockBox`**（`ChunkBoxes`），**不含任何 mesh**。结果进 `m_pendingBlockData`，主线程消化后存入 `m_blockReady`（`BlockReadyEntry`，持有 `ChunkBoxes` + 4-bit `neighborBlockReady` 标记哪些邻居方向已就绪）。
+  - **Task 2（`JOB_MESH`）**：当一个 chunk **自身和 4 个横向邻居的方块数据都就绪**时，投递 mesh 任务。`MeshBuildInput` 携带自身 16 个 box（直接共享给生成出来的 Section，零拷贝）+ 4 邻居各 16 个 box（`shared_ptr`）。worker 把 self box `setBox` 进 Section，读邻居边界时对邻居对应 section 的 box **持读锁拷出一层**，一次性构建**含全部内部面 + 全部跨 chunk 边界面**的 16 个 section。结果进 `m_pendingMeshResults`。**没有独立的 stitch 阶段** —— 边界在 Task 2 里就一次缝好了，因为 worker 此时能（持读锁安全地）看到邻居方块数据。
+  - **状态容器**：
+    - `m_inFlight`（`ChunkKey → 时间戳`）：Task 1 在途（生成/磁盘/网络），带 `INFLIGHT_TIMEOUT_SEC = 5.0` 超时重试（主要服务网络客户端丢包重请求）。
+    - `m_blockReady`（`ChunkKey → BlockReadyEntry`）：方块数据就绪、等邻居凑齐以投 Task 2。**这是 worker mesh 任务读取的方块数据来源**。
+    - `m_meshInFlight`（`set<ChunkKey>`）：Task 2 在途。
+    - `m_loadedChunks`（`ChunkKey → unique_ptr<Chunk>`）：mesh 完整，可渲染可交互。
+    - `m_activeChunks`（`vector<Chunk*>`）：`m_loadedChunks` 中在玩家渲染半径内的子集，逻辑更新 + 渲染候选。
+  - 拥有 GPU `ChunkArena` 和 `SectionKey → Slot` 映射（每 section 一个 slot）。
+  - **每帧流程**：`integrateBlockData`（drain Task 1 结果 → 存入 `m_blockReady` → `notifyNeighborsBlockReady` → `checkAndSubmitMesh` 投递够格的 Task 2，受 `MAX_BLOCK_INTEGRATE_PER_FRAME = 8` 配额）→ `integrateMeshResults`（drain Task 2 结果 → `loadMeshResult` 装入 Chunk 放进 `m_loadedChunks` → `linkNeighbors`，受 `MAX_MESH_INTEGRATE_PER_FRAME = 4` 配额）→ `requestMissingChunks`（从中心向外按 Chebyshev 环补满在途队列）→ `updateActiveChunks` → `rebuildDrawCommands`。
+  - `rebuildDrawCommands`：pass 1 上传脏 section（受 evict 半径与 `m_maxUploadsPerFrame` 过滤）；pass 2 遍历 `m_activeChunks` 构建 indirect 命令缓冲 + 并行的 `m_sectionBases` 数组（上传到 `binding=0` 的 SSBO，shader 内由 `gl_DrawID` 索引）。每 pass（geometry / shadow）发一次 `glMultiDrawElementsIndirect`，命令按 section 粒度。
+  - **GPU slot 驱逐**：超出 `renderRadius + EVICT_MARGIN_CHUNKS` 的 chunk 释放其 section arena slot（`evictFarChunkSlots`），CPU 数据保留；`Section::notifyGpuSlotReleased` 清增量状态，重新入界时强制全量重传。
+  - **远距离卸载**：超出 `renderRadius + UNLOAD_MARGIN_CHUNKS` 的 chunk 整体卸载（`unloadDistantChunks`），卸载前 dirty chunk 会存盘。
+  - **存档集成**：`setSaveManager()`、`saveAllDirtyChunks()`、`doAutoSave()`（按 `auto_save_interval_sec` 定时）。Task 1 在 worker 里会先尝试 `ChunkSaveManager::loadChunk`，磁盘没有才地形生成。
+  - **网络集成**：`setNetworkClient(true)` 让客户端跳过本地地形生成；`setNetworkChunkRequester(fn)` 注册回调，缺 chunk 时发 `CHUNK_REQUEST`；`importChunkData(x, z, blocks)` 把网络收到的方块数据塞进管线（绕过生成）；`forceChunkLoad(pos)` 供服务端按需响应。
 
-- **ChunkArena** (`scr/chunk/ChunkArena.h/.cpp`) — GPU VBO allocator. Size-class allocator with classes `{64, 256, 768, 1536, 3072, 6144, 12288}` instances; each class has its own free list. New allocations come from the bump cursor first, freed slots stay in their class (no merging — keeps alloc/free O(1)). Allocate uses 1.5× oversize to absorb section growth without reallocation. Backing VBO can grow via `glCopyBufferSubData` while preserving offsets of all live slots. Two upload paths:
-  - `reupload(slot, data, count)` — full upload via `glBufferSubData`; reallocates to a larger size class if `count` exceeds capacity
-  - `patch(slot, data, dirtyIndices, indexCount, newCount)` — incremental upload. Maps `[minIdx, maxIdx]` once with `GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT` (no `INVALIDATE_RANGE` — untouched bytes keep their old GPU values), writes only the dirty positions, unmaps. Updates `slot.count` to `newCount`. **Caller must guarantee GPU is not currently reading the slot** — `ChunkManager::update` runs at frame start before `RenderSystem::render`, so this holds.
+- **Chunk**（`scr/chunk/Chunk.h/.cpp`）—— `SECTION_COUNT`（HEIGHT=256 时为 16）个 Section 的容器。持有 4 个横向邻居指针（`m_neighbors[4]`，±X/±Z）用于跨 chunk 交互路由。`m_nonEmptyMask` 位掩码：第 i 位置 1 表示 section[i] 有可见面，每次改 mesh 后刷新。`setBlockAndUpdate` 路由到所属 section 并更新 6 邻居（处理跨 section + 跨 chunk）。`isMeshReady()` 区分"方块数据就绪" vs "mesh 完整"。
 
-- **ChunkWorkerPool** (`scr/chunk/ChunkWorkerPool.h/.cpp`) — thread pool (2-8 workers) that runs two job kinds:
-  - `JOB_BUILD`: `TerrainGenerator::fillChunkBuffer` + `Section::rebuildVisibilityInternal` for every section. Produces a `ChunkBuildResult` with 4-section internal meshes; horizontal cross-chunk boundaries are intentionally left default-invisible (the worker doesn't have access to neighbor block data).
-  - `JOB_STITCH`: given two pending chunks `a / b` and a direction, calls `a->stitchWithNeighbor(b, face)` directly, mutating both chunks' boundary meshes. **Lock-free is only safe because the caller (ChunkManager) guarantees both chunks are in `m_pendingChunks` and `m_stitchBusy` enforces "one stitch per chunk".**
-  - Single `m_jobs` deque (FIFO, both job kinds equal priority) + condition variable. Two completion queues: `m_buildDone` is `std::deque<std::unique_ptr<ChunkBuildResult>>` (the unique_ptr matters — keeps the heavy `ChunkBuildResult` construction outside the lock, so the lock-held window is just a pointer push); `m_stitchDone` is a small POD `std::deque<StitchResult>`.
-  - Three locks total: `m_jobMutex` (job queue), `m_buildDoneMutex`, `m_stitchDoneMutex`. Drains via `swap`, O(1).
+- **Section**（`scr/chunk/Section.h/.cpp`）—— GPU mesh 存储单元。持有：
+  - `m_box: std::shared_ptr<BlockBox>` —— section 的 16-bit/格 方块状态数据 + 一把读写锁，打包在 `BlockBox`（`scr/chunk/BlockBox.h`）里（见下方「区块数据唯一来源」）。方块数组每格低 8 位 `BlockType`，bits 8–11 `orient`，bits 12–15 预留。公开 API **只认 `BlockState`** —— `getBlock` 返回 `BlockState`，`setBlock(x,y,z, BlockState)` 写完整状态（持 `m_box->mutex` 写锁）。`addFaceLocal(x,y,z, BlockFace, BlockState)` 同理（orient 从 state 读出后塞进 `InstanceData.packed`）。`shared_ptr` 让 `adoptFrom` / `setBox` 是指针移动而非拷贝。Section 显式禁拷贝（防两个 Section 共享同一 box）、保留 move。
+  - `m_instanceData`（可见面向量）和 `m_PosToInstanceIndex`（`BlockFaceLocKey → index` 映射）。
+  - `isEmpty()` 是"无可见面"的权威信号（查 index map，不查 vector）。
+  - 增量上传状态机：`m_dirty`（本帧需上传）/ `m_dirtyIndices`（上次上传后改动的索引，供 `ChunkArena::patch`）/ `m_freeSlots`（`BLOCK_ERRER` 占位位置，`addFaceLocal` 复用）/ `m_fullRebuildPending`（强制下次走全量 `reupload`）/ `clearDirty()`（上传成功后重置）。
+  - **建图即 reserve**：`rebuildVisibilityInternal` 末尾为 `m_instanceData` 和 `m_PosToInstanceIndex` 各多 reserve 1024 项。这在 worker 线程做，使 Task 2 缝边界面（每 section 最多约 1024 个边界面）时不触发堆分配和 rehash —— 全局 malloc 锁下的堆分配曾是实测瓶颈。
 
-- **RenderSystem** (`scr/render/RenderSystem.h/.cpp`) — deferred rendering pipeline:
-  1. G-Buffer pass (position, normal, albedo, properties) — single `glMultiDrawElementsIndirect` for all visible sections
-  2. SSAO pass + blur
-  3. Shadow map pass (directional light, PCSS+VSSM) — same MDI command buffer + same SectionBases SSBO reused
-  4. Deferred lighting pass
-  5. Forward pass for outlines, models, particles, UI
-  - `BlockRenderer` uses one VAO bound to the arena VBO (re-bound when arena grows). The shared face quad lives in a static VBO+EBO. Per-instance attributes pulled from the arena via `baseInstance`: location 5 = `packed` (uint32, contains x/y/z/face/orient), location 7 = `blockType` (uint16), location 8 = `textureLayer` (uint16). World-space block center reconstructed in vertex shader as `sectionBases[gl_DrawID].xyz + (lx, ly, lz) + 0.5`. The geometry / shadow passes both call `glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, sectionBaseSSBO)` before draw.
+- **ChunkArena**（`scr/chunk/ChunkArena.h/.cpp`）—— GPU VBO 分配器。Size-class 分配器，类 `{64, 256, 768, 1536, 3072, 6144, 12288}` 个实例，每类一条 free list；新分配优先从 bump cursor 取，freed slot 留在所属类（不合并，保持 alloc/free O(1)）。分配用 1.5× 超额吸收 section 增长。后备 VBO 可用 `glCopyBufferSubData` 增长且保留所有活 slot 偏移。两条上传路径：
+  - `reupload(slot, data, count)` —— 全量 `glBufferSubData`；count 超容量则换更大 size class。
+  - `patch(slot, data, dirtyIndices, indexCount, newCount)` —— 增量上传。用 `GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT`（无 `INVALIDATE_RANGE`，未触碰字节保留旧 GPU 值）map `[minIdx, maxIdx]` 一次，只写脏位置，unmap。**调用方须保证 GPU 当前没在读该 slot** —— `ChunkManager::update` 在帧首、`RenderSystem::render` 前跑，故成立。
 
-### Supporting Systems
+- **ChunkWorkerPool**（`scr/chunk/ChunkWorkerPool.h/.cpp`）—— 线程池（worker 数由 `worker_threads` 决定，0=自动），两种任务：
+  - `JOB_BUILD`（Task 1）：`submitBuild(pos)` → worker 先试 `ChunkSaveManager::loadChunk`，没有则 `TerrainGenerator::fillChunkBuffer`，产出 `BlockDataResult`（纯方块数据）。
+  - `JOB_MESH`（Task 2）：`submitMeshBuild(MeshBuildInput)` → worker 用自身 + 4 邻居方块数据构建含边界的 16 个 section，产出 `ChunkBuildResult`。
+  - 单 `m_jobs` deque（FIFO，两类任务等优先）+ 条件变量。两个完成队列：`m_blockDone` / `m_meshDone` 都是 `std::deque<std::unique_ptr<...>>`（unique_ptr 让重对象构造在锁外，锁内只 push 指针）。主线程 `drainBlockData()` / `drainMeshResults()` 用 swap O(1) 取走。
+  - 三把锁：`m_jobMutex`（任务队列）、`m_blockDoneMutex`、`m_meshDoneMutex`。
+  - `setSaveManager(sm)` 让 worker 能在 Task 1 里读盘。
 
-- **BlockType / BlockState** (`scr/chunk/BlockType.h/.cpp`) — `BlockType` is the 1-byte enum (AIR/STONE/…); `BlockProperties::hasAxis` flags axis-aware blocks (currently only `BLOCK_WOOD`). `BlockState` is the 2-byte per-cell record used throughout the chunk subsystem: low 8 bits = `BlockType`, bits 8–11 = `BlockOrient` (`ORIENT_PX..ORIENT_NY` = 0..5, `ORIENT_NONE=0xF` for non-axial blocks), bits 12–15 reserved for future water level / growth / light state. **`BlockType` is a private implementation detail of `BlockState` inside the chunk subsystem** — Section / Chunk / ChunkManager / `Ray::HitResult::blockState` all hand out and accept `BlockState` (callers use `.type()` to compare against `BLOCK_AIR` etc.); `BlockType` only surfaces in non-chunk subsystems (Item inventory, particle debris emission, UI). `InstanceData` is the GPU-facing **8-byte** struct per visible face: `uint32_t packed` (bits 0–3 lx, 4–7 ly, 8–11 lz, 12–14 face, 15–18 orient — actually filled from `BlockState::orient`, 0xF = "no axis", 19–31 reserved) + `uint16_t blockType` + `uint16_t textureLayer`. Use `InstanceData::makePacked(...)` to encode and `unpackX/Y/Z/Face` to decode. World-space position is reconstructed in-shader, not stored on CPU.
-- **PlacementContext** (`scr/Item.h`) — `{adjacentPos, hitFace, playerForward}` passed from `Player::tryPlaceBlock` / `tryBreakBlock` into `Item::onRightClick` / `onLeftClick`. `BlockItem::onRightClick` uses `GetBlockProperties(type).hasAxis` to decide whether to derive `orient` from `hitFace` (axis-aware blocks like wood) or write `ORIENT_NONE` (everything else). `BlockFace` numeric values 0..5 (RIGHT/LEFT/FRONT/BACK/UP/DOWN) are deliberately the same as `BlockOrient` 0..5 — `orientFromHitFace` is just a static_cast.
-- **TerrainGenerator** (`scr/generate/`) — Perlin noise-based terrain. `fillChunkBuffer(BlockState*, ivec2)` is the thread-safe path used by workers (no shared mutable state); it writes every cell with `ORIENT_NONE` — axis-aware blocks (e.g. wood) are produced by placement-side code paths (Item → `ChunkManager::setBlock(pos, BlockState)`), not by world-gen.
-- **Collision** (`scr/collision/`) — `AABB` for player collision, `Ray` for block picking, `PhysicsConstants.h`
-- **Particle** (`scr/particle/`) — GPU compute shader particles (`GPUParticleSystem`), ECS-based CPU particles (`ECSParticleSystem`), managed by `ParticleManager`
-- **UI** (`scr/UI/`) — `UIManager` (singleton) and `UIHotbar`
-- **Model** (`scr/mode/`) — Assimp-based model loading
-- **Shader** (`scr/Shader.h/.cpp`) — shader program loader
-- **TextureMgr** (`scr/TextureMgr.h/.cpp`) — texture array loading from `assert/textures/` configured by `textures_config.json`
-- **RuntimeConfig** (`scr/RuntimeConfig.h/.cpp`) — singleton; loads `assert/runtime_config.json` on first access. Holds `render_radius`, `max_inflight_requests`, `max_uploads_per_frame`, `worker_threads`, `print_profile_every_second`. Edit the JSON to change these without recompiling.
-- **Profiler** (`scr/Profiler.h/.cpp`) — lightweight CPU profiler. Use `PROFILE_SCOPE("name")` to time a block; `Profiler::frame()` (called once per main-loop iteration) prints aggregated top sections every second when enabled in RuntimeConfig.
+- **RenderSystem**（`scr/render/RenderSystem.h/.cpp`）—— 延迟渲染管线：
+  1. **G-Buffer pass**（position / normal / albedo / properties）—— 一次 `glMultiDrawElementsIndirect` 画所有可见 section
+  2. **SSAO pass** + blur
+  3. **Shadow map pass**（定向光，PCSS+VSSM）—— 复用同一 MDI 命令缓冲 + 同一 SectionBases SSBO
+  4. **延迟光照 pass**（写入 `m_lightingFBO`）
+  5. blit 到 `m_compositeFBO`（带深度，支持后续正向渲染）
+  6. **正向 pass**：方块选中轮廓、3D 模型、**远程玩家模型**、粒子、UI
+  7. blit 到默认帧缓冲上屏
+  - **昼夜动态光照**：太阳绕 YZ 平面旋转，`m_sunIntensity` 平滑过渡昼夜，`m_sunWarmth` 控制色温（冷白 ↔ 暖橙）。完全在 RenderSystem 内管理。`toggleWeather()`（G 键）切换天气。
+  - **远程玩家渲染**：`renderRemotePlayers(NetManager*, ...)` 遍历 `NetManager::getPlayers()`，用 `m_remotePlayerModel` + 按皮肤名缓存的纹理（`m_skinTextures`）绘制其他玩家。
+  - `BlockRenderer` 用一个绑定到 arena VBO 的 VAO（arena 增长时重绑）。共享面 quad 在静态 VBO+EBO。逐实例属性从 arena 经 `baseInstance` 取：location 5 = `packed`（uint32，含 x/y/z/face/orient），location 7 = `blockType`（uint16），location 8 = `textureLayer`（uint16）。世界空间方块中心在顶点着色器里 `sectionBases[gl_DrawID].xyz + (lx, ly, lz) + 0.5` 重建。geometry / shadow pass 画前都 `glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, sectionBaseSSBO)`。
 
-### Key Constants
+### 区块数据唯一来源（`BlockBox` + section 读写锁）
 
-- **Chunk geometry** (`scr/chunk/ChunkDimensions.h`): `CHUNK_WIDTH=16`, `CHUNK_HEIGHT=256`, `CHUNK_DEPTH=16`, `SECTION_HEIGHT=16`, `SECTION_COUNT = CHUNK_HEIGHT / SECTION_HEIGHT`. **This header is intentionally separate from `core.h` to minimize recompile footprint** when chunk dimensions change — only files that explicitly include it are affected.
-- **Eviction**: `ChunkManager::EVICT_MARGIN_CHUNKS = 2` — chunks farther than `renderRadius + 2` from the camera have their GPU slots freed (CPU data retained).
-- **Stitch preload**: `ChunkManager::STITCH_PRELOAD_MARGIN = 1` — build requests extend one ring beyond `renderRadius` so edge chunks can complete all 4 stitch directions.
-- **Integrate budget**: `ChunkManager::MAX_INTEGRATE_PER_FRAME = 8` — at most this many build results are adopted into pending per frame; the rest wait in `m_pendingIntegrate`. Prevents 16ms `adoptSections` spikes when many workers complete simultaneously.
-- **Render**: `MAX_INSTANCES = 1,000,000` (in `scr/core.h` under `RenderConstants`)
-- **World**: `WORLD_SEED = 114514`, `RENDER_RADIUS = 8` (default; runtime override via `RuntimeConfig`) — both in `core.h`'s `WorldConstants`
-- **Screen / shadow map**: `1200x900` / `4096x4096` (`scr/Data.h`)
+历史上 chunk 的方块数据曾有两份：玩家修改的 `Section::m_blocks` 和一份「为邻居 mesh 准备的快照」`Chunk::m_fullBlockData`。这会导致：玩家改了边界方块后，邻居做 Task 2 时读到过期快照，生成出错误的边界可见面（多面 / 缺面）—— 单人模式碰不到，多人服务端会暴露。现已重构为**唯一数据源**：
 
-### Shaders
+- **`BlockBox`**（`scr/chunk/BlockBox.h`）：一个 section（16³）的 `std::array<BlockState, 4096> blocks` + 一把 `std::shared_mutex mutex`，打包在一起。含 `shared_mutex` 故不可移动 / 拷贝，**全程只通过 `std::shared_ptr<BlockBox>` 传递**（`ChunkBoxes = array<shared_ptr<BlockBox>, 16>`）。
+- **唯一所有者**：Task 1 产出 box → `m_blockReady` 持有 → Task 2 把 self box 直接 `setBox` 进生成的 Section → `adoptSections` move 进 loaded chunk。**从生成到 loaded 全程同一份 box，无第二份快照。** 玩家修改、邻居读边界、网络序列化、存盘都走它。
+- **锁规则**：
+  - 玩家改方块 `Section::setBlock` 持 **写锁**（`unique_lock`）。
+  - worker 读邻居边界（`ChunkWorkerPool` 内 `copyBoundaryLayerFromBox`）持 **读锁**（`shared_lock`）—— 两个邻居同时做 Task 2 都读同一 box 是读读共享、不互斥。
+  - 网络 `serializeChunkFromBlocks` 持读锁拷 section 快照。
+  - 主线程内部串行读（`getBlockAt` 碰撞 / raycast、`saveChunkToDisk` 存盘）**不加锁** —— 它们与玩家改方块同为主线程、天然串行，与 worker 的读锁是读读共享。
+- **生命周期**：worker 投递时拷邻居 `shared_ptr`（引用计数 +1）。即使邻居 chunk 在 worker 读边界期间被卸载，box 也活到读取结束，**不会悬挂**。
+- self box 在本 chunk LOADED 前玩家无法触碰，故 worker 读 / 写 self 不加锁。
 
-All GLSL shaders are in `shader/`. The deferred pipeline uses `g_buffer.*`, `ssao.*`, `ssao_blur.*`, `shadow_mapping_depth.*`, and `deferred_lighting.*`. Forward passes use `outline.*`, `mode.*`, `particle.*`, `ui.*`.
+### 网络模块（`scr/net/`）
 
-- `g_buffer.vert` and `shadow_mapping_depth.vert` are `#version 460 core`. Both unpack the per-instance `packed` attribute (x/y/z/face) and read `sectionBases[gl_DrawID].xyz` from an SSBO at `binding=0` to reconstruct world-space block center. Other shaders remain at their original versions.
-- `g_buffer.frag` discards `BLOCK_ERRER` placeholder faces — this lets sections leave reused/freed face slots in place rather than compacting eagerly. `Section::removeFaceLocal` marks the slot ERRER and pushes its index onto `m_freeSlots` for `addFaceLocal` to reclaim.
+基于 **ENet**（UDP，可靠/不可靠通道分离）的客户端-服务端局域网联机。Host 是权威端（持有存档），Join 是纯客户端（不落盘，从服务端拿种子和区块）。
 
-### Threading Model
+- **NetManager**（`NetManager.h/.cpp`）—— 顶层网络管理器。
+  - `host(port, worldName, seed)` / `join(ip, port, playerName)` / `update()`（每帧 poll + dispatch + 发送本地脏属性）/ `leave()`。
+  - 玩家管理：`getLocalPlayer()` / `getPlayer(id)` / `getPlayers()`（`id → unique_ptr<NetPlayer>`）。服务端维护 `m_peerToPlayer`（`ENetPeer* → playerId`）。
+  - 状态：`isHosting()` / `isConnected()` / `getLocalPlayerId()` / `getWorldSeed()` / `getWorldName()` / `getLocalNetState()` / `getLocalSkinName()`。
+  - 地形同步入口：`setChunkManager(cm)`（内部 `m_chunkSync.init`）、`sendChunkData` / `broadcastChunkData` / `sendChunkRequest`。
+  - 消息分发 `dispatchMessage` 按 `NetMsgType` 路由到一组 handler（服务端 / 客户端各一套）。
+- **NetTransport**（`NetTransport.h/.cpp`）—— ENet 薄封装。`createServer` / `createClient` / `connect` / `poll`（非阻塞收事件）/ `sendReliable` / `sendUnreliable` / `flush`。
+- **NetMessage / NetCommon**（`NetMessage.h/.cpp`、`NetCommon.h`）—— 消息编解码与协议常量。
+  - 消息格式：4 字节 header（`uint8 msgType` + `uint8 reserved` + `uint16 payloadLen`）+ payload。
+  - 通道：`CHANNEL_RELIABLE=0`（可靠有序，JOIN/CHUNK/重要属性）、`CHANNEL_UNRELIABLE=1`（不可靠无序，高频位置同步）。
+  - `MAX_MSG_PAYLOAD=32768`、`DEFAULT_MAX_CLIENTS=32`、`NetConstants::DEFAULT_PORT=60011`（与 CliManager 命令行/菜单默认端口一致）。
+  - `NetMsgType`：`JOIN_REQUEST/ACCEPT/DENY`、`PLAYER_JOINED/LEFT/LIST`、`PROPERTY_SYNC`、`CHUNK_DATA/REQUEST/RESPONSE`、`BLOCK_CHANGE`（预留）、`CHAT_MESSAGE`（预留）、`PING`、`CUSTOM`。便捷工厂 `NetMessage::joinRequest(...)` 等。
+- **NetObject / NetObjectManager**（`NetObject.h/.cpp`、`NetObjectManager.h/.cpp`）—— 属性复制框架。`NetObject` 用宏注册可复制属性（带可靠性级别 + `OnRep` 回调），脏标记驱动；`NetObjectManager` 管对象生命周期、每帧收集脏属性打包成 `PROPERTY_SYNC`。
+- **NetPlayer**（`NetPlayer.h/.cpp`）—— 网络玩家对象，内含 `PlayerNetState`（`NetObject` 子类，复制 `position` / `yaw` / `pitch`，均为 Unreliable，`OnRep` 更新渲染缓存）。本地玩家每帧把位置/朝向写进它，远端收到后驱动 `RenderSystem::renderRemotePlayers`。
+- **NetChunkSync**（`NetChunkSync.h/.cpp`）—— 地形同步。
+  - 服务端：`pushChunks()`（增量推新晋升到 loaded 的 chunk）、`pushAllChunks(peer)`（新玩家加入时全量推、按距离排序）、`handleChunkRequest`（按需响应，优先从 loaded 序列化，否则从 block-ready 数据，没有则挂 pending 等就绪）。per-peer `m_sentChunks` 去重。
+  - 客户端：`onChunkData(data, len)` 解析（可能是多 chunk 批量），逐 chunk 调 `ChunkManager::importChunkData`。
+  - chunk 序列化：每 section 用 LZ4 压缩 4096 个 `BlockState`，`FLAG_HAS_DATA` 区分全空气 section。
+- **NetSerializer**（`NetSerializer.h`）—— `MemoryStream` + 各类型读写（含 `glm::vec3`、`BlockState`）。
 
-- **Main thread**: GL calls, all `setBlockAndUpdate` / raycast / collision / arena uploads / `m_loadedChunks` and `m_pendingChunks` mutation / stitch state-bit reads & writes / chunk pipeline scheduling.
-- **Worker threads** (ChunkWorkerPool):
-  - `JOB_BUILD`: `TerrainGenerator::fillChunkBuffer` + `Section::rebuildVisibilityInternal`. Workers don't see any `Chunk` object — they produce a self-contained `ChunkBuildResult`.
-  - `JOB_STITCH`: directly calls `Chunk::stitchWithNeighbor` on two `Chunk*` (both must be in `m_pendingChunks`, both must have `m_stitchBusy = true` set by the main thread before submission).
-- **Lock-free invariants** (the whole reason this design is fast):
-  - Workers only ever write to chunks in `m_pendingChunks`. Player interaction and rendering only ever touch `m_loadedChunks`. No code path reads from one container while a worker writes to a chunk in the other.
-  - `m_stitchBusy` enforces "one stitch task per chunk at a time" — without it two stitch jobs that share a chunk would both mutate its `m_instanceData` and crash on vector reallocation.
-  - When a chunk is promoted from pending to loaded, its raw `Chunk*` heap address doesn't change (only the `unique_ptr` ownership transfers between maps), so any in-flight raw pointers held by neighbors stay valid.
-- **Lock contention budget**: profiler-tuned. The expensive things — mesh data allocation, `Section` move construction — happen outside any lock. The locks themselves protect O(1) pointer / size operations only.
+### 存档模块（`scr/save/`）
 
-### Frame Ordering Invariant
+Minecraft Anvil 风格的区块持久化。目录结构：`saves/<worldName>/world.json` + `saves/<worldName>/region/r.<rx>.<rz>.mca`。
 
-`World::run` calls `m_chunkManager->update(camera)` **before** `renderSystem.render(...)` every frame. This is load-bearing: `ChunkArena::patch` uses `GL_MAP_UNSYNCHRONIZED_BIT` and assumes the GPU is not currently reading the slots being patched. Because the previous frame's draws are guaranteed to have completed by the time we re-enter `update`, this holds. Do not call `ChunkManager::update` (or anything that reaches `uploadSection`) between draw passes.
+- **ChunkSaveManager**（`ChunkSaveManager.h/.cpp`）—— 高层世界级存档。
+  - 世界管理：`listWorlds(savesRoot="saves")`（静态，扫描返回 `WorldInfo{name, path, seed, lastPlayed}`）、`createWorld(name, seed)` / `openWorld(name)` / `closeWorld()`。
+  - 区块 I/O（**线程安全**，`m_ioMutex` 串行化）：`loadChunk(pos, outBuf)` / `saveChunk(pos, buf)` / `chunkExists(pos)`，buffer 大小必须 = `CHUNK_VOLUME`（65536）。**worker 线程在 Task 1 里调 `loadChunk`，故必须线程安全。**
+  - 玩家状态：`loadPlayerState(PlayerSaveData&)` / `savePlayerState(PlayerSaveData)`，存进 `world.json`。`PlayerSaveData = {posX/Y/Z, yaw, pitch}`。
+  - region 缓存：`unordered_map<int64 key, unique_ptr<RegionFile>>`，key = `(rx<<32)|rz`。
+  - chunk → region 定位：`regionX = floorDiv(chunkX, 32)`，本地坐标 `localX = chunkX - rx*32`。
+  - chunk 内用 **TLV**（Tag-Length-Value）编码：header tag + 每 section 一个 blocks tag（LZ4 压缩的 4096 `BlockState`），便于将来扩展字段。
+- **RegionFile**（`RegionFile.h/.cpp`）—— 底层 `.mca` 文件 I/O，格式借鉴 Minecraft Anvil。
+  - 常量：`REGION_SIZE=32`（32×32=1024 chunk/region）、`SECTOR_SIZE=4096`、`HEADER_BYTES=8192`、`MAX_CHUNKS=1024`。
+  - 8KB header：1024 个 offset（低 24bit = sector 起始偏移，高 8bit = sector 个数，0=未使用）+ 1024 个 timestamp。
+  - chunk 数据：`4B uncompressed_size + 1B compression(0=none/1=zlib) + N 字节数据`，按 4KB sector 对齐。
+  - `readChunk` / `writeChunk` / `hasChunk`；`allocateSectors` 用 best-fit 找空闲区间或追加到末尾。
+  - 本类**不加锁**，由 `ChunkSaveManager` 的 `m_ioMutex` 负责串行化。
 
-### Third-party Code in Tree
+### 支撑系统
 
-- `scr/entt/` — EnTT ECS library (header-only, used by particle system)
-- `scr/stb_image.h` / `scr/std_image.cpp` — stb_image for texture loading
+- **BlockType / BlockState**（`scr/chunk/BlockType.h/.cpp`）—— `BlockType` 是 1 字节枚举（AIR/STONE/…）；`BlockProperties::hasAxis` 标记轴向感知方块（目前只有 `BLOCK_WOOD`）。`BlockState` 是 chunk 子系统通用的 2 字节每格记录：低 8 位 `BlockType`，bits 8–11 `BlockOrient`（`ORIENT_PX..ORIENT_NY`=0..5，`ORIENT_NONE=0xF`），bits 12–15 预留（未来水位/生长/光照）。**`BlockType` 是 chunk 子系统内部实现细节** —— Section / Chunk / ChunkManager / `Ray::HitResult::blockState` 都收发 `BlockState`（用 `.type()` 比对 `BLOCK_AIR` 等）；`BlockType` 只在非 chunk 子系统（物品栏、粒子碎屑、UI）露面。`InstanceData` 是 GPU 面向的 **8 字节** 结构：`uint32 packed`（bits 0–3 lx，4–7 ly，8–11 lz，12–14 face，15–18 orient，19–31 预留）+ `uint16 blockType` + `uint16 textureLayer`。用 `InstanceData::makePacked(...)` 编码、`unpackX/Y/Z/Face` 解码。世界坐标 shader 内重建，不存 CPU。
+- **PlacementContext**（`scr/Item.h`）—— `{adjacentPos, hitFace, playerForward}`，由 `Player::tryPlaceBlock` / `tryBreakBlock` 传入 `Item::onRightClick` / `onLeftClick`。`BlockItem::onRightClick` 用 `GetBlockProperties(type).hasAxis` 决定是否从 `hitFace` 推 orient（轴向块如木头）还是写 `ORIENT_NONE`。`BlockFace` 数值 0..5（RIGHT/LEFT/FRONT/BACK/UP/DOWN）刻意与 `BlockOrient` 0..5 相同，`orientFromHitFace` 就是个 `static_cast`。
+- **TerrainGenerator**（`scr/generate/`）—— Perlin 噪声地形。`fillChunkBuffer(BlockState*, ivec2)` 是 worker 用的线程安全路径（无共享可变状态），每格写 `ORIENT_NONE` —— 轴向块由放置侧代码产生，不由世界生成产生。
+- **Collision**（`scr/collision/`）—— `AABB`（玩家碰撞）、`Ray`（方块拾取）、`PhysicsConstants.h`。
+- **Particle**（`scr/particle/`）—— GPU compute shader 粒子（`GPUParticleSystem`）、基于 ECS 的 CPU 粒子（`ECSParticleSystem`），由 `ParticleManager` 管理。
+- **Model**（`scr/mode/`）—— Assimp 模型加载（`Mesh`/`Model`），玩家模型 + 骨骼动画 + 皮肤（`PlayerModel`/`PlayerAnimator`/`SkinManager`）。
+- **UI**（`scr/UI/`）—— `UIManager`（单例）和 `UIHotbar`。
+- **Shader**（`scr/Shader.h/.cpp`）—— 着色器程序加载。
+- **TextureMgr**（`scr/TextureMgr.h/.cpp`）—— 从 `assert/textures/` 加载纹理数组，由 `textures_config.json` 配置。
+- **RuntimeConfig**（`scr/RuntimeConfig.h/.cpp`）—— 单例，首次访问时加载 `assert/runtime_config.json`。改 JSON 即可调参，不必重编。当前字段见下。
+- **Profiler**（`scr/Profiler.h/.cpp`）—— 轻量 CPU 分析器。`PROFILE_SCOPE("name")` 计时一个块；`Profiler::frame()`（主循环每次调）在 RuntimeConfig 启用时每秒打印聚合的 top section。
 
-## Language
+### 运行时配置（`assert/runtime_config.json`）
 
-The codebase comments and commit messages are in Chinese (Simplified). Follow this convention.
+| JSON 字段 | 默认值 | 含义 |
+|---|---|---|
+| `render_radius` | 16 | 渲染半径（chunk），加载 (2r+1)² 个 chunk |
+| `vertical_cull_ratio` | 0.5 | 下方 section 剔除比例：maxDownSections = render_radius × 此值 |
+| `worker_threads` | 2 | worker 线程数，0=自动（hardware_concurrency） |
+| `max_inflight_requests` | 32 | 同时在途的最大 build 任务数 |
+| `max_uploads_per_frame` | 16 | 每帧最多上传多少脏 section 到 GPU arena |
+| `auto_save_interval_sec` | 60 | 自动保存间隔（秒），0=禁用定时（卸载仍存盘） |
+| `print_profile_every_second` | false | 每秒打印 profiler 汇总 |
+| `verbose_texture_loading` | false | 输出纹理加载详情 |
+| `verbose_shader_loading` | false | 输出着色器编译详情 |
 
-## Current Focus
+### 关键常量
 
-**异步化跨 chunk stitch + 多线程性能调优**
+- **区块几何**（`scr/chunk/ChunkDimensions.h`）：`CHUNK_WIDTH=16`、`CHUNK_HEIGHT=256`、`CHUNK_DEPTH=16`、`CHUNK_VOLUME=65536`、`SECTION_HEIGHT=16`、`SECTION_COUNT=16`。**此头刻意独立于 `core.h`** 以最小化区块维度变动时的重编范围 —— 只有显式 include 它的文件受影响。
+- **ChunkManager 半径余量**（`scr/chunk/ChunkManager.h`）：`EVICT_MARGIN_CHUNKS=2`（超此释放 GPU slot，CPU 数据留）、`BLOCK_PRELOAD_MARGIN=1`（build 请求外扩一圈，让边缘 chunk 凑齐 4 邻居方块数据投 Task 2）、`UNLOAD_MARGIN_CHUNKS=6`（超此整体卸载 chunk）。
+- **每帧消化预算**（`scr/chunk/ChunkManager.h`）：`MAX_BLOCK_INTEGRATE_PER_FRAME=8`、`MAX_MESH_INTEGRATE_PER_FRAME=4`，把多 worker 同时完成的尖峰摊到多帧。`INFLIGHT_TIMEOUT_SEC=5.0`（在途超时重请求）。
+- **World**（`scr/core.h` 的 `WorldConstants`）：`WORLD_SEED=114514`、`RENDER_RADIUS=8`（默认，运行时由 RuntimeConfig 覆盖）。注：`RenderConstants::MAX_INSTANCES` 已弃用。
+- **屏幕 / 阴影贴图**（`scr/Data.h`）：`SCR_WIDTH×SCR_HEIGHT = 1200×900`，`SHADOW_WIDTH×SHADOW_HEIGHT = 4096×4096`，`MAX_SHADOW_DISTANCE=180.0`。
+- **网络**（`scr/net/NetCommon.h`）：`MAX_MSG_PAYLOAD=32768`、`DEFAULT_MAX_CLIENTS=32`、`DEFAULT_PORT=60011`（与 CliManager 命令行/菜单默认端口一致）。
 
-边界面缝合 (`stitchWithNeighbor`) 原本在主线程执行,每个新 chunk 入场要双向遍历 `HEIGHT × DEPTH × 4` 边界格,大视距高速移动时是肉眼可见的卡顿源。已经把 stitch 移到 worker:
+### 着色器
 
-- 引入 PHASE 1 / PHASE 2 双容器 (`m_pendingChunks` / `m_loadedChunks`),保证 worker stitch 任务接触的 chunk 主线程不会读写,无锁。
-- 通过 `m_stitchBusy` 互斥位防止两个 worker 同时改同一 chunk 导致 vector 扩容时崩溃。
-- `STITCH_PRELOAD_MARGIN = 1` 让外圈一格的"陪练"chunk 也生成,边缘 chunk 才能凑齐 4 邻居晋升到 loaded。
+所有 GLSL 在 `shader/`。延迟管线用 `g_buffer.*`、`ssao.*`、`ssao_blur.*`、`shadow_mapping_depth.*`、`deferred_lighting.*`。正向 pass 用 `outline.*`、`mode.*`、`particle.*`、`ui.*`。
 
-**已知性能现象**:多 worker 时主线程消化产出本身成为瓶颈(profiler 实测 `adoptSections` 单次 ~2ms,8 worker 同时完成会让单帧 `integrateBuiltChunks` 飙到 16ms+)。已采取:
+- `g_buffer.vert` 和 `shadow_mapping_depth.vert` 是 `#version 460 core`。两者解包逐实例 `packed` 属性（x/y/z/face）并从 `binding=0` 的 SSBO 读 `sectionBases[gl_DrawID].xyz` 还原世界空间方块中心。其余着色器保持原版本。
+- `g_buffer.frag` 丢弃 `BLOCK_ERRER` 占位面 —— 这让 section 可以把复用/释放的面 slot 留在原地而不必急着 compact。`Section::removeFaceLocal` 把 slot 标 ERRER 并把索引压入 `m_freeSlots` 供 `addFaceLocal` 回收。
 
-1. `MAX_INTEGRATE_PER_FRAME = 8` 配额 + `m_pendingIntegrate` 队列把消化量摊到多帧。
-2. `Section::m_blocks` 改 `std::unique_ptr<std::array<...>>` —— `adoptFrom` 从 4KB memcpy 降为指针交换。
-3. `m_buildDone` 用 `std::deque<std::unique_ptr<ChunkBuildResult>>`,worker 在锁外完整构造,锁内只 push 指针。
-4. Stitch 阶段的容量 reserve 从主线程 `adoptFrom` 移到 worker 端 `rebuildVisibilityInternal` 末尾。
+### 线程模型
 
-**遗留**:  `m_jobMutex` 在多 worker 时仍有取任务竞争;`requestMissingChunks` 频繁 submit 也抢这把锁。如果还要进一步压榨多线程吞吐,下一步候选是无锁 MPMC 任务队列 / 分离 build / stitch 任务队列。当前 2-worker 体感最均衡,4-worker 已可接受但还能再优化。
+- **主线程**：所有 GL 调用、`setBlockAndUpdate` / raycast / 碰撞 / arena 上传、`m_loadedChunks` / `m_blockReady` 容器变更、管线调度、网络 poll/dispatch、玩家更新。
+- **Worker 线程**（ChunkWorkerPool）：
+  - `JOB_BUILD`（Task 1）：`ChunkSaveManager::loadChunk`（线程安全）或 `TerrainGenerator::fillChunkBuffer`，切片产出 16 个 `BlockBox`。worker 看不到任何 `Chunk` 对象。
+  - `JOB_MESH`（Task 2）：共享 self 的 16 个 box（无锁，self 还没 LOADED 玩家碰不到），对邻居 box **持读锁拷边界一层**构建含边界的完整 mesh，产 `ChunkBuildResult`。
+- **方块数据并发**（见「区块数据唯一来源」）：玩家改方块持 section 写锁，worker 读邻居边界持读锁；二者互斥但临界区极短（写=改一格，读=拷一层 256 格），读读共享。主线程内部读不加锁。
+- **无锁不变量**（设计快的根本）：
+  - worker 永不触碰 `m_loadedChunks` 的 mesh；玩家交互与渲染只碰 `m_loadedChunks`。读写容器分离。worker 唯一会读到 LOADED chunk 数据的路径是「读邻居 box 边界」，已由 section 读写锁保护。
+  - 重活（mesh 数据分配、Section 移动构造、`ChunkBuildResult` 构造）都在锁外；锁只保护 O(1)~O(一层) 的方块数据访问。
+- **存档 I/O 线程安全**：`ChunkSaveManager` 用 `m_ioMutex` 串行化 `loadChunk`/`saveChunk`/region 缓存访问，因为 worker 线程会在 Task 1 里读盘。
 
-**关键 profile 频道**(`print_profile_every_second = true` 时每秒输出):
-- `ChunkManager::update` (顶级) / `integrateBuiltChunks` / `integrateStitchResults` / `requestMissingChunks` / `rebuildDrawCommands`
-- `ibc.drainCompleted` / `ibc.adoptSections` / `ibc.linkNeighbors` / `ibc.trySubmitStitchJobs` / `ibc.queueDepth`
-- `isr.drainStitch` / `isr.repush` / `isr.promote`
-- `rdc.uploadPass` / `rdc.cullPass` / `rdc.syncGpuBuffers` / `rdc.uploadCount` / `rdc.drawCmdCount`
+### 帧序不变量
+
+`World::run` 每帧在 `renderSystem.render(...)` **之前**调 `m_chunkManager->update(camera)`。这是承重设计：`ChunkArena::patch` 用 `GL_MAP_UNSYNCHRONIZED_BIT`，假设 GPU 当前没在读被 patch 的 slot。因为重入 `update` 时上一帧的绘制保证已完成，故成立。**不要在两个绘制 pass 之间调 `ChunkManager::update`（或任何会到达 `uploadSection` 的东西）。**
+
+### 树内第三方代码
+
+- `scr/enet/enet.h` —— ENet（UDP 网络库，header-only，`iMc.cpp` 里 `#define ENET_IMPLEMENTATION`）
+- `scr/net/lz4.h` —— LZ4 压缩（网络 + 存档的方块数据压缩）
+- `scr/entt/` —— EnTT ECS 库（header-only，粒子系统用）
+- `scr/stb_image.h` / `scr/std_image.cpp` —— stb_image 纹理加载
+
+## 语言
+
+代码注释与提交信息使用简体中文。请遵循此约定。

@@ -32,9 +32,8 @@ class ChunkSaveManager;
 
 // BLOCK_READY 状态：方块数据就绪，等待邻居完成以投递 Task 2
 struct BlockReadyEntry {
-    static constexpr int VOL = ChunkConstants::CHUNK_VOLUME;
-    std::unique_ptr<BlockState[]> blocks; // CHUNK_VOLUME 方块数据
-    uint8_t neighborBlockReady = 0;       // 4-bit: bit[i]=1 表示 m_neighbors[i] 方向已完成 Task 1
+    ChunkBoxes boxes;               // 16 个 section 的方块数据 + 锁（见 BlockBox.h）
+    uint8_t neighborBlockReady = 0; // 4-bit: bit[i]=1 表示 m_neighbors[i] 方向已完成 Task 1
 };
 
 class ChunkManager {
@@ -57,8 +56,11 @@ public:
     Chunk* getChunk(const int x, const int z);
     // 查找 loaded 中的区块（有完整 mesh）
     Chunk* getChunkAnyState(const glm::ivec2& chunkPos);
-    // 获取任意有方块数据的 chunk 的方块数据指针（BLOCK_READY 或 LOADED）
-    const BlockState* getChunkBlockData(const glm::ivec2& chunkPos);
+    // 取某 chunk 的 16 个 section BlockBox（数据 + 锁），填入 out。BLOCK_READY 或 LOADED 均可。
+    // 找到返回 true；out 持有 shared_ptr 保证使用期间 box 不被释放。
+    bool getChunkBoxes(const glm::ivec2& chunkPos, ChunkBoxes& out);
+    // 仅判断某 chunk 是否有方块数据（BLOCK_READY 或 LOADED）。
+    bool hasBlockData(const glm::ivec2& chunkPos) const;
     const std::vector<Chunk*>& getActiveChunks() const { return m_activeChunks; }
     std::vector<glm::ivec2> getActiveChunkPositions() const;
     void setRenderRadius(int radius);

@@ -1,12 +1,11 @@
 ﻿#include "Section.h"
 #include <algorithm>
+#include <cstring>
 
 Section::Section()
-    : m_blocks(std::make_unique<BlockArray>())
+    : m_box(std::make_shared<BlockBox>())
 {
-    // 整段写 0，即 type=BLOCK_AIR, orient=ORIENT_PX (0)。
-    // 空气不参与可见性 / 旋转，orient 字段对它没有语义，所以无需特地写成 NONE。
-    m_blocks->fill(BlockState{});
+    // BlockBox 构造函数已把数据整段写 0（type=BLOCK_AIR, orient=ORIENT_PX）。
 }
 
 void Section::setCoords(int chunkX, int chunkZ, int sectionY) {
@@ -19,12 +18,14 @@ BlockState Section::getBlock(int x, int y, int z) const {
     if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT || z < 0 || z >= DEPTH) {
         return BlockState{};
     }
-    return (*m_blocks)[idx(x, y, z)];
+    return m_box->blocks[idx(x, y, z)];
 }
 
 void Section::setBlock(int x, int y, int z, BlockState s) {
     if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT || z < 0 || z >= DEPTH) return;
-    (*m_blocks)[idx(x, y, z)] = s;
+    // 玩家修改方块数据：持写锁，与 worker（Task 2）读邻居边界的读锁互斥。
+    std::unique_lock<std::shared_mutex> lk(m_box->mutex);
+    m_box->blocks[idx(x, y, z)] = s;
 }
 
 void Section::addFaceLocal(int x, int y, int z, BlockFace face, BlockState state) {
@@ -140,7 +141,7 @@ void Section::rebuildVisibilityInternal(const Section* above, const Section* bel
     for (int z = 0; z < DEPTH; ++z) {
         for (int y = 0; y < HEIGHT; ++y) {
             for (int x = 0; x < WIDTH; ++x) {
-                BlockState state = (*m_blocks)[idx(x, y, z)];
+                BlockState state = m_box->blocks[idx(x, y, z)];
                 BlockType block = state.type();
                 if (block == BLOCK_AIR) continue;
 
@@ -171,7 +172,7 @@ void Section::rebuildVisibilityInternal(const Section* above, const Section* bel
                     } else if (ny >= HEIGHT) {
                         nb = above ? above->getBlock(x, 0, z).type() : BLOCK_AIR;
                     } else {
-                        nb = (*m_blocks)[idx(nx, ny, nz)].type();
+                        nb = m_box->blocks[idx(nx, ny, nz)].type();
                     }
 
                     if (nb == BLOCK_AIR) {
@@ -198,7 +199,7 @@ void Section::notifyGpuSlotReleased() {
 }
 
 void Section::adoptFrom(Section&& other) {
-    m_blocks = std::move(other.m_blocks);
+    m_box = std::move(other.m_box);
     m_instanceData = std::move(other.m_instanceData);
     m_PosToInstanceIndex = std::move(other.m_PosToInstanceIndex);
     m_errerCount = other.m_errerCount;
@@ -212,10 +213,13 @@ void Section::adoptFrom(Section&& other) {
 
 void Section::readAllBlocks(std::vector<BlockState>& out) const {
     out.resize(VOLUME);
-    std::memcpy(out.data(), m_blocks->data(), VOLUME * sizeof(BlockState));
+    // 网络序列化在主线程调用；持读锁以防 worker 此刻正读同一 box 边界（读读共享，主要是规范化）。
+    std::shared_lock<std::shared_mutex> lk(m_box->mutex);
+    std::memcpy(out.data(), m_box->blocks.data(), VOLUME * sizeof(BlockState));
 }
 
 void Section::writeAllBlocks(const std::vector<BlockState>& data) {
-    std::memcpy(m_blocks->data(), data.data(),
+    std::unique_lock<std::shared_mutex> lk(m_box->mutex);
+    std::memcpy(m_box->blocks.data(), data.data(),
         std::min(data.size(), (size_t)VOLUME) * sizeof(BlockState));
 }

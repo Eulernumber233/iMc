@@ -81,9 +81,11 @@ public:
     void markSaveDirty() { m_saveDirty = true; }
     void clearSaveDirty() { m_saveDirty = false; }
 
-    // 完整 chunk 方块数据指针（供邻居 mesh 构建时读取，worker 线程安全只读访问）
-    const BlockState* fullBlockData() const { return m_fullBlockData.get(); }
-    void setFullBlockData(std::unique_ptr<BlockState[]> data) { m_fullBlockData = std::move(data); }
+    // 取某个 section 的 BlockBox（数据 + 锁）。供 ChunkManager 投递 Task 2 时
+    // 把邻居各 section 的 box 共享给 worker（worker 持读锁读边界）。
+    const std::shared_ptr<BlockBox>& getSectionBox(int sy) const {
+        return m_sections[sy].getBox();
+    }
 
 private:
     ChunkManager* m_chunkManager = nullptr;
@@ -101,10 +103,6 @@ private:
     std::array<Chunk*, 4> m_neighbors{ {nullptr, nullptr, nullptr, nullptr} };
 
     bool m_saveDirty = true; // 新生成/修改过的区块需要存档；写入磁盘后清零
-
-    // 完整 chunk 方块数据（CHUNK_VOLUME 连续数组），供邻居 mesh 构建读取。
-    // 从 BlockReadyEntry 移动过来，与各 Section 各自的 m_blocks 并存。
-    std::unique_ptr<BlockState[]> m_fullBlockData;
 
     // 可见性缓存（chunk 粗剔结果）。用 ChunkManager 的 visGeneration 做版本号，
     // 代替每 chunk 各自 glm::distance 比较相机是否移动。0 表示首次需计算。

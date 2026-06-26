@@ -182,27 +182,31 @@ Chunk* ChunkManager::getChunkAnyState(const glm::ivec2& chunkPos) {
     return nullptr;
 }
 
-const BlockState* ChunkManager::getChunkBlockData(const glm::ivec2& chunkPos) {
+// 取某个 chunk 的 16 个 section BlockBox（数据 + 锁），填入 out（每个 shared_ptr +1 引用）。
+// LOADED 从各 Section 取，BLOCK_READY 从 entry 取 —— 两者都是【同一份】数据源（无第二份快照）。
+// 找到返回 true。out 里持有 shared_ptr 即保证 box 在调用方使用期间不被释放。
+bool ChunkManager::getChunkBoxes(const glm::ivec2& chunkPos, ChunkBoxes& out) {
     ChunkKey key = chunkPosToKey(chunkPos);
-    // LOADED：从 Chunk 的完整方块数组读取（按 CHUNK_VOLUME 连续布局）
-    auto itLoaded = m_loadedChunks.find(key);
-    if (itLoaded != m_loadedChunks.end()) {
-        // 考虑到 Chunk 内部的 Section 可能被修改，返回完整方块数据指针
-        // 注意：调用方必须保证在主线程读取时，Chunk 内部的 Section 不会被修改（否则可能出现数据竞争）。
-        // TODO 目前没有这个保护措施
-        // 实现思路：可以通过增加一个结合四方向标志位，
-        // 当标志位为1111时，表示该chunk四方向的邻居都已经加载完成（完成任务一和任务二）
-        // 此时不会再有其他区块为完成任务二而读取当前区块数据的需求。
-        // 此时，开放玩家对这个区块的修改权限，允许玩家修改方块数据。
-        // 也就是说，每次玩家修改区块数据，都要检查这个标志位是否为1111，如果不是，则不允许修改。
-        return itLoaded->second->fullBlockData();
-    }
-    // BLOCK_READY
     auto itBR = m_blockReady.find(key);
     if (itBR != m_blockReady.end()) {
-        return itBR->second.blocks.get();
+        out = itBR->second.boxes;  // 拷 shared_ptr 数组，引用计数 +1
+        return true;
     }
-    return nullptr;
+    auto itLoaded = m_loadedChunks.find(key);
+    if (itLoaded != m_loadedChunks.end()) {
+        for (int sy = 0; sy < CHUNK_SECTION_COUNT; ++sy) {
+            out[sy] = itLoaded->second->getSectionBox(sy);
+        }
+        return true;
+    }
+    return false;
+}
+
+// 仅判断某 chunk 是否有方块数据（LOADED 或 BLOCK_READY）。
+bool ChunkManager::hasBlockData(const glm::ivec2& chunkPos) const {
+    ChunkKey key = chunkPosToKey(chunkPos);
+    return m_blockReady.find(key) != m_blockReady.end()
+        || m_loadedChunks.find(key) != m_loadedChunks.end();
 }
 
 std::vector<glm::ivec2> ChunkManager::getActiveChunkPositions() const {
@@ -421,9 +425,10 @@ void ChunkManager::importChunkData(int chunkX, int chunkZ,
     // 从 m_inFlight 移除（由 requestMissingChunks 插入的 CHUNK_REQUEST 标记）
     m_inFlight.erase(key);
 
-    // 直接在主线程构造 BlockReadyEntry，无需走 worker（数据已经解压完毕）
+    // 直接在主线程构造 BlockReadyEntry，无需走 worker（数据已经解压完毕）。
+    // 网络反序列化出的整 chunk buffer 切片进 16 个 section BlockBox。
     BlockReadyEntry entry;
-    entry.blocks = std::move(blockBuffer);
+    splitChunkBufferToBoxes(blockBuffer.get(), entry.boxes);
     m_blockReady[key] = std::move(entry);
 
     // 通知邻居并检查是否可投递 mesh
@@ -462,9 +467,9 @@ void ChunkManager::integrateBlockData() {
         if (m_loadedChunks.find(key) != m_loadedChunks.end()) continue;
         if (m_blockReady.find(key) != m_blockReady.end()) continue;
 
-        // 进入 BLOCK_READY
+        // 进入 BLOCK_READY（直接 move worker 产出的 16 个 box，零拷贝）
         BlockReadyEntry entry;
-        entry.blocks = std::move(r.blocks);
+        entry.boxes = std::move(r.boxes);
         m_blockReady[key] = std::move(entry);
 
         // 通知 4 邻居"我这个位置方块数据已就绪"
@@ -510,7 +515,7 @@ void ChunkManager::notifyNeighborsBlockReady(const glm::ivec2& pos) {
     if (itSelf != m_blockReady.end()) {
         for (int d = 0; d < 4; ++d) {
             glm::ivec2 nbPos = pos + offsets[d];
-            if (getChunkBlockData(nbPos)) {
+            if (hasBlockData(nbPos)) {
                 itSelf->second.neighborBlockReady |= (uint8_t)(1u << d);
             }
         }
@@ -542,7 +547,7 @@ void ChunkManager::checkAndSubmitMesh(const glm::ivec2& pos) {
     for (int d = 0; d < 4; ++d) {
         if (!(it->second.neighborBlockReady & (uint8_t)(1u << d))) {
             // 这个方向还没就绪，double-check
-            if (getChunkBlockData(pos + offsets[d])) {
+            if (hasBlockData(pos + offsets[d])) {
                 it->second.neighborBlockReady |= (uint8_t)(1u << d);
             } else {
                 return; // 有方向未就绪，不能投递
@@ -563,13 +568,17 @@ void ChunkManager::submitMeshTask(const glm::ivec2& pos) {
     // 构建 MeshBuildInput
     MeshBuildInput input;
     input.pos = pos;
-    input.selfBlocks = it->second.blocks.get();
+    // self：直接共享 block-ready entry 的 16 个 box（worker 把它们装入生成的 Section）
+    input.self = it->second.boxes;
 
     static const glm::ivec2 offsets[4] = {
         { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 }
     };
+    // 邻居：拷出 16 个 box 的 shared_ptr（引用计数 +1）。即使邻居随后被卸载，
+    // worker 持有的这份 shared_ptr 也保证 box 存活到 mesh 读取结束，不会悬挂。
     for (int d = 0; d < 4; ++d) {
-        input.neighborBlocks[d] = getChunkBlockData(pos + offsets[d]);
+        getChunkBoxes(pos + offsets[d], input.neighbors[d]);
+        // 找不到则 input.neighbors[d] 保持默认（各 shared_ptr 为 nullptr）→ worker 跳过该方向
     }
 
     m_meshInFlight.insert(key);
@@ -615,14 +624,12 @@ void ChunkManager::loadMeshResult(ChunkBuildResult& result) {
     ChunkKey key = chunkPosToKey(pos);
 
     auto chunk = std::make_unique<Chunk>(pos, this);
+    // adoptSections 把 worker 产出的 Section（已持有 self 的 BlockBox）move 进 chunk。
+    // 方块数据的所有权从 block-ready entry 经 worker 一路 move 到这里，全程同一份 box。
     chunk->adoptSections(std::move(result.sections));
 
-    // 将 BlockReadyEntry 的完整方块数据移交到 Chunk，供邻居 mesh 构建读取
-    auto itBR = m_blockReady.find(key);
-    if (itBR != m_blockReady.end()) {
-        chunk->setFullBlockData(std::move(itBR->second.blocks));
-        m_blockReady.erase(itBR);
-    }
+    // block-ready entry 的使命完成，清除（它持有的 box shared_ptr 释放，引用计数交给 Section）
+    m_blockReady.erase(key);
 
     Chunk* raw = chunk.get();
     m_loadedChunks[key] = std::move(chunk);
@@ -889,17 +896,27 @@ BlockState ChunkManager::getBlockAt(const glm::ivec3& worldPos) {
         (int)std::floor(worldPos.x / (float)Chunk::WIDTH),
         (int)std::floor(worldPos.z / (float)Chunk::DEPTH)
     );
-    // 查询 loaded 或 block-ready 中的方块数据（碰撞检测需要 block-ready 的方块）
-    const BlockState* data = getChunkBlockData(chunkPos);
-    if (!data) return BlockState{};
-    glm::ivec3 localPos(
-        ((worldPos.x % Chunk::WIDTH) + Chunk::WIDTH) % Chunk::WIDTH,
-        worldPos.y,
-        ((worldPos.z % Chunk::DEPTH) + Chunk::DEPTH) % Chunk::DEPTH
-    );
-    if (localPos.y < 0 || localPos.y >= Chunk::HEIGHT) return BlockState{};
-    int idx = (localPos.y * Chunk::DEPTH + localPos.z) * Chunk::WIDTH + localPos.x;
-    return data[idx];
+    if (worldPos.y < 0 || worldPos.y >= Chunk::HEIGHT) return BlockState{};
+
+    int lx = ((worldPos.x % Chunk::WIDTH) + Chunk::WIDTH) % Chunk::WIDTH;
+    int lz = ((worldPos.z % Chunk::DEPTH) + Chunk::DEPTH) % Chunk::DEPTH;
+    int sy = worldPos.y / Section::HEIGHT;   // 所属 section
+    int ly = worldPos.y % Section::HEIGHT;   // section 内局部 y
+
+    // 查询 loaded 或 block-ready 中的方块数据（碰撞检测需要 block-ready 的方块）。
+    // 主线程内串行访问，与玩家修改不并发；与 worker 的读锁是读读共享，无需加锁。
+    ChunkKey key = chunkPosToKey(chunkPos);
+    auto itBR = m_blockReady.find(key);
+    if (itBR != m_blockReady.end()) {
+        const auto& box = itBR->second.boxes[sy];
+        if (!box) return BlockState{};
+        return box->blocks[(ly * Chunk::DEPTH + lz) * Chunk::WIDTH + lx];
+    }
+    auto itLoaded = m_loadedChunks.find(key);
+    if (itLoaded != m_loadedChunks.end()) {
+        return itLoaded->second->getBlock(lx, worldPos.y, lz);
+    }
+    return BlockState{};
 }
 
 // ============================================================================

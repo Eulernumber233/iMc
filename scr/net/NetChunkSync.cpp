@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <array>
+#include <shared_mutex>
 
 void NetChunkSync::init(ChunkManager* cm, NetManager* net) {
     m_chunkManager = cm;
@@ -139,10 +141,10 @@ void NetChunkSync::handleChunkRequest(ENetPeer* peer, int chunkX, int chunkZ) {
     }
 
     // 尝试从 block-ready 数据序列化（有方块数据但还没有 mesh）
-    const BlockState* blocks = m_chunkManager->getChunkBlockData(pos);
-    if (blocks) {
+    ChunkBoxes boxes;
+    if (m_chunkManager->getChunkBoxes(pos, boxes)) {
         std::vector<uint8_t> data;
-        serializeChunkFromBlocks(chunkX, chunkZ, blocks, data);
+        serializeChunkFromBlocks(chunkX, chunkZ, boxes, data);
         if (!data.empty()) {
             auto msg = NetMessage::chunkResponse(data);
             std::vector<uint8_t> buf;
@@ -171,7 +173,7 @@ void NetChunkSync::handleChunkRequest(ENetPeer* peer, int chunkX, int chunkZ) {
     };
     for (int d = 0; d < 4; ++d) {
         glm::ivec2 nbPos = pos + nbOffsets[d];
-        if (!m_chunkManager->getChunkBlockData(nbPos))
+        if (!m_chunkManager->hasBlockData(nbPos))
             m_chunkManager->forceChunkLoad(nbPos);
     }
     m_netManager->getTransport().flush();
@@ -186,12 +188,12 @@ void NetChunkSync::pollPendingRequests() {
     for (auto& [key, peers] : m_pendingRequests) {
         int32_t cx = static_cast<int32_t>(key >> 32);
         int32_t cz = static_cast<int32_t>(key & 0xFFFFFFFFLL);
-        const BlockState* blocks = m_chunkManager->getChunkBlockData(glm::ivec2(cx, cz));
-        if (!blocks) continue;
+        ChunkBoxes boxes;
+        if (!m_chunkManager->getChunkBoxes(glm::ivec2(cx, cz), boxes)) continue;
 
         // 区块数据已就绪（在 m_blockReady 或 m_loadedChunks 中），序列化并发送
         std::vector<uint8_t> data;
-        serializeChunkFromBlocks(cx, cz, blocks, data);
+        serializeChunkFromBlocks(cx, cz, boxes, data);
         if (data.empty()) continue;
 
         auto msg = NetMessage::chunkResponse(data);
@@ -310,7 +312,7 @@ void NetChunkSync::serializeChunk(int chunkX, int chunkZ, std::vector<uint8_t>& 
 }
 
 void NetChunkSync::serializeChunkFromBlocks(int chunkX, int chunkZ,
-                                             const BlockState* blocks,
+                                             const ChunkBoxes& boxes,
                                              std::vector<uint8_t>& out) {
     // 与 serializeChunk 相同的 header 格式
     size_t headerPos = out.size();
@@ -335,7 +337,20 @@ void NetChunkSync::serializeChunkFromBlocks(int chunkX, int chunkZ,
     std::vector<uint8_t> compressBuf(MAX_COMPRESSED);
 
     for (int sy = 0; sy < SECTION_COUNT; ++sy) {
-        const BlockState* sectionBlocks = blocks + sy * SEC_VOL;
+        if (!boxes[sy]) {
+            // 该 section 无数据，按全空气处理
+            out.push_back(static_cast<uint8_t>(sy));
+            out.push_back(0);
+            ++numSections;
+            continue;
+        }
+        // 持读锁拷一份 section 数据（与玩家修改互斥）
+        std::array<BlockState, SEC_VOL> snapshot;
+        {
+            std::shared_lock<std::shared_mutex> lk(boxes[sy]->mutex);
+            snapshot = boxes[sy]->blocks;
+        }
+        const BlockState* sectionBlocks = snapshot.data();
 
         // 检测全空气 section
         bool allAir = true;

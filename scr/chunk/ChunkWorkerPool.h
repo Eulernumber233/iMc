@@ -1,6 +1,7 @@
 ﻿#pragma once
 #include "../core.h"
 #include "BlockType.h"
+#include "BlockBox.h"
 #include "ChunkDimensions.h"
 #include "Section.h"
 #include <array>
@@ -16,18 +17,25 @@
 class TerrainGenerator;
 class Chunk;
 
-// Task 1 输出：仅方块数据，无 mesh
+// 每个 chunk 的 section 数量
+static constexpr int CHUNK_SECTION_COUNT =
+    ChunkConstants::CHUNK_HEIGHT / ChunkConstants::SECTION_HEIGHT;
+
+// ChunkBoxes 定义见 BlockBox.h
+
+// Task 1 输出：仅方块数据（按 section 切分为 BlockBox），无 mesh
 struct BlockDataResult {
     glm::ivec2 pos;
-    static constexpr int VOL = ChunkConstants::CHUNK_VOLUME;
-    std::unique_ptr<BlockState[]> blocks; // VOL elements
+    ChunkBoxes boxes; // 16 个 section 的方块数据 + 锁
 };
 
-// Task 2 输入：自身 + 4 横向邻居的方块数据（只读）
+// Task 2 输入：自身 + 4 横向邻居的 BlockBox（共享指针）
+//  - self：自身 16 个 box，Task 2 直接共享给生成出来的 Section（零拷贝）
+//  - neighbor：邻居 16 个 box，worker 持读锁拷出边界层。缺失方向为空数组（box 为 nullptr）
 struct MeshBuildInput {
     glm::ivec2 pos;
-    const BlockState* selfBlocks;        // VOL elements, owned by BlockReadyEntry
-    const BlockState* neighborBlocks[4]; // ±X/±Z, may be nullptr if missing
+    ChunkBoxes self;
+    ChunkBoxes neighbors[4]; // ±X/±Z；某方向缺失则其内各 shared_ptr 为 nullptr
 };
 
 // Task 2 输出：含完整可见面（内部 + 全部边界）的 section 数组

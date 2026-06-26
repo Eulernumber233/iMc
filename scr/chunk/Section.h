@@ -1,12 +1,14 @@
 ﻿#pragma once
 #include "../core.h"
 #include "BlockType.h"
+#include "BlockBox.h"
 #include "ChunkArena.h"
 #include "ChunkDimensions.h"
 #include <array>
 #include <memory>
 #include <vector>
 #include <unordered_map>
+#include <shared_mutex>
 
 // Section：16x16x16 的子区块。Chunk 持有 4 个 Section 沿 Y 方向堆叠。
 // 它是 GPU arena slot 的真正所有者粒度。
@@ -24,6 +26,13 @@ public:
 
     Section();
 
+    // 禁止拷贝（拷贝会让两个 Section 共享同一个 BlockBox，语义错误）；保留 move。
+    // 原来 m_blocks 是 unique_ptr 时拷贝本就被隐式删除；换成 shared_ptr 后需显式删除以维持该语义。
+    Section(const Section&) = delete;
+    Section& operator=(const Section&) = delete;
+    Section(Section&&) noexcept = default;
+    Section& operator=(Section&&) noexcept = default;
+
     // 由 Chunk 在构造时初始化坐标
     void setCoords(int chunkX, int chunkZ, int sectionY);
 
@@ -38,8 +47,15 @@ public:
     void       setBlock(int x, int y, int z, BlockState s);
 
     // 直接拿 raw state buffer 指针，方便 worker 端批量写入（地形生成器写入这里）。
-    BlockState* stateData() { return m_blocks->data(); }
-    const BlockState* stateData() const { return m_blocks->data(); }
+    // 注意：不加锁。仅在「Section 尚未对外可见」的阶段（worker 构建、装载前）使用。
+    BlockState* stateData() { return m_box->blocks.data(); }
+    const BlockState* stateData() const { return m_box->blocks.data(); }
+
+    // ---- BlockBox 共享数据源 ----
+    // Section 不再独占一份方块数组，而是持有一个 shared_ptr<BlockBox>（数据 + 读写锁）。
+    // 该 box 由 Task 1 产出，Task 2 把它直接共享给 Section（零拷贝）。
+    const std::shared_ptr<BlockBox>& getBox() const { return m_box; }
+    void setBox(std::shared_ptr<BlockBox> box) { m_box = std::move(box); }
 
     // mesh
     const std::vector<InstanceData>& getInstanceData() const { return m_instanceData; }
@@ -84,7 +100,7 @@ public:
     void adoptFrom(Section&& other);
 
     // GPU slot 已被 ChunkManager 释放：抹掉所有增量状态，下次进入活跃半径时强制走全量上传。
-    // 不动 m_blocks / m_instanceData / m_PosToInstanceIndex —— 这些是 CPU 端 mesh，仍然有效。
+    // 不动 m_box / m_instanceData / m_PosToInstanceIndex —— 这些是 CPU 端方块数据与 mesh，仍然有效。
     void notifyGpuSlotReleased();
 
     // 网络序列化：读取/写入整个 section 的 BlockState 数据
@@ -96,10 +112,10 @@ public:
     void setGpuSlot(const ChunkArena::Slot& s) { m_gpuSlot = s; }
 
 private:
-    using BlockArray = std::array<BlockState, VOLUME>;
-    // 在 Section() 构造时分配；adoptFrom 时和源 Section 交换指针，源被销毁时自然释放它接到的旧块。
-    // 16 bit / 格：低 8 位是 BlockType，高 8 位含 orient 等状态（见 BlockState 注释）。
-    std::unique_ptr<BlockArray> m_blocks;
+    // section 方块数据 + 读写锁，打包在 BlockBox 里，全程只经 shared_ptr 共享（见 BlockBox.h）。
+    // Section() 构造时新建一个；adoptFrom / setBox 时换指针（锁随数据一起转移，但锁对象本身原地不动）。
+    // 玩家修改持 m_box->mutex 写锁；worker 读邻居边界持读锁；主线程内部串行读不加锁。
+    std::shared_ptr<BlockBox> m_box;
     std::vector<InstanceData> m_instanceData;
     std::unordered_map<BlockFaceLocKey, int> m_PosToInstanceIndex;
     int m_errerCount = 0;

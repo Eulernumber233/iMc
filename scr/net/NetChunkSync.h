@@ -2,6 +2,7 @@
 
 #include "NetCommon.h"
 #include "../chunk/BlockType.h"
+#include "../chunk/BlockBox.h"
 #include "../chunk/ChunkDimensions.h"
 #include <unordered_map>
 #include <unordered_set>
@@ -68,8 +69,8 @@ private:
     // 将单个 chunk 序列化 + 压缩为 CHUNK_DATA payload
     void serializeChunk(int chunkX, int chunkZ, std::vector<uint8_t>& out);
 
-    // 从原始 BlockState 数组序列化（用于 block-ready 状态的 chunk 按需响应）
-    void serializeChunkFromBlocks(int chunkX, int chunkZ, const BlockState* blocks,
+    // 从 section BlockBox 序列化（用于 block-ready 状态的 chunk 按需响应）
+    void serializeChunkFromBlocks(int chunkX, int chunkZ, const ChunkBoxes& boxes,
                                   std::vector<uint8_t>& out);
 
     // 从 CHUNK_DATA payload 反序列化为 BlockState buffer + 导入

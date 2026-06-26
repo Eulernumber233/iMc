@@ -17,8 +17,8 @@ constexpr int CHANNEL_UNRELIABLE = 1;
 // 房间默认最大客户端数
 constexpr uint32_t DEFAULT_MAX_CLIENTS = 32;
 
-// 默认端口
-constexpr uint16_t DEFAULT_PORT = 27015;
+// 默认端口（与 CliManager 命令行/菜单的默认端口保持一致）
+constexpr uint16_t DEFAULT_PORT = 60011;
 
 } // namespace NetConstants
 
