@@ -3,6 +3,7 @@
 #include "../chunk/ChunkManager.h"
 #include "../chunk/BlockType.h"
 #include "../RuntimeConfig.h"
+#include "../Profiler.h"
 #include <cstdio>
 #include <chrono>
 
@@ -225,16 +226,20 @@ void NetManager::leave() {
 void NetManager::update() {
     if (!m_connected) return;
 
+    PROFILE_SCOPE("net.update");
+
     // 1. 轮询事件
-    dispatchEvents();
+    { PROFILE_SCOPE("net.dispatch"); dispatchEvents(); }
 
     // 2. 地形同步
     if (m_isHost) {
+        PROFILE_SCOPE("net.pushChunks");
         m_chunkSync.pushChunks();
     }
 
     // 3. 收集脏属性并同步
     if (m_isHost) {
+        PROFILE_SCOPE("net.propSync");
         // 服务端：收集所有 NetObject 的脏属性，发送给所有客户端
         std::vector<NetMessage> relMsgs, unrelMsgs;
         m_objManager.collectDirty(relMsgs, unrelMsgs);
@@ -251,6 +256,7 @@ void NetManager::update() {
             pair.second->clearDirty();
         }
     } else {
+        PROFILE_SCOPE("net.propSync");
         // 客户端：只同步本地玩家的脏属性到服务端
         if (m_localNetState && m_localNetState->isDirty() && m_serverPeer) {
             MemoryStream propStream;

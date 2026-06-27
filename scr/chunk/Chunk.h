@@ -54,6 +54,22 @@ public:
     // 把所有 section 标脏（用于 stitch 之后整体重传）
     void markAllDirty();
 
+    // 脏 section bitmask：bit i 置位表示 section[i] 可能有未上传的 mesh 改动。
+    // 这是"保守超集"——只多不少：每个会让 section 变脏的 Chunk 层入口都置位，
+    // ChunkManager::uploadPass 据此跳过整块干净 chunk（一次位运算），避免每帧
+    // 对全部 active chunk×16 section 做 isDirty() 空检查。置位多一位最多多一次
+    // isDirty() 检查（无害），漏置位才是 bug，故宁可多置。上传成功后由 ChunkManager
+    // 调 clearSectionDirtyBit 清位。
+    uint32_t getDirtySectionMask() const { return m_dirtySectionMask; }
+    void markSectionDirty(int sy) {
+        if (sy >= 0 && sy < SECTION_COUNT) m_dirtySectionMask |= (1u << sy);
+    }
+    void markAllSectionsDirtyMask() { m_dirtySectionMask = (SECTION_COUNT >= 32)
+        ? 0xFFFFFFFFu : ((1u << SECTION_COUNT) - 1u); }
+    void clearSectionDirtyBit(int sy) {
+        if (sy >= 0 && sy < SECTION_COUNT) m_dirtySectionMask &= ~(1u << sy);
+    }
+
     // 非空 section 的 bitmask：bit i 置位表示 section[i] 有可见面。
     // ChunkManager 在每帧 rebuildDrawCommands 前主动 refresh 一次。
     uint32_t getNonEmptyMask() const { return m_nonEmptyMask; }
@@ -72,9 +88,11 @@ public:
 
     // 组合剔除：非空 mask + 视锥 + 距离 + 纵向（下方 section 限制）。
     // frustumPlanes 可选：传入则复用，nullptr 则内部自取。
+    // detailed=true 时输出 vis.* 细分计数（每 section 4 次 addCounter），默认关以省开销。
     uint32_t getVisibleSectionMask(const Camera* camera,
                                     int cameraSectionY, int maxDownSections,
-                                    const std::array<glm::vec4, 6>* frustumPlanes = nullptr) const;
+                                    const std::array<glm::vec4, 6>* frustumPlanes = nullptr,
+                                    bool detailed = false) const;
 
     // 区块数据是否被玩家修改过（新建 / 放置 / 破坏 → true，写入磁盘后 → false）
     bool isSaveDirty() const { return m_saveDirty; }
@@ -98,6 +116,7 @@ private:
     bool m_isLoaded = false;
     bool m_meshReady = false;
     uint32_t m_nonEmptyMask = 0;   // bit i = section[i].isEmpty() ? 0 : 1
+    uint32_t m_dirtySectionMask = 0; // bit i = section[i] 可能有未上传改动（保守超集）
 
     // 4 横向邻居（z+/z-/x+/x-，与原 NeighborChunk 顺序一致：0:+X 1:-X 2:+Z 3:-Z）
     std::array<Chunk*, 4> m_neighbors{ {nullptr, nullptr, nullptr, nullptr} };

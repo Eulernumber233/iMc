@@ -171,6 +171,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="scr\Camera.h" />
+    <ClInclude Include="scr\chunk\BlockBox.h" />
     <ClInclude Include="scr\enet\enet.h" />
     <ClInclude Include="scr\RuntimeConfig.h" />
     <ClInclude Include="scr\Profiler.h" />

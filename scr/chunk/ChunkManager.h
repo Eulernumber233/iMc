@@ -69,6 +69,19 @@ public:
     std::vector<glm::ivec2> getLoadedChunkPositions() const;
     // block-ready（有数据未 mesh）的 chunk 坐标，供服务端按需向远程玩家增量推送。
     std::vector<glm::ivec2> getBlockReadyChunkPositions() const;
+
+    // 增量推送事件队列（服务端网络同步用）：每当一个 chunk 晋升到 BLOCK_READY 或
+    // LOADED 状态时记录其坐标。NetChunkSync::pushChunks 每帧 swap 取走整批，
+    // 替代过去每帧全量扫描 m_loadedChunks/m_blockReady 的 O(chunk数) 开销。
+    // 仅服务端会消费；非网络会话该队列始终为空（晋升点判断 m_trackPromotions）。
+    // 开启时会把当前已有的 block-ready / loaded chunk 一次性灌入队列，
+    // 使开启前就晋升的 chunk 也能被增量推送（不依赖 pushAllChunks 兜底 block-ready）。
+    void setTrackPromotions(bool v);
+    // O(1) swap 取走本批晋升事件（取走后清空内部队列）。
+    void drainPromotedChunks(std::vector<glm::ivec2>& out) {
+        out.clear();
+        out.swap(m_promotedChunks);
+    }
     int getLoadedChunkCount() const { return (int)m_loadedChunks.size(); }
     int getActiveChunkCount() const { return (int)m_activeChunks.size(); }
     int getInFlightCount() const { return (int)m_inFlight.size(); }
@@ -183,6 +196,14 @@ private:
     GLsizeiptr m_indirectBufferCapacityBytes = 0;
     int m_visibleInstanceCount = 0;
 
+    // draw command 缓存：cull pass 的结果（m_drawCommands / m_sectionBases）仅在
+    // 相机移动（m_visGeneration 变）或可见 section 集合变化（上传/加载/驱逐/卸载）时改变。
+    // 静止帧直接复用上一帧结果，跳过遍历全部 active chunk 的 cull pass + GPU 重传。
+    uint32_t m_lastBuiltVisGeneration = 0;  // 上次重建 cull 时的 visGeneration（0=从未建）
+    bool m_drawListDirty = true;            // 可见 section 集合发生变化，需重建
+    // 标记 draw list 需重建（section 上传/chunk 加载/驱逐/卸载时调用）。
+    void markDrawListDirty() { m_drawListDirty = true; }
+
     // Section base SSBO
     std::vector<glm::vec4> m_sectionBases;
     GLuint m_sectionBaseSSBO = 0;
@@ -223,6 +244,9 @@ private:
     ChunkSaveManager* m_saveManager = nullptr;
     double m_lastSaveCheckTime = 0.0;
     float  m_autoSaveTimer = 0.0f;
+    // 远距离卸载降频：chunk 不会一帧内跑到卸载半径外，无需每帧扫全部 loaded chunk。
+    float  m_unloadTimer = 0.0f;
+    static constexpr float UNLOAD_CHECK_INTERVAL_SEC = 0.5f;
 
     // 仍处于 BLOCK_READY（未 loaded、无 mesh）但被网络改动过的 chunk，
     // 需要在自动保存/退出时落盘。loaded chunk 由 Chunk::isSaveDirty 跟踪，
@@ -235,6 +259,15 @@ private:
 
     // 网络客户端
     bool m_networkClient = false;
+
+    // 服务端增量推送：是否记录 chunk 晋升事件（仅 Host 会话开启）。
+    bool m_trackPromotions = false;
+    // 本帧新晋升到 BLOCK_READY / LOADED 的 chunk 坐标，供 NetChunkSync 增量消费。
+    std::vector<glm::ivec2> m_promotedChunks;
+    // 记录一次晋升事件（仅在 m_trackPromotions 为 true 时入队）。
+    void notePromotedChunk(const glm::ivec2& pos) {
+        if (m_trackPromotions) m_promotedChunks.push_back(pos);
+    }
 
     // 网络请求回调
     std::function<void(int, int)> m_onRequestChunk;

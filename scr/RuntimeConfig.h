@@ -20,6 +20,10 @@ public:
     float verticalCullRatio = 0.5f;
 
     bool printProfileEverySecond = false; // 每秒输出 profiler 汇总
+    // 细粒度计时/计数开关：关闭时（默认）完全绕过热路径里的细分插桩
+    // （cullPass 每 chunk 的 rdc.cull.* 计时、getVisibleSectionMask 每 section 的 vis.* 计数），
+    // 连 steady_clock::now() 都不调，零开销。需要排查 cullPass 内部分布时再开。
+    bool profileDetailed = false;
     bool verboseTextureLoading = false;   // 输出纹理加载详情日志
     bool verboseShaderLoading = false;    // 输出着色器编译详情日志
 

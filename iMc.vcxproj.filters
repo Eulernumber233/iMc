@@ -296,6 +296,9 @@
     <ClInclude Include="scr\enet\enet.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="scr\chunk\BlockBox.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="shader\deferred_lighting.vert" />

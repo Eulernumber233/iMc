@@ -125,6 +125,12 @@ int World::run() {
     if (m_netManager) {
         m_netManager->setChunkManager(m_chunkManager.get());
 
+        // 服务端：开启 chunk 晋升事件记录，供 NetChunkSync 增量推送
+        //（避免每帧全量扫描全部 chunk 造成稳态掉帧）。
+        if (m_netMode == NetMode::Host) {
+            m_chunkManager->setTrackPromotions(true);
+        }
+
         // 客户端：设置网络 chunk 请求回调（ChunkManager 需要 chunk 时发送 CHUNK_REQUEST）
         if (m_netMode == NetMode::Join) {
             m_chunkManager->setNetworkChunkRequester(

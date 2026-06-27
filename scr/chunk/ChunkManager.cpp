@@ -159,7 +159,13 @@ void ChunkManager::update(std::shared_ptr<Camera> camera) {
             m_autoSaveTimer = 0.0f;
         }
 
-        unloadDistantChunks();
+        // 远距离卸载降频：每 UNLOAD_CHECK_INTERVAL_SEC 扫一次即可，
+        // chunk 不会在一帧内从渲染半径冲到卸载半径外（边界在 render+UNLOAD_MARGIN 之外）。
+        m_unloadTimer += dt;
+        if (m_unloadTimer >= UNLOAD_CHECK_INTERVAL_SEC) {
+            unloadDistantChunks();
+            m_unloadTimer = 0.0f;
+        }
     }
 }
 
@@ -236,6 +242,23 @@ std::vector<glm::ivec2> ChunkManager::getBlockReadyChunkPositions() const {
     return ret;
 }
 
+void ChunkManager::setTrackPromotions(bool v) {
+    m_trackPromotions = v;
+    if (!v) return;
+    // 把当前已有的 block-ready / loaded chunk 一次性灌入晋升队列，
+    // 让开启追踪之前就晋升的 chunk 也能走增量推送路径。
+    m_promotedChunks.clear();
+    m_promotedChunks.reserve(m_blockReady.size() + m_loadedChunks.size());
+    for (auto& kv : m_blockReady) {
+        int32_t cx = static_cast<int32_t>(kv.first >> 32);
+        int32_t cz = static_cast<int32_t>(kv.first & 0xFFFFFFFFLL);
+        m_promotedChunks.emplace_back(cx, cz);
+    }
+    for (auto& kv : m_loadedChunks) {
+        m_promotedChunks.push_back(kv.second->getPosition());
+    }
+}
+
 void ChunkManager::setRenderRadius(int radius) {
     if (radius > 0 && radius != m_renderRadius) {
         m_renderRadius = radius;
@@ -302,6 +325,7 @@ bool ChunkManager::isDataRelevant(const glm::ivec2& chunkPos, int margin) const 
 
 void ChunkManager::updateActiveChunks(const glm::vec3& cameraPos) {
     m_activeChunks.clear();
+    m_drawListDirty = true;  // active 集合变化 → draw list 需重建
 
     for (int dx = -m_renderRadius; dx <= m_renderRadius; ++dx) {
         for (int dz = -m_renderRadius; dz <= m_renderRadius; ++dz) {
@@ -345,7 +369,9 @@ void ChunkManager::evictFarChunkSlots() {
             m_arena.free(slot);
             SectionKey key = makeSectionKey(cp.x, cp.y, sy);
             m_sectionSlots.erase(key);
-            sec.notifyGpuSlotReleased();
+            sec.notifyGpuSlotReleased();  // 内部置 m_dirty，重入界时强制全量重传
+            chunk->markSectionDirty(sy);  // 同步脏掩码，重入 active 时 uploadPass 才会重传
+            m_drawListDirty = true;  // 该 section 不再有 GPU slot → draw list 需重建
         }
     }
 }
@@ -543,6 +569,9 @@ void ChunkManager::integrateBlockData() {
         entry.boxes = std::move(r.boxes);
         m_blockReady[key] = std::move(entry);
 
+        // 记录晋升事件，供服务端增量推送（替代每帧全量扫描）
+        notePromotedChunk(r.pos);
+
         // 通知 4 邻居"我这个位置方块数据已就绪"
         notifyNeighborsBlockReady(r.pos);
 
@@ -711,12 +740,18 @@ void ChunkManager::loadMeshResult(ChunkBuildResult& result) {
     Chunk* raw = chunk.get();
     m_loadedChunks[key] = std::move(chunk);
 
+    // 记录晋升事件，供服务端增量推送（替代每帧全量扫描）。
+    // loaded 数据比 block-ready 更"新"（含玩家/网络改动），所以晋升到 loaded 时
+    // 也重新入队，pushChunks 会优先用 loaded 序列化覆盖之前推过的 block-ready 版本。
+    notePromotedChunk(pos);
+
     // 连通邻居指针
     linkNeighbors(raw);
 
     // 在活跃半径内 → 加入 active 列表
     if (isWithinActiveRadius(pos, m_currentCenterChunk)) {
         m_activeChunks.push_back(raw);
+        m_drawListDirty = true;  // 新 chunk 进入 active → draw list 需重建
     }
 
     // 新 loaded chunk 出现 → 重新检查周围 BLOCK_READY chunk 是否可投递 Task 2
@@ -816,26 +851,37 @@ void ChunkManager::uploadSection(int chunkX, int chunkZ, int sectionY,
 
 void ChunkManager::rebuildDrawCommands() {
     PROFILE_SCOPE("rebuildDrawCommands");
-    m_drawCommands.clear();
-    m_sectionBases.clear();
-    m_visibleInstanceCount = 0;
 
     int uploadBudget = m_maxUploadsPerFrame;
     int uploadedCount = 0;
 
     {
         PROFILE_SCOPE("rdc.uploadPass");
-        for (auto& kv : m_loadedChunks) {
-            Chunk* chunk = kv.second.get();
+        // 只遍历 active chunk（渲染半径内、会被实际绘制的）。原先遍历整个 m_loadedChunks
+        // （范围到卸载半径，约 2000+ chunk × 16 section）每帧空扫。
+        // 进一步：用 chunk 的脏掩码（getDirtySectionMask）跳过整块干净 chunk，
+        // 稳态零脏时本 pass 每个 chunk 只做一次位运算判 0，整体接近 0 开销。
+        // 非 active 的脏 section 不会被绘制，dirty 标记+掩码位都保留，待 chunk 进入
+        // active 半径后由本 pass 上传，仅延迟 1 帧，肉眼无感。
+        for (Chunk* chunk : m_activeChunks) {
+            uint32_t dirtyMask = chunk->getDirtySectionMask();
+            if (dirtyMask == 0) continue;          // 整块干净 → 一次位运算跳过
             if (!chunk->isMeshReady()) continue;
             glm::ivec2 cp = chunk->getPosition();
-            if (!isWithinEvictRadius(cp, m_currentCenterChunk)) continue;
-            for (int sy = 0; sy < Chunk::SECTION_COUNT; ++sy) {
+            while (dirtyMask) {
+                int sy = lowestBitIndex(dirtyMask);
+                dirtyMask &= dirtyMask - 1u;
                 Section& s = chunk->getSection(sy);
-                if (!s.isDirty()) continue;
+                if (!s.isDirty()) {                 // 掩码是保守超集，实际已干净 → 清位
+                    chunk->clearSectionDirtyBit(sy);
+                    continue;
+                }
                 int before = uploadBudget;
                 uploadSection(cp.x, cp.y, sy, s, uploadBudget);
-                if (before != uploadBudget) ++uploadedCount;
+                if (before != uploadBudget) {
+                    ++uploadedCount;
+                    chunk->clearSectionDirtyBit(sy);  // 上传成功 → 清掩码位
+                }
                 if (uploadBudget <= 0) break;
             }
             if (uploadBudget <= 0) break;
@@ -843,9 +889,29 @@ void ChunkManager::rebuildDrawCommands() {
     }
     Profiler::addCounter("rdc.uploadCount", uploadedCount);
 
+    // 有 section 上传 → 可见 slot 的 count/offset 可能变了，draw list 需重建。
+    if (uploadedCount > 0) m_drawListDirty = true;
+
+    // draw command 缓存：相机未移动（visGeneration 不变）且可见集合未变（!dirty）时，
+    // m_drawCommands / m_sectionBases / GPU buffer 与上一帧完全相同，直接复用，
+    // 跳过遍历全部 active chunk 的 cull pass 与 GPU 重传。这是稳态静止帧的主要省时点。
+    if (!m_drawListDirty && m_visGeneration == m_lastBuiltVisGeneration) {
+        // 复用上一帧结果：m_visibleInstanceCount / m_drawCommands 保持不变。
+        Profiler::addCounter("rdc.drawCmdCount", (int64_t)m_drawCommands.size());
+        Profiler::addCounter("rdc.visibleInstances", (int64_t)m_visibleInstanceCount);
+        Profiler::addCounter("rdc.rebuildSkipped", 1);
+        return;
+    }
+    Profiler::addCounter("rdc.rebuildSkipped", 0);
+
+    m_drawCommands.clear();
+    m_sectionBases.clear();
+    m_visibleInstanceCount = 0;
+
     {
         PROFILE_SCOPE("rdc.cullPass");
         const auto& cfg = RuntimeConfig::get();
+        const bool detailed = cfg.profileDetailed;  // 细分计时/计数总开关（默认关 → 零开销）
         const Camera* cam = m_camera.get();
         int cameraSectionY = (int)(cam->Position.y / Section::HEIGHT);
         int maxDownSections = cfg.verticalCullRatio > 0.0f
@@ -866,15 +932,21 @@ void ChunkManager::rebuildDrawCommands() {
             if (!chunk->isMeshReady()) continue;
             ++chunkTotal;
 
-            auto t0 = std::chrono::steady_clock::now();
+            // 细分计时仅在 detailed 时调 steady_clock::now()（否则每 chunk 4 次时钟读是纯开销）
+            std::chrono::steady_clock::time_point t0, t1, t2, t3;
+            if (detailed) t0 = std::chrono::steady_clock::now();
             bool visible = chunk->isChunkPotentiallyVisible(cam);
-            auto t1 = std::chrono::steady_clock::now();
-            coarseVisUs += std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+            if (detailed) {
+                t1 = std::chrono::steady_clock::now();
+                coarseVisUs += std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+            }
             if (!visible) { ++chunkCoarseCull; continue; }
 
-            uint32_t mask = chunk->getVisibleSectionMask(cam, cameraSectionY, maxDownSections, pPlanes);
-            auto t2 = std::chrono::steady_clock::now();
-            getMaskUs += std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+            uint32_t mask = chunk->getVisibleSectionMask(cam, cameraSectionY, maxDownSections, pPlanes, detailed);
+            if (detailed) {
+                t2 = std::chrono::steady_clock::now();
+                getMaskUs += std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+            }
 
             while (mask) {
                 int sy = lowestBitIndex(mask);
@@ -900,15 +972,20 @@ void ChunkManager::rebuildDrawCommands() {
 
                 m_visibleInstanceCount += slot.count;
             }
-            auto t3 = std::chrono::steady_clock::now();
-            emitCmdUs += std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count();
+            if (detailed) {
+                t3 = std::chrono::steady_clock::now();
+                emitCmdUs += std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count();
+            }
         }
 
-        Profiler::addSample("rdc.cull.coarseVis", coarseVisUs);
-        Profiler::addSample("rdc.cull.getMask", getMaskUs);
-        Profiler::addSample("rdc.cull.emitCmd", emitCmdUs);
-        Profiler::addCounter("rdc.chunkTotal", chunkTotal);
-        Profiler::addCounter("rdc.chunkCoarseCull", chunkCoarseCull);
+        // 细分计时/计数仅在 detailed 开启时输出（显式指定父为 "rdc.cullPass" 以缩进）。
+        if (detailed) {
+            Profiler::addSample("rdc.cull.coarseVis", "rdc.cullPass", coarseVisUs);
+            Profiler::addSample("rdc.cull.getMask", "rdc.cullPass", getMaskUs);
+            Profiler::addSample("rdc.cull.emitCmd", "rdc.cullPass", emitCmdUs);
+            Profiler::addCounter("rdc.chunkTotal", chunkTotal);
+            Profiler::addCounter("rdc.chunkCoarseCull", chunkCoarseCull);
+        }
     }
 
     Profiler::addCounter("rdc.drawCmdCount", (int64_t)m_drawCommands.size());
@@ -919,6 +996,10 @@ void ChunkManager::rebuildDrawCommands() {
         syncIndirectBuffer();
         syncSectionBaseSSBO();
     }
+
+    // 重建完成：记录本次基于的 visGeneration，清除脏标记。
+    m_lastBuiltVisGeneration = m_visGeneration;
+    m_drawListDirty = false;
 }
 
 void ChunkManager::syncIndirectBuffer() {
@@ -1205,7 +1286,10 @@ void ChunkManager::unloadDistantChunks() {
         }
     }
 
-    if (removedAny) m_needChunkScan = true;
+    if (removedAny) {
+        m_needChunkScan = true;
+        m_drawListDirty = true;  // 有 chunk 卸载 → draw list 需重建（保险）
+    }
 }
 
 void ChunkManager::saveAllDirtyChunks() {

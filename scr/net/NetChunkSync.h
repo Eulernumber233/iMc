@@ -9,6 +9,7 @@
 #include <vector>
 #include <cstdint>
 #include <memory>
+#include <glm/glm.hpp>
 
 #include "../enet/enet.h"
 class ChunkManager;
@@ -71,6 +72,12 @@ private:
 
     // per-peer 已推送 chunk 集合
     std::unordered_map<ENetPeer*, std::unordered_set<ChunkKey>> m_sentChunks;
+
+    // 增量推送待发队列：从 ChunkManager 取走的"新晋升"chunk 事件，攒着按帧预算
+    // 逐批发给所有 peer（per-peer sent 去重）。替代过去每帧全量扫描全部 chunk。
+    // m_pendingPushSet 与 m_pendingPush 同步，用于 O(1) 去重。
+    std::vector<glm::ivec2> m_pendingPush;
+    std::unordered_set<ChunkKey> m_pendingPushSet;
 
     // 客户端 pending 请求：chunkKey → 等待响应的 peer 列表
     std::unordered_map<ChunkKey, std::vector<ENetPeer*>> m_pendingRequests;

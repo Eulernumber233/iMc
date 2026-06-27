@@ -188,6 +188,7 @@ Minecraft Anvil 风格的区块持久化。目录结构：`saves/<worldName>/wor
 | `max_uploads_per_frame` | 16 | 每帧最多上传多少脏 section 到 GPU arena |
 | `auto_save_interval_sec` | 60 | 自动保存间隔（秒），0=禁用定时（卸载仍存盘） |
 | `print_profile_every_second` | false | 每秒打印 profiler 汇总 |
+| `profile_detailed` | false | 开启 cullPass/可见性的细粒度计时+计数（`rdc.cull.*` / `vis.*`）；关闭时这些热路径插桩完全绕过（零开销） |
 | `verbose_texture_loading` | false | 输出纹理加载详情 |
 | `verbose_shader_loading` | false | 输出着色器编译详情 |
 

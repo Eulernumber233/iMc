@@ -27,18 +27,48 @@ void NetChunkSync::pushChunks() {
     // 先处理等待中的客户端请求：区块数据就绪后立即响应
     pollPendingRequests();
 
+    // 取走本帧新晋升（BLOCK_READY / LOADED）的 chunk 事件。
+    // 替代过去每帧全量扫描 getLoadedChunkPositions()/getBlockReadyChunkPositions()
+    // （render_radius=16 时每帧上千个坐标的拷贝+遍历，是稳态掉帧主因）。
+    // 这里把事件并进一个持久待发队列 m_pendingPush：因为一个晋升事件需要
+    // 发给"所有当前 + 未来加入"的 peer，单帧若没有 peer 在线就先攒着。
+    std::vector<glm::ivec2> promoted;
+    m_chunkManager->drainPromotedChunks(promoted);
+    for (auto& p : promoted) {
+        ChunkKey key = makeKey(p.x, p.y);
+        // 去重：同一 chunk 可能 block-ready 与 loaded 各入队一次，待发队列里只留一份，
+        // 真正序列化时优先取 loaded 版本（serializeChunk 内部走 getChunkAnyState）。
+        if (m_pendingPushSet.insert(key).second) {
+            m_pendingPush.push_back(p);
+        }
+    }
+
     auto& players = m_netManager->getPlayers();
+    if (m_pendingPush.empty()) return;
 
     const int hostRadius = m_chunkManager->getRenderRadius();
     static constexpr size_t BATCH_SIZE_LIMIT = 16384;  // 16KB per batch
 
-    // 对每个客户端：发送尚未推送过的 loaded chunk
+    // 本帧序列化预算：把多 worker 同时完成的晋升尖峰摊到多帧，避免单帧序列化+压缩
+    // 过多 chunk 造成卡顿。本帧只取队首 budget 个，剩余下帧继续。
+    static constexpr size_t MAX_PUSH_PER_FRAME = 8;
+    size_t take = (std::min)(m_pendingPush.size(), MAX_PUSH_PER_FRAME);
+
+    // 统计本帧每个候选 chunk 还有几个 peer "尚未满足"（既没 sent、且需要但本帧未发到）。
+    // 仅当某 chunk 对所有当前 peer 都已满足（sent 或不需要）才出队；否则保留到下帧。
+    // 这保留了旧版"每帧重扫"的语义：远处玩家的 block-ready chunk 会一直留在队列里，
+    // 等玩家移近（落入其 pushR 半径）时才真正推送。
+    std::unordered_map<ChunkKey, int> unsatisfied;  // key -> 仍未满足的 peer 数
+    for (size_t i = 0; i < take; ++i) {
+        unsatisfied[makeKey(m_pendingPush[i].x, m_pendingPush[i].y)] = 0;
+    }
+
+    // 每个 peer 各攒一个 batch，复用原有 16KB 合批逻辑。
     for (auto& [id, player] : players) {
         if (!player->peer) continue;  // 本地玩家
 
         auto& sent = m_sentChunks[player->peer];
 
-        // 该玩家所在 chunk + 该玩家上报的半径（用于 block-ready 增量推送的相关性过滤）
         glm::vec3 ppos = player->getRenderPosition();
         glm::ivec2 pChunk(
             (int)std::floor(ppos.x / (float)ChunkConstants::CHUNK_WIDTH),
@@ -46,7 +76,6 @@ void NetChunkSync::pushChunks() {
         int pushR = (player->renderRadius > 0) ? player->renderRadius : hostRadius;
 
         std::vector<uint8_t> batch;
-
         auto flushIfOver = [&](size_t before) {
             if (batch.size() > BATCH_SIZE_LIMIT && before > 0) {
                 size_t added = batch.size() - before;
@@ -57,39 +86,64 @@ void NetChunkSync::pushChunks() {
             }
         };
 
-        // (1) loaded chunk（Host 自己渲染半径内、已 mesh 的）
-        auto positions = m_chunkManager->getLoadedChunkPositions();
-        for (auto& pos : positions) {
+        for (size_t i = 0; i < take; ++i) {
+            const glm::ivec2& pos = m_pendingPush[i];
             ChunkKey key = makeKey(pos.x, pos.y);
-            if (sent.count(key)) continue;  // 已推送
-            size_t before = batch.size();
-            serializeChunk(pos.x, pos.y, batch);
-            flushIfOver(before);
-            sent.insert(key);
+            if (sent.count(key)) continue;  // 该 peer 已满足（已推送过）
+
+            // loaded 优先（数据最新、含玩家/网络改动），否则用 block-ready（带相关性过滤）
+            if (m_chunkManager->getChunkAnyState(pos) != nullptr) {
+                size_t before = batch.size();
+                serializeChunk(pos.x, pos.y, batch);
+                flushIfOver(before);
+                sent.insert(key);  // 该 peer 已满足
+            } else {
+                int dx = std::abs(pos.x - pChunk.x);
+                int dz = std::abs(pos.y - pChunk.y);
+                if (dx > pushR || dz > pushR) {
+                    unsatisfied[key] += 1;  // 该 peer 暂不需要，但仍未满足 → chunk 不能出队
+                    continue;
+                }
+                ChunkBoxes boxes;
+                if (!m_chunkManager->getChunkBoxes(pos, boxes)) {
+                    unsatisfied[key] += 1;  // 数据还没就绪，下帧重试
+                    continue;
+                }
+                size_t before = batch.size();
+                serializeChunkFromBlocks(pos.x, pos.y, boxes, batch);
+                flushIfOver(before);
+                sent.insert(key);  // 该 peer 已满足
+            }
         }
 
-        // (2) block-ready chunk（阶段 B：为远程玩家"代客保管"、Host 没 mesh 的）。
-        //     只推该玩家附近（pChunk 的 pushR 半径内）且未推过的，避免给某玩家
-        //     推送另一玩家区域的大量区块。
-        auto brPositions = m_chunkManager->getBlockReadyChunkPositions();
-        for (auto& pos : brPositions) {
-            ChunkKey key = makeKey(pos.x, pos.y);
-            if (sent.count(key)) continue;
-            int dx = std::abs(pos.x - pChunk.x);
-            int dz = std::abs(pos.y - pChunk.y);
-            if (dx > pushR || dz > pushR) continue;  // 不在该玩家附近，跳过
+        if (!batch.empty()) m_netManager->sendChunkData(player->peer, batch);
+    }
 
-            ChunkBoxes boxes;
-            if (!m_chunkManager->getChunkBoxes(pos, boxes)) continue;
-            size_t before = batch.size();
-            serializeChunkFromBlocks(pos.x, pos.y, boxes, batch);
-            flushIfOver(before);
-            sent.insert(key);
+    // 重建待发队列：take 范围内 unsatisfied==0（所有 peer 都满足）的出队；
+    // 其余（仍有 peer 未满足）以及 take 之外的，原样保留到下帧。
+    std::vector<glm::ivec2> stillPending;
+    stillPending.reserve(m_pendingPush.size());
+    for (size_t i = 0; i < m_pendingPush.size(); ++i) {
+        const glm::ivec2& pos = m_pendingPush[i];
+        ChunkKey key = makeKey(pos.x, pos.y);
+        if (i < take && unsatisfied[key] == 0) {
+            m_pendingPushSet.erase(key);
+        } else {
+            stillPending.push_back(pos);
         }
+    }
+    m_pendingPush.swap(stillPending);
 
-        if (!batch.empty()) {
-            m_netManager->sendChunkData(player->peer, batch);
-        }
+    // 没有任何 peer 在线时，doneThisFrame 为空，所有事件原样保留（攒着等 peer），
+    // 但为避免无 peer 时队列无限增长，这里在确实没有远程 peer 时直接清空：
+    // 新 peer 加入会通过 pushAllChunks 收到全量快照，无需保留这些增量事件。
+    bool anyRemotePeer = false;
+    for (auto& [id, player] : players) {
+        if (player->peer) { anyRemotePeer = true; break; }
+    }
+    if (!anyRemotePeer) {
+        m_pendingPush.clear();
+        m_pendingPushSet.clear();
     }
 }
 

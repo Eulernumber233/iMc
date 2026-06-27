@@ -42,10 +42,12 @@ void Chunk::setBlock(int x, int y, int z, BlockState s) {
     int sy = y / Section::HEIGHT;
     int ly = y % Section::HEIGHT;
     m_sections[sy].setBlock(x, ly, z, s);
+    markSectionDirty(sy);
 }
 
 void Chunk::markAllDirty() {
     for (auto& s : m_sections) s.markDirty();
+    markAllSectionsDirtyMask();
 }
 
 void Chunk::adoptSections(std::array<Section, SECTION_COUNT>&& sections) {
@@ -110,6 +112,7 @@ void Chunk::updateFaceAt(int x, int y, int z, BlockFace face) {
     int ly = y % Section::HEIGHT;
     BlockState nb = neighborBlock(x, y, z, face);
     m_sections[sy].updateFaceWithNeighbor(x, ly, z, face, nb);
+    markSectionDirty(sy);
 }
 
 // 未来进一步优化：TODO
@@ -242,7 +245,8 @@ bool Chunk::isSectionVisible(int sectionY, const Camera* camera) const {
 
 uint32_t Chunk::getVisibleSectionMask(const Camera* camera,
                                        int cameraSectionY, int maxDownSections,
-                                       const std::array<glm::vec4, 6>* frustumPlanes) const {
+                                       const std::array<glm::vec4, 6>* frustumPlanes,
+                                       bool detailed) const {
     uint32_t mask = m_nonEmptyMask;
     if (mask == 0) return 0;
     if (!camera) return mask;
@@ -304,9 +308,11 @@ uint32_t Chunk::getVisibleSectionMask(const Camera* camera,
         result |= (1u << sy);
     }
 
-    Profiler::addCounter("vis.secTested", secTested);
-    Profiler::addCounter("vis.secVertCull", secVertCull);
-    Profiler::addCounter("vis.secFrustCull", secFrustCull);
-    Profiler::addCounter("vis.secDistCull", secDistCull);
+    if (detailed) {
+        Profiler::addCounter("vis.secTested", secTested);
+        Profiler::addCounter("vis.secVertCull", secVertCull);
+        Profiler::addCounter("vis.secFrustCull", secFrustCull);
+        Profiler::addCounter("vis.secDistCull", secDistCull);
+    }
     return result;
 }

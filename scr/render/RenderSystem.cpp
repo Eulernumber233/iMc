@@ -759,6 +759,7 @@ void RenderSystem::render(const ChunkManager& chunkManager,
 
     // 远程玩家模型
     if (netManager) {
+        PROFILE_SCOPE("render.remotePlayers");
         renderRemotePlayers(netManager, view, projection, camera);
     }
 
