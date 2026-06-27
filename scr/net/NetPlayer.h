@@ -48,6 +48,7 @@ public:
     ENetPeer* peer = nullptr;        // 所属连接（服务端用，客户端本地玩家为 nullptr）
     std::string playerName;
     std::string skinName;
+    int renderRadius = 0;            // 该玩家上报的渲染半径（服务端用于 per-player 加载/推送）
     std::unique_ptr<PlayerNetState> netState;  // 拥有 PlayerNetState
 
     NetPlayer() : netState(std::make_unique<PlayerNetState>()) {}

@@ -69,6 +69,7 @@ void ChunkManager::initialize(int renderRadius, const glm::vec3& cameraPos) {
     m_maxUploadsPerFrame = RuntimeConfig::get().maxUploadsPerFrame;
     m_maxInflightRequests = RuntimeConfig::get().maxInflightRequests;
     m_autoSaveIntervalSec = RuntimeConfig::get().autoSaveIntervalSec;
+    m_retainMargin = RuntimeConfig::get().retainMarginChunks;
     m_lastSaveCheckTime = glfwGetTime();
     m_currentCenterChunk = glm::ivec2(
         (int)std::floor(cameraPos.x / Chunk::WIDTH),
@@ -81,7 +82,7 @@ void ChunkManager::initialize(int renderRadius, const glm::vec3& cameraPos) {
 
     // 预分配 hash map 容量，防止 rehash 导致 BlockReadyEntry 地址变化
     // （MeshBuildInput 持有指向 BlockReadyEntry::blocks 的原始指针）
-    int maxChunks = (2 * (m_renderRadius + UNLOAD_MARGIN_CHUNKS) + 1);
+    int maxChunks = (2 * (m_renderRadius + m_retainMargin) + 1);
     maxChunks = maxChunks * maxChunks + 64; // 留余量
     m_loadedChunks.reserve(maxChunks);
     m_blockReady.reserve(maxChunks);
@@ -224,6 +225,17 @@ std::vector<glm::ivec2> ChunkManager::getLoadedChunkPositions() const {
     return ret;
 }
 
+std::vector<glm::ivec2> ChunkManager::getBlockReadyChunkPositions() const {
+    std::vector<glm::ivec2> ret;
+    ret.reserve(m_blockReady.size());
+    for (auto& kv : m_blockReady) {
+        int32_t cx = static_cast<int32_t>(kv.first >> 32);
+        int32_t cz = static_cast<int32_t>(kv.first & 0xFFFFFFFFLL);
+        ret.emplace_back(cx, cz);
+    }
+    return ret;
+}
+
 void ChunkManager::setRenderRadius(int radius) {
     if (radius > 0 && radius != m_renderRadius) {
         m_renderRadius = radius;
@@ -268,6 +280,24 @@ bool ChunkManager::isWithinEvictRadius(const glm::ivec2& chunkPos,
     int dz = std::abs(chunkPos.y - centerChunk.y);
     int r = m_renderRadius + EVICT_MARGIN_CHUNKS;
     return dx <= r && dz <= r;
+}
+
+bool ChunkManager::isDataRelevant(const glm::ivec2& chunkPos, int margin) const {
+    // 加载中心为空（客户端/单机）→ 退化为只看本机相机中心 + 渲染半径
+    if (m_loadCenters.empty()) {
+        int r = m_renderRadius + margin;
+        int dx = std::abs(chunkPos.x - m_currentCenterChunk.x);
+        int dz = std::abs(chunkPos.y - m_currentCenterChunk.y);
+        return dx <= r && dz <= r;
+    }
+    // per-center：每个中心用自己的半径 + margin
+    for (const auto& c : m_loadCenters) {
+        int r = c.radius + margin;
+        int dx = std::abs(chunkPos.x - c.center.x);
+        int dz = std::abs(chunkPos.y - c.center.y);
+        if (dx <= r && dz <= r) return true;
+    }
+    return false;
 }
 
 void ChunkManager::updateActiveChunks(const glm::vec3& cameraPos) {
@@ -341,10 +371,25 @@ void ChunkManager::requestMissingChunks() {
         }
     }
 
+    // 所有模式：踢出"玩家已跑远"的在途请求（超出 render + retain）。
+    // 这些 chunk 即使生成回来也会被卸载逻辑回收，提前从 m_inFlight 移除可腾出槽位
+    // 给真正需要的 chunk。用 retain 半径（而非 data 半径）做阈值，避免温存区边界抖动
+    // 反复踢/补。注意：被踢后 worker 仍会算完并进 m_blockDone，主线程 drain 时若仍不相关
+    // 会进 block-ready 由卸载逻辑统一处理（生成成本已发生，不浪费数据）。
+    for (auto it = m_inFlight.begin(); it != m_inFlight.end(); ) {
+        int cx = (int32_t)(it->first >> 32);
+        int cz = (int32_t)(it->first & 0xFFFFFFFFLL);
+        if (!isDataRelevant(glm::ivec2(cx, cz), m_retainMargin)) {
+            it = m_inFlight.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
     // 网络客户端：通过回调发送 CHUNK_REQUEST
     if (m_networkClient) {
         if (!m_onRequestChunk) return;
-        const int loadR = m_renderRadius + BLOCK_PRELOAD_MARGIN;
+        const int loadR = m_renderRadius + DATA_MARGIN;
         bool foundMissing = false;
         for (int r = 0; r <= loadR; ++r) {
             if ((int)m_inFlight.size() >= m_maxInflightRequests) return;
@@ -368,23 +413,48 @@ void ChunkManager::requestMissingChunks() {
         return;
     }
 
-    // 本地模式：投递 Task 1（方块数据生成/加载）
-    const int loadR = m_renderRadius + BLOCK_PRELOAD_MARGIN;
+    // 本地模式（含 Host）：投递 Task 1（方块数据生成/加载）。
+    // 阶段 B + per-center：围绕所有加载中心（Host + 远程玩家，各带自己的半径）补数据。
+    //
+    // 投递顺序 = 全局"由近及远"：外层环 r 从 0 递增，对每个 r 只处理"r 落在自己半径内"
+    // 的中心的那一环。这样：
+    //  - 整体上每个中心的近环都先于任何中心的远环投递（公平、玩家附近优先填满）；
+    //  - 半径大的玩家的远环在大 r 时仍会被投递，不会被半径小的玩家饿死（其 ring 早已停发）。
+    // 三道 guard（getChunk / m_blockReady / m_inFlight）天然去重，多中心重叠不会重复投递。
+
+    // 加载中心列表：m_loadCenters 为空（单机/初始化）则退化为本机相机中心 + 本机渲染半径
+    std::vector<LoadCenter> centers = m_loadCenters;
+    if (centers.empty()) centers.push_back({ m_currentCenterChunk, m_renderRadius });
+
+    // 全局最大环上界 = 各中心 (radius + DATA_MARGIN) 的最大值
+    int maxLoadR = 0;
+    for (const auto& c : centers) maxLoadR = std::max(maxLoadR, c.radius + DATA_MARGIN);
+
     bool foundMissing = false;
-    for (int r = 0; r <= loadR; ++r) {
-        if ((int)m_inFlight.size() >= m_maxInflightRequests) return;
-        for (int dx = -r; dx <= r; ++dx) {
-            int absDx = std::abs(dx);
-            for (int dz = -r; dz <= r; ++dz) {
-                if (std::max(absDx, std::abs(dz)) != r) continue;
-                glm::ivec2 chunkPos(m_currentCenterChunk.x + dx, m_currentCenterChunk.y + dz);
-                ChunkKey key = chunkPosToKey(chunkPos);
-                if (getChunk(chunkPos)) continue;
-                if (m_blockReady.find(key) != m_blockReady.end()) continue;
-                if (m_inFlight.find(key) != m_inFlight.end()) continue;
-                if ((int)m_inFlight.size() >= m_maxInflightRequests) return;
-                foundMissing = true;
-                requestChunkLoad(chunkPos);
+    for (int r = 0; r <= maxLoadR; ++r) {
+        if ((int)m_inFlight.size() >= m_maxInflightRequests) {
+            m_needChunkScan = true;  // 槽位满，下帧继续
+            return;
+        }
+        for (const auto& c : centers) {
+            const int centerLoadR = c.radius + DATA_MARGIN;
+            if (r > centerLoadR) continue;   // 该中心半径已扫完，跳过它的这一远环
+            for (int dx = -r; dx <= r; ++dx) {
+                int absDx = std::abs(dx);
+                for (int dz = -r; dz <= r; ++dz) {
+                    if (std::max(absDx, std::abs(dz)) != r) continue;
+                    glm::ivec2 chunkPos(c.center.x + dx, c.center.y + dz);
+                    ChunkKey key = chunkPosToKey(chunkPos);
+                    if (getChunk(chunkPos)) continue;
+                    if (m_blockReady.find(key) != m_blockReady.end()) continue;
+                    if (m_inFlight.find(key) != m_inFlight.end()) continue;
+                    if ((int)m_inFlight.size() >= m_maxInflightRequests) {
+                        m_needChunkScan = true;
+                        return;
+                    }
+                    foundMissing = true;
+                    requestChunkLoad(chunkPos);
+                }
             }
         }
     }
@@ -984,13 +1054,6 @@ void ChunkManager::setSaveManager(ChunkSaveManager* sm) {
     m_workerPool.setSaveManager(sm);
 }
 
-bool ChunkManager::isWithinUnloadRadius(const glm::ivec2& chunkPos,
-    const glm::ivec2& centerChunk) const {
-    int dx = std::abs(chunkPos.x - centerChunk.x);
-    int dz = std::abs(chunkPos.y - centerChunk.y);
-    int r = m_renderRadius + UNLOAD_MARGIN_CHUNKS;
-    return dx <= r && dz <= r;
-}
 
 void ChunkManager::saveChunkToDisk(Chunk* chunk) {
     if (!m_saveManager || !chunk) return;
@@ -1033,13 +1096,41 @@ void ChunkManager::doAutoSave() {
     saveDirtyBlockReadyChunks();
 }
 
-void ChunkManager::saveDirtyBlockReadyChunks() {
-    if (!m_saveManager || m_blockReadyDirty.empty()) return;
-
+void ChunkManager::saveBlockReadyChunkToDisk(ChunkKey key, const ChunkBoxes& boxes) {
+    if (!m_saveManager) return;
     constexpr int VOL = ChunkConstants::CHUNK_VOLUME;
     constexpr int W = Chunk::WIDTH;
     constexpr int D = Chunk::DEPTH;
     auto buf = std::make_unique<BlockState[]>(VOL);
+    BlockState* dst = buf.get();
+
+    for (int sy = 0; sy < Chunk::SECTION_COUNT; ++sy) {
+        int baseY = sy * Section::HEIGHT;
+        const auto& box = boxes[sy];
+        if (!box) {
+            // 该 section 无数据：填空气
+            for (int y = 0; y < Section::HEIGHT; ++y)
+                for (int z = 0; z < D; ++z)
+                    for (int x = 0; x < W; ++x)
+                        dst[((baseY + y) * D + z) * W + x] = BlockState{};
+            continue;
+        }
+        std::shared_lock<std::shared_mutex> lk(box->mutex);
+        const BlockState* src = box->blocks.data();
+        for (int y = 0; y < Section::HEIGHT; ++y)
+            for (int z = 0; z < D; ++z)
+                for (int x = 0; x < W; ++x)
+                    dst[((baseY + y) * D + z) * W + x] =
+                        src[(y * D + z) * W + x];
+    }
+
+    int32_t cx = static_cast<int32_t>(key >> 32);
+    int32_t cz = static_cast<int32_t>(key & 0xFFFFFFFFLL);
+    m_saveManager->saveChunk(glm::ivec2(cx, cz), dst);
+}
+
+void ChunkManager::saveDirtyBlockReadyChunks() {
+    if (!m_saveManager || m_blockReadyDirty.empty()) return;
 
     std::vector<ChunkKey> done;
     for (ChunkKey key : m_blockReadyDirty) {
@@ -1049,32 +1140,7 @@ void ChunkManager::saveDirtyBlockReadyChunks() {
             done.push_back(key);
             continue;
         }
-
-        BlockState* dst = buf.get();
-        const ChunkBoxes& boxes = it->second.boxes;
-        for (int sy = 0; sy < Chunk::SECTION_COUNT; ++sy) {
-            int baseY = sy * Section::HEIGHT;
-            const auto& box = boxes[sy];
-            if (!box) {
-                // 该 section 无数据：填空气
-                for (int y = 0; y < Section::HEIGHT; ++y)
-                    for (int z = 0; z < D; ++z)
-                        for (int x = 0; x < W; ++x)
-                            dst[((baseY + y) * D + z) * W + x] = BlockState{};
-                continue;
-            }
-            std::shared_lock<std::shared_mutex> lk(box->mutex);
-            const BlockState* src = box->blocks.data();
-            for (int y = 0; y < Section::HEIGHT; ++y)
-                for (int z = 0; z < D; ++z)
-                    for (int x = 0; x < W; ++x)
-                        dst[((baseY + y) * D + z) * W + x] =
-                            src[(y * D + z) * W + x];
-        }
-
-        int32_t cx = static_cast<int32_t>(key >> 32);
-        int32_t cz = static_cast<int32_t>(key & 0xFFFFFFFFLL);
-        m_saveManager->saveChunk(glm::ivec2(cx, cz), dst);
+        saveBlockReadyChunkToDisk(key, it->second.boxes);
         done.push_back(key);
     }
 
@@ -1085,28 +1151,61 @@ void ChunkManager::unloadDistantChunks() {
     if (!m_saveManager) return;
     PROFILE_SCOPE("unloadDistantChunks");
 
+    // 阶段 B：卸载判定改为"对任一玩家都不数据相关"（isDataRelevant），
+    // 而非仅本机相机。这样远程玩家正站着的 chunk（Host 看不到）不会被误卸。
+    bool removedAny = false;
+
+    // --- 1. loaded chunk ---
     std::vector<glm::ivec2> toRemove;
     for (auto& kv : m_loadedChunks) {
         Chunk* chunk = kv.second.get();
         if (!chunk) continue;
         glm::ivec2 cp = chunk->getPosition();
-        if (!isWithinUnloadRadius(cp, m_currentCenterChunk)) {
+        if (!isDataRelevant(cp, m_retainMargin)) {
             if (chunk->isSaveDirty()) {
                 saveChunkToDisk(chunk);
             }
             toRemove.push_back(cp);
         }
     }
-
     for (auto& cp : toRemove) {
         ChunkKey key = chunkPosToKey(cp);
         auto it = m_loadedChunks.find(key);
         if (it == m_loadedChunks.end()) continue;
         it->second->unload();
         m_loadedChunks.erase(it);
+        removedAny = true;
+        if (m_onChunkUnloaded) m_onChunkUnloaded(cp.x, cp.y);
     }
 
-    if (!toRemove.empty()) m_needChunkScan = true;
+    // --- 2. block-ready chunk（阶段 B 新增：代客保管的远程玩家 chunk 也要卸载）---
+    // 跳过正在 mesh 投递中的（worker 还共享着 box，且 Task 2 结果回来要找归宿）。
+    std::vector<ChunkKey> brRemove;
+    for (auto& kv : m_blockReady) {
+        ChunkKey key = kv.first;
+        int32_t cx = static_cast<int32_t>(key >> 32);
+        int32_t cz = static_cast<int32_t>(key & 0xFFFFFFFFLL);
+        glm::ivec2 cp(cx, cz);
+        if (m_meshInFlight.count(key)) continue;       // 过渡态，正在 mesh
+        if (isDataRelevant(cp, m_retainMargin)) continue;
+        // 卸载前若被改动过（在待存盘集合）则落盘
+        if (m_blockReadyDirty.count(key)) {
+            saveBlockReadyChunkToDisk(key, kv.second.boxes);
+            m_blockReadyDirty.erase(key);
+        }
+        brRemove.push_back(key);
+    }
+    for (ChunkKey key : brRemove) {
+        m_blockReady.erase(key);
+        removedAny = true;
+        if (m_onChunkUnloaded) {
+            int32_t cx = static_cast<int32_t>(key >> 32);
+            int32_t cz = static_cast<int32_t>(key & 0xFFFFFFFFLL);
+            m_onChunkUnloaded(cx, cz);
+        }
+    }
+
+    if (removedAny) m_needChunkScan = true;
 }
 
 void ChunkManager::saveAllDirtyChunks() {

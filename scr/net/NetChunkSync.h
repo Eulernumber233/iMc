@@ -42,6 +42,10 @@ public:
     // 客户端断连时清理 pending 请求
     void onPeerDisconnected(ENetPeer* peer);
 
+    // 服务端 chunk 卸载时：清除所有 peer 对该 chunk 的"已推送"记录，
+    // 使玩家再次靠近该区域时能重新收到（最新）数据。
+    void onChunkUnloaded(int chunkX, int chunkZ);
+
     // ---- 服务端：方块修改广播（相关性过滤）----
 
     // 把一条已编码好的 BLOCK_CHANGE 消息广播给所有"已加载该 chunk"的客户端

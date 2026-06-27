@@ -279,6 +279,26 @@ int World::run() {
             }
         }
 
+        // 阶段 B：服务端每帧把所有玩家（Host + 远程）的位置作为"数据相关"加载中心，
+        // 灌给 ChunkManager（决定生成/落盘/卸载/推送；mesh 仍只看本机相机）。
+        // 必须在 chunkManager->update() 之前。客户端/单机不灌（内部退化为本机相机）。
+        if (m_netManager && m_netMode == NetMode::Host) {
+            std::vector<ChunkManager::LoadCenter> centers;
+            int hostRadius = m_chunkManager->getRenderRadius();
+            for (auto& [id, p] : m_netManager->getPlayers()) {
+                bool isLocal = (id == m_netManager->getLocalPlayerId());
+                glm::vec3 pos = isLocal ? m_player->getPosition() : p->getRenderPosition();
+                int radius = isLocal ? hostRadius : p->renderRadius;
+                if (radius <= 0) radius = hostRadius;  // 远程未上报则用 Host 半径兜底
+                centers.push_back({
+                    glm::ivec2(
+                        (int)std::floor(pos.x / (float)ChunkConstants::CHUNK_WIDTH),
+                        (int)std::floor(pos.z / (float)ChunkConstants::CHUNK_DEPTH)),
+                    radius });
+            }
+            m_chunkManager->setLoadCenters(std::move(centers));
+        }
+
         // 更新区块管理器（根据玩家位置更新可见区块）
         m_chunkManager->update(camera);
 

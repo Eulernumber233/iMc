@@ -34,7 +34,8 @@ public:
     static bool decode(const uint8_t* data, size_t len, NetMessage& out);
 
     // ---- 便捷工厂 ----
-    static NetMessage joinRequest(const std::string& playerName);
+    static NetMessage joinRequest(const std::string& playerName,
+                                  uint16_t renderRadius = 0);
     static NetMessage joinAccept(uint16_t playerId, uint32_t seed,
         float posX = 0.0f, float posY = 500.0f, float posZ = 0.0f, float yaw = 0.0f,
         const std::string& skinName = "steve", const std::string& worldName = "");

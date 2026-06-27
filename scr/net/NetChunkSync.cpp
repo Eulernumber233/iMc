@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <cmath>
 #include <array>
 #include <shared_mutex>
 
@@ -28,37 +29,61 @@ void NetChunkSync::pushChunks() {
 
     auto& players = m_netManager->getPlayers();
 
+    const int hostRadius = m_chunkManager->getRenderRadius();
+    static constexpr size_t BATCH_SIZE_LIMIT = 16384;  // 16KB per batch
+
     // 对每个客户端：发送尚未推送过的 loaded chunk
     for (auto& [id, player] : players) {
         if (!player->peer) continue;  // 本地玩家
 
         auto& sent = m_sentChunks[player->peer];
-        auto positions = m_chunkManager->getLoadedChunkPositions();
+
+        // 该玩家所在 chunk + 该玩家上报的半径（用于 block-ready 增量推送的相关性过滤）
+        glm::vec3 ppos = player->getRenderPosition();
+        glm::ivec2 pChunk(
+            (int)std::floor(ppos.x / (float)ChunkConstants::CHUNK_WIDTH),
+            (int)std::floor(ppos.z / (float)ChunkConstants::CHUNK_DEPTH));
+        int pushR = (player->renderRadius > 0) ? player->renderRadius : hostRadius;
 
         std::vector<uint8_t> batch;
-        static constexpr size_t BATCH_SIZE_LIMIT = 16384;  // 16KB per batch
 
-        for (auto& pos : positions) {
-            ChunkKey key = makeKey(pos.x, pos.y);
-            if (sent.count(key)) continue;  // 已推送
-
-            // 序列化此 chunk
-            size_t before = batch.size();
-            serializeChunk(pos.x, pos.y, batch);
-
-            // 如果加入此 chunk 后超过批次大小限制，先发送当前批次
+        auto flushIfOver = [&](size_t before) {
             if (batch.size() > BATCH_SIZE_LIMIT && before > 0) {
-                // 回退未发送的 chunk 数据
                 size_t added = batch.size() - before;
                 std::vector<uint8_t> lastChunk(batch.end() - added, batch.end());
                 batch.resize(before);
-
-                if (!batch.empty()) {
-                    m_netManager->sendChunkData(player->peer, batch);
-                }
+                if (!batch.empty()) m_netManager->sendChunkData(player->peer, batch);
                 batch = std::move(lastChunk);
             }
+        };
 
+        // (1) loaded chunk（Host 自己渲染半径内、已 mesh 的）
+        auto positions = m_chunkManager->getLoadedChunkPositions();
+        for (auto& pos : positions) {
+            ChunkKey key = makeKey(pos.x, pos.y);
+            if (sent.count(key)) continue;  // 已推送
+            size_t before = batch.size();
+            serializeChunk(pos.x, pos.y, batch);
+            flushIfOver(before);
+            sent.insert(key);
+        }
+
+        // (2) block-ready chunk（阶段 B：为远程玩家"代客保管"、Host 没 mesh 的）。
+        //     只推该玩家附近（pChunk 的 pushR 半径内）且未推过的，避免给某玩家
+        //     推送另一玩家区域的大量区块。
+        auto brPositions = m_chunkManager->getBlockReadyChunkPositions();
+        for (auto& pos : brPositions) {
+            ChunkKey key = makeKey(pos.x, pos.y);
+            if (sent.count(key)) continue;
+            int dx = std::abs(pos.x - pChunk.x);
+            int dz = std::abs(pos.y - pChunk.y);
+            if (dx > pushR || dz > pushR) continue;  // 不在该玩家附近，跳过
+
+            ChunkBoxes boxes;
+            if (!m_chunkManager->getChunkBoxes(pos, boxes)) continue;
+            size_t before = batch.size();
+            serializeChunkFromBlocks(pos.x, pos.y, boxes, batch);
+            flushIfOver(before);
             sent.insert(key);
         }
 
@@ -234,6 +259,13 @@ void NetChunkSync::onPeerDisconnected(ENetPeer* peer) {
 
     // 清理该 peer 的已推送记录
     m_sentChunks.erase(peer);
+}
+
+void NetChunkSync::onChunkUnloaded(int chunkX, int chunkZ) {
+    ChunkKey key = makeKey(chunkX, chunkZ);
+    for (auto& [peer, sent] : m_sentChunks) {
+        sent.erase(key);
+    }
 }
 
 void NetChunkSync::serializeChunk(int chunkX, int chunkZ, std::vector<uint8_t>& out) {

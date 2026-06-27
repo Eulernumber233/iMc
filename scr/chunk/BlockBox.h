@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "BlockType.h"
 #include "ChunkDimensions.h"
 #include <array>

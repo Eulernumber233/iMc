@@ -33,9 +33,11 @@ bool NetMessage::decode(const uint8_t* data, size_t len, NetMessage& out) {
 
 // ---- 便捷工厂 ----
 
-NetMessage NetMessage::joinRequest(const std::string& playerName) {
+NetMessage NetMessage::joinRequest(const std::string& playerName,
+                                   uint16_t renderRadius) {
     NetMessage msg(NetMsgType::JOIN_REQUEST);
     msg.payload.writeString(playerName);
+    msg.payload.writePod(renderRadius);  // 客户端上报自己的渲染半径（0=未知，服务端用默认）
     return msg;
 }
 

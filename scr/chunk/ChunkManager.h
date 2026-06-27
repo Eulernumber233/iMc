@@ -64,8 +64,11 @@ public:
     const std::vector<Chunk*>& getActiveChunks() const { return m_activeChunks; }
     std::vector<glm::ivec2> getActiveChunkPositions() const;
     void setRenderRadius(int radius);
+    int getRenderRadius() const { return m_renderRadius; }
 
     std::vector<glm::ivec2> getLoadedChunkPositions() const;
+    // block-ready（有数据未 mesh）的 chunk 坐标，供服务端按需向远程玩家增量推送。
+    std::vector<glm::ivec2> getBlockReadyChunkPositions() const;
     int getLoadedChunkCount() const { return (int)m_loadedChunks.size(); }
     int getActiveChunkCount() const { return (int)m_activeChunks.size(); }
     int getInFlightCount() const { return (int)m_inFlight.size(); }
@@ -109,8 +112,33 @@ public:
         m_onRequestChunk = std::move(fn);
     }
 
+    // chunk 卸载回调（服务端用：通知 NetChunkSync 清除该 chunk 的 per-peer 已推送记录，
+    // 使玩家再次靠近时能重新推送最新数据）。
+    void setChunkUnloadedCallback(std::function<void(int, int)> fn) {
+        m_onChunkUnloaded = std::move(fn);
+    }
+
     // 强制加载 chunk（服务端按需响应 CHUNK_REQUEST）
     void forceChunkLoad(const glm::ivec2& chunkPos);
+
+    // 数据相关加载中心：chunk 坐标 + 该中心自己的渲染半径（per-player）。
+    struct LoadCenter {
+        glm::ivec2 center;
+        int radius;
+        bool operator==(const LoadCenter& o) const {
+            return center == o.center && radius == o.radius;
+        }
+    };
+
+    // 多锚点加载（阶段 B）：设置所有"数据相关"加载中心（坐标 + 各自半径）。
+    // 服务端每帧灌入 Host + 所有远程玩家；客户端/单机留空 → 内部退化为本机相机中心 + m_renderRadius。
+    // 注意：这是"数据相关"量纲，决定生成/落盘/卸载/推送；mesh 仍只看本机相机（渲染相关）。
+    void setLoadCenters(std::vector<LoadCenter> centers) {
+        if (centers != m_loadCenters) {
+            m_loadCenters = std::move(centers);
+            m_needChunkScan = true;  // 加载中心变了才重新扫描缺失 chunk
+        }
+    }
 
     // 存档管理
     void setSaveManager(ChunkSaveManager* sm);
@@ -161,16 +189,22 @@ private:
     GLsizeiptr m_sectionBaseCapacityBytes = 0;
 
     int m_renderRadius;
-    glm::ivec2 m_currentCenterChunk;
+    glm::ivec2 m_currentCenterChunk;  // 渲染中心（本机相机所在 chunk）
+
+    // 数据相关加载中心（Host + 远程玩家，各带自己的半径）。空 → 退化为仅本机相机。
+    std::vector<LoadCenter> m_loadCenters;
 
     // GPU slot 逐出半径余量（hysteresis 避免边界来回抖动）
     static constexpr int EVICT_MARGIN_CHUNKS = 2;
 
-    // 方块数据预加载余量：让 renderRadius 边缘的 chunk 有外侧邻居提供方块数据
-    static constexpr int BLOCK_PRELOAD_MARGIN = 1;
+    // 数据加载余量（曾名 BLOCK_PRELOAD_MARGIN）：render + DATA_MARGIN 是"数据相关"半径，
+    // 让 renderRadius 边缘的 chunk 有外侧邻居提供方块数据以缝 mesh 边界。编译期常量
+    // （由 mesh 邻居需求决定，与内存预算无关）。
+    static constexpr int DATA_MARGIN = 1;
 
-    // 卸载半径余量
-    static constexpr int UNLOAD_MARGIN_CHUNKS = 6;
+    // 温存/落盘半径余量（曾名 UNLOAD_MARGIN_CHUNKS）：render + RETAIN_MARGIN 内的 chunk
+    // 离开渲染半径后仍保留在内存（不渲染、不卸载、不落盘），超出才落盘 + 卸载。
+    // 运行时从 RuntimeConfig.retainMarginChunks 读，按内存预算可调。见 m_retainMargin。
 
     // 每帧最多处理多少个 Task 1 / Task 2 结果（分摊多 worker 同时完成的尖峰）
     static constexpr int MAX_BLOCK_INTEGRATE_PER_FRAME = 8;
@@ -183,6 +217,7 @@ private:
     int m_maxUploadsPerFrame = 8;
     int m_maxInflightRequests = 64;
     int m_autoSaveIntervalSec = 60;
+    int m_retainMargin = 6;  // 温存/落盘半径余量（render + 此值），见 RETAIN 注释
 
     // 存档
     ChunkSaveManager* m_saveManager = nullptr;
@@ -195,6 +230,8 @@ private:
     std::unordered_set<ChunkKey> m_blockReadyDirty;
     // 把 m_blockReadyDirty 中的 chunk 序列化落盘（从 box 直接写）。
     void saveDirtyBlockReadyChunks();
+    // 把一个 block-ready chunk 的 16 个 box 序列化进整 chunk buffer（落盘布局），并落盘。
+    void saveBlockReadyChunkToDisk(ChunkKey key, const ChunkBoxes& boxes);
 
     // 网络客户端
     bool m_networkClient = false;
@@ -204,6 +241,9 @@ private:
 
     // 用户发起方块修改的重定向 sink（见 setBlockChangeSink）
     std::function<void(const glm::ivec3&, BlockState)> m_blockChangeSink;
+
+    // chunk 卸载回调（见 setChunkUnloadedCallback）
+    std::function<void(int, int)> m_onChunkUnloaded;
 
     // setBlock 的真正本地实现（绕过 sink，供 sink 内部 / applyBlockChange 调用）
     bool applyLocalSetBlock(const glm::ivec3& worldPos, BlockState state);
@@ -244,9 +284,11 @@ private:
 
     bool isWithinActiveRadius(const glm::ivec2& chunkPos,
         const glm::ivec2& centerChunk) const;
+
+    // 数据相关：chunkPos 是否在任一加载中心的「各自半径 + margin」内。
+    // m_loadCenters 为空时退化为只看 m_currentCenterChunk + m_renderRadius + margin。
+    bool isDataRelevant(const glm::ivec2& chunkPos, int margin) const;
     bool isWithinEvictRadius(const glm::ivec2& chunkPos,
-        const glm::ivec2& centerChunk) const;
-    bool isWithinUnloadRadius(const glm::ivec2& chunkPos,
         const glm::ivec2& centerChunk) const;
 
     void evictFarChunkSlots();

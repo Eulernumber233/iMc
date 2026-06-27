@@ -20,6 +20,11 @@ constexpr uint32_t DEFAULT_MAX_CLIENTS = 32;
 // 默认端口（与 CliManager 命令行/菜单的默认端口保持一致）
 constexpr uint16_t DEFAULT_PORT = 60011;
 
+// 服务端为单个客户端加载/推送时允许的最大渲染半径（夹住异常/恶意上报，防内存爆）
+constexpr int MAX_CLIENT_RENDER_RADIUS = 32;
+// 客户端未上报（=0）时服务端采用的默认半径
+constexpr int DEFAULT_CLIENT_RENDER_RADIUS = 8;
+
 } // namespace NetConstants
 
 // 可靠性级别

@@ -61,10 +61,7 @@ public:
     // ---- 地形同步 ----
 
     // 设置 ChunkManager 引用（需要在 host/join 后调用）
-    void setChunkManager(ChunkManager* cm) {
-        m_chunkManager = cm;
-        m_chunkSync.init(cm, this);
-    }
+    void setChunkManager(ChunkManager* cm);
 
     // 服务端推送 chunk 给指定 peer
     void sendChunkData(ENetPeer* peer, const std::vector<uint8_t>& compressedData);

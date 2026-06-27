@@ -2,6 +2,7 @@
 #include "../mode/SkinManager.h"
 #include "../chunk/ChunkManager.h"
 #include "../chunk/BlockType.h"
+#include "../RuntimeConfig.h"
 #include <cstdio>
 #include <chrono>
 
@@ -84,8 +85,9 @@ bool NetManager::join(const std::string& ip, uint16_t port, const std::string& p
                     printf("[NetManager] transport connected (elapsed=%lldms)\n",
                         duration_cast<milliseconds>(steady_clock::now() - startTime).count());
 
-                    // peer 现在是 CONNECTED 状态，发送 JOIN_REQUEST
-                    auto joinReq = NetMessage::joinRequest(playerName);
+                    // peer 现在是 CONNECTED 状态，发送 JOIN_REQUEST（带本机渲染半径）
+                    uint16_t myRadius = (uint16_t)RuntimeConfig::get().renderRadius;
+                    auto joinReq = NetMessage::joinRequest(playerName, myRadius);
                     std::vector<uint8_t> joinBuf;
                     joinReq.encode(joinBuf);
                     m_transport.sendReliable(serverPeer, joinBuf.data(), joinBuf.size());
@@ -382,6 +384,15 @@ void NetManager::dispatchMessage(ENetPeer* peer, const NetMessage& msg) {
 void NetManager::handleJoinRequest(ENetPeer* peer, MemoryStream& payload) {
     std::string playerName = payload.readString();
 
+    // 读取客户端上报的渲染半径（旧客户端无此字段 → 用默认），并夹上限防内存爆
+    int reportedRadius = NetConstants::DEFAULT_CLIENT_RENDER_RADIUS;
+    if (payload.remaining() >= sizeof(uint16_t)) {
+        uint16_t r = payload.readPod<uint16_t>();
+        if (r > 0) reportedRadius = r;
+    }
+    if (reportedRadius > NetConstants::MAX_CLIENT_RENDER_RADIUS)
+        reportedRadius = NetConstants::MAX_CLIENT_RENDER_RADIUS;
+
     // 分配新玩家 ID
     uint16_t newId = 2;
     while (m_players.count(newId)) ++newId;
@@ -398,6 +409,7 @@ void NetManager::handleJoinRequest(ENetPeer* peer, MemoryStream& payload) {
     player->peer = peer;
     player->playerName = playerName;
     player->skinName = skinName;
+    player->renderRadius = reportedRadius;
     player->netState->setOwner(player.get());
 
     m_objManager.addObject(newId, std::move(player->netState));
@@ -728,6 +740,18 @@ void NetManager::sendChunkRequest(int32_t chunkX, int32_t chunkZ) {
     msg.encode(buf);
     m_transport.sendReliable(m_serverPeer, buf.data(), buf.size());
     m_transport.flush();
+}
+
+void NetManager::setChunkManager(ChunkManager* cm) {
+    m_chunkManager = cm;
+    m_chunkSync.init(cm, this);
+
+    // 服务端：chunk 卸载时清除 per-peer 已推送记录，使玩家再次靠近能重新收到最新数据。
+    if (m_isHost && cm) {
+        cm->setChunkUnloadedCallback([this](int cx, int cz) {
+            m_chunkSync.onChunkUnloaded(cx, cz);
+        });
+    }
 }
 
 // ============================================================================
