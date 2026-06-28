@@ -11,7 +11,10 @@
 #include "../Profiler.h"
 #include "../net/NetManager.h"
 #include "../collision/PhysicsConstants.h"
+#include "../RuntimeConfig.h"
 #include <random>
+#include <cmath>
+#include <vector>
 BlockRenderer::BlockRenderer()
     : VAO(0), VBO(0), EBO(0) {
 
@@ -202,6 +205,9 @@ RenderSystem::RenderSystem(int screenWidth, int screenHeight)
 
 RenderSystem::~RenderSystem() {
     destroyGBuffer();
+    destroyTAATargets();
+    destroyShadowVisTargets();
+    if (m_blueNoiseTex) glDeleteTextures(1, &m_blueNoiseTex);
 
     if (m_screenQuadVAO) glDeleteVertexArrays(1, &m_screenQuadVAO);
     if (m_screenQuadVBO) glDeleteBuffers(1, &m_screenQuadVBO);
@@ -278,7 +284,7 @@ bool RenderSystem::initialize() {
     m_deferredLightingShader.setInt("gAlbedo", 2);
     m_deferredLightingShader.setInt("gProperties", 3);
     m_deferredLightingShader.setInt("ssao", 4);
-    m_deferredLightingShader.setInt("varianceShadowMap", 5);
+    m_deferredLightingShader.setInt("shadowVisibility", 5);
 
     m_modeShader.use();
 
@@ -338,33 +344,29 @@ bool RenderSystem::initialize() {
 
 
 
-    // 配置深度贴图FBO
+    // 配置阴影深度贴图 FBO（阶段 2：退 VSSM → 普通深度 + PCSS/PCF）
+    // 不再存 (d, d²) 的 RG32F 颜色，改用纯深度纹理附件，硬件直接写深度，
+    // FBO 无颜色附件（glDrawBuffer/ReadBuffer = GL_NONE），最省带宽且无每帧 mipmap 生成。
     glGenFramebuffers(1, &m_depthMapFBO);
     glBindFramebuffer(GL_FRAMEBUFFER, m_depthMapFBO);
-    // 创建深度纹理
+
     glGenTextures(1, &m_depthMap);
     glBindTexture(GL_TEXTURE_2D, m_depthMap);
-
-    // 格式：RG32F（R存线性深度m1，G存线性深度²m2），VSSM 需要 mipmap 提供区域均值
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG32F, SHADOW_WIDTH, SHADOW_HEIGHT, 0, GL_RG, GL_FLOAT, NULL);
-    // 启用 mipmap + 三线性过滤，VSSM 的 blocker search 依赖 textureLod
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, SHADOW_WIDTH, SHADOW_HEIGHT,
+        0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+    // 普通深度比较：LINEAR 过滤（consumer 端做手动 PCF，无需 mipmap）
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-    // 边界颜色：m1=1.0 表示最远（完全光照），m2=1.0
+    // 边界深度=1.0（最远），保证阴影框外的 receiver 采到"无遮挡"，不产生假阴影
     float borderColor[] = { 1.0f, 1.0f, 1.0f, 1.0f };
     glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
-    glGenerateMipmap(GL_TEXTURE_2D); // 预生成一次，避免首帧未定义
-    // 将深度纹理附加到FBO的深度附件
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_depthMap, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_depthMap, 0);
 
-    GLuint varianceRBO;
-    glGenRenderbuffers(1, &varianceRBO);
-    glBindRenderbuffer(GL_RENDERBUFFER, varianceRBO);
-    // 深度附件用深度格式（GL_DEPTH_COMPONENT32F）
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT32F, SHADOW_WIDTH, SHADOW_HEIGHT);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, varianceRBO);
+    // 无颜色附件：显式关闭颜色读写
+    glDrawBuffer(GL_NONE);
+    glReadBuffer(GL_NONE);
 
     // 检查阴影FBO是否完整
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
@@ -384,6 +386,27 @@ bool RenderSystem::initialize() {
         std::cerr << "Failed to create composite FBO!" << std::endl;
         return false;
     }
+
+    // 创建 TAA 历史缓冲
+    if (!createTAATargets()) {
+        std::cerr << "Failed to create TAA targets!" << std::endl;
+        return false;
+    }
+
+    // 程序生成蓝噪声纹理（阴影 PCSS 抖动源）
+    createBlueNoiseTexture();
+
+    // 创建阴影可见度 + 时域累积缓冲
+    if (!createShadowVisTargets()) {
+        std::cerr << "Failed to create shadow visibility targets!" << std::endl;
+        return false;
+    }
+    // TAA shader 纹理单元绑定（固定）
+    m_taaShader.use();
+    m_taaShader.setInt("currColor", 0);
+    m_taaShader.setInt("history", 1);
+    m_taaShader.setInt("depthTex", 2);
+    m_taaShader.setVec2("screenSize", glm::vec2(m_screenWidth, m_screenHeight));
 
     return true;
 }
@@ -663,6 +686,219 @@ void RenderSystem::destroyCompositeFBO() {
     m_compositeDepth = 0;
 }
 
+// TAA 历史 ping-pong：两张 RGBA16F 全屏纹理 + 各自 FBO。
+bool RenderSystem::createTAATargets() {
+    for (int i = 0; i < 2; ++i) {
+        glGenFramebuffers(1, &m_taaFBO[i]);
+        glBindFramebuffer(GL_FRAMEBUFFER, m_taaFBO[i]);
+
+        glGenTextures(1, &m_taaHistory[i]);
+        glBindTexture(GL_TEXTURE_2D, m_taaHistory[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, m_screenWidth, m_screenHeight,
+            0, GL_RGBA, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_taaHistory[i], 0);
+
+        GLuint attachments[1] = { GL_COLOR_ATTACHMENT0 };
+        glDrawBuffers(1, attachments);
+
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            std::cerr << "TAA FBO " << i << " not complete!" << std::endl;
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            return false;
+        }
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    m_taaHistoryValid = false;
+    return true;
+}
+
+void RenderSystem::destroyTAATargets() {
+    for (int i = 0; i < 2; ++i) {
+        if (m_taaFBO[i]) glDeleteFramebuffers(1, &m_taaFBO[i]);
+        if (m_taaHistory[i]) glDeleteTextures(1, &m_taaHistory[i]);
+        m_taaFBO[i] = 0;
+        m_taaHistory[i] = 0;
+    }
+    m_taaHistoryValid = false;
+}
+
+// 阴影可见度（单帧）+ 时域累积 ping-pong 缓冲。全部 R8 单通道（可见度 [0,1]）。
+bool RenderSystem::createShadowVisTargets() {
+    // 当前帧单帧可见度
+    glGenFramebuffers(1, &m_shadowVisFBO);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_shadowVisFBO);
+    glGenTextures(1, &m_shadowVisCurr);
+    glBindTexture(GL_TEXTURE_2D, m_shadowVisCurr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, m_screenWidth, m_screenHeight, 0, GL_RED, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_shadowVisCurr, 0);
+    { GLuint a[1] = { GL_COLOR_ATTACHMENT0 }; glDrawBuffers(1, a); }
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        std::cerr << "Shadow visibility FBO not complete!" << std::endl;
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        return false;
+    }
+
+    // 累积 ping-pong
+    for (int i = 0; i < 2; ++i) {
+        glGenFramebuffers(1, &m_shadowAccumFBO[i]);
+        glBindFramebuffer(GL_FRAMEBUFFER, m_shadowAccumFBO[i]);
+        glGenTextures(1, &m_shadowAccum[i]);
+        glBindTexture(GL_TEXTURE_2D, m_shadowAccum[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, m_screenWidth, m_screenHeight, 0, GL_RED, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_shadowAccum[i], 0);
+        GLuint a[1] = { GL_COLOR_ATTACHMENT0 }; glDrawBuffers(1, a);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            std::cerr << "Shadow accum FBO " << i << " not complete!" << std::endl;
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            return false;
+        }
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    m_shadowAccumValid = false;
+    return true;
+}
+
+void RenderSystem::destroyShadowVisTargets() {
+    if (m_shadowVisFBO) glDeleteFramebuffers(1, &m_shadowVisFBO);
+    if (m_shadowVisCurr) glDeleteTextures(1, &m_shadowVisCurr);
+    m_shadowVisFBO = 0; m_shadowVisCurr = 0;
+    for (int i = 0; i < 2; ++i) {
+        if (m_shadowAccumFBO[i]) glDeleteFramebuffers(1, &m_shadowAccumFBO[i]);
+        if (m_shadowAccum[i]) glDeleteTextures(1, &m_shadowAccum[i]);
+        m_shadowAccumFBO[i] = 0; m_shadowAccum[i] = 0;
+    }
+    m_shadowAccumValid = false;
+}
+
+// 程序生成 tileable 蓝噪声纹理（void-and-cluster 算法，Ulichney 1993）。
+// 输出每像素一个 [0,1] 的 rank/256，能量谱呈高频（蓝噪声）。供阴影 PCSS 抖动用：
+// 配合"帧序号驱动的黄金角旋转"，让每帧采样方向去相关，TAA 跨帧累积成干净结果。
+void RenderSystem::createBlueNoiseTexture() {
+    const int N = m_blueNoiseSize;       // 64
+    const int total = N * N;
+    const float sigma = 1.9f;            // 高斯能量核标准差
+    const float twoSigma2 = 2.0f * sigma * sigma;
+
+    // 预计算环形（toroidal）距离的高斯权重 LUT，半径取 ~3σ
+    const int R = 6;
+    std::vector<float> gauss((2 * R + 1) * (2 * R + 1));
+    for (int dy = -R; dy <= R; ++dy)
+        for (int dx = -R; dx <= R; ++dx)
+            gauss[(dy + R) * (2 * R + 1) + (dx + R)] =
+                std::exp(-float(dx * dx + dy * dy) / twoSigma2);
+
+    std::vector<float> energy(total, 0.0f);     // 当前能量场
+    std::vector<unsigned char> binary(total, 0); // 当前二值图（1=有点）
+    std::vector<int> rank(total, 0);
+
+    auto idx = [N](int x, int y) {
+        x = (x % N + N) % N;  y = (y % N + N) % N;
+        return y * N + x;
+    };
+    // 在 (px,py) 处增/删一个点，环形地更新能量场
+    auto splat = [&](int px, int py, float sign) {
+        for (int dy = -R; dy <= R; ++dy)
+            for (int dx = -R; dx <= R; ++dx)
+                energy[idx(px + dx, py + dy)] += sign * gauss[(dy + R) * (2 * R + 1) + (dx + R)];
+    };
+
+    std::default_random_engine rng(12345u);
+    std::uniform_int_distribution<int> pick(0, total - 1);
+
+    // 初始：随机撒约 1/10 的点作为初始二值图
+    const int initialPoints = total / 10;
+    int placed = 0;
+    while (placed < initialPoints) {
+        int p = pick(rng);
+        if (!binary[p]) { binary[p] = 1; splat(p % N, p / N, +1.0f); ++placed; }
+    }
+
+    // 阶段 1：反复把"最紧簇"的点移到"最大空洞"，直到稳定（去相关初始分布）
+    for (int iter = 0; iter < total * 4; ++iter) {
+        // 最紧簇：二值=1 中能量最大者
+        int tight = -1; float emax = -1e30f;
+        for (int i = 0; i < total; ++i)
+            if (binary[i] && energy[i] > emax) { emax = energy[i]; tight = i; }
+        binary[tight] = 0; splat(tight % N, tight / N, -1.0f);
+        // 最大空洞：二值=0 中能量最小者
+        int vd = -1; float emin = 1e30f;
+        for (int i = 0; i < total; ++i)
+            if (!binary[i] && energy[i] < emin) { emin = energy[i]; vd = i; }
+        binary[vd] = 1; splat(vd % N, vd / N, +1.0f);
+        if (vd == tight) break; // 稳定
+    }
+
+    // 阶段 2：保存初始二值图副本，给前 initialPoints 个点逆向赋 rank
+    std::vector<unsigned char> initialBinary = binary;
+    std::vector<float> energyCopy = energy;
+    int rankCounter = initialPoints - 1;
+    for (int k = 0; k < initialPoints; ++k) {
+        int tight = -1; float emax = -1e30f;
+        for (int i = 0; i < total; ++i)
+            if (binary[i] && energy[i] > emax) { emax = energy[i]; tight = i; }
+        rank[tight] = rankCounter--;
+        binary[tight] = 0; splat(tight % N, tight / N, -1.0f);
+    }
+
+    // 阶段 3：从初始二值图开始，逐个填最大空洞，递增赋 rank
+    binary = initialBinary;
+    energy = energyCopy;
+    for (int k = initialPoints; k < total; ++k) {
+        int vd = -1; float emin = 1e30f;
+        for (int i = 0; i < total; ++i)
+            if (!binary[i] && energy[i] < emin) { emin = energy[i]; vd = i; }
+        rank[vd] = k;
+        binary[vd] = 1; splat(vd % N, vd / N, +1.0f);
+    }
+
+    // rank → [0,1]，写成单通道 8-bit 纹理
+    std::vector<unsigned char> pixels(total);
+    for (int i = 0; i < total; ++i)
+        pixels[i] = (unsigned char)((rank[i] * 255) / (total - 1));
+
+    glGenTextures(1, &m_blueNoiseTex);
+    glBindTexture(GL_TEXTURE_2D, m_blueNoiseTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, N, N, 0, GL_RED, GL_UNSIGNED_BYTE, pixels.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+// Halton 低差异序列：base 进制的 radical inverse
+static float haltonRadicalInverse(unsigned i, unsigned base) {
+    float f = 1.0f, r = 0.0f;
+    while (i > 0) {
+        f /= (float)base;
+        r += f * (float)(i % base);
+        i /= base;
+    }
+    return r;
+}
+
+// Halton(2,3) 亚像素抖动，返回 NDC 单位的偏移。序列长度 8，按帧序号循环。
+glm::vec2 RenderSystem::haltonJitterNDC(unsigned frameIndex, int w, int h) {
+    const unsigned kSeqLen = 8;
+    unsigned idx = (frameIndex % kSeqLen) + 1;   // Halton 从 1 开始（0 给 0）
+    float jx = haltonRadicalInverse(idx, 2) - 0.5f;   // 像素单位 [-0.5, 0.5]
+    float jy = haltonRadicalInverse(idx, 3) - 0.5f;
+    // 像素 → NDC：一个像素跨度 = 2/分辨率
+    return glm::vec2(jx * 2.0f / (float)w, jy * 2.0f / (float)h);
+}
+
 void RenderSystem::createScreenQuad() {
     float quadVertices[] = {
         -1.0f,  1.0f,  0.0f, 1.0f,
@@ -698,17 +934,12 @@ void RenderSystem::render(const ChunkManager& chunkManager,
     Player* player,
     NetManager* netManager
 ) {
-      //glBindFramebuffer(GL_FRAMEBUFFER, 0);
-      //glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-      //glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-      //renderModel(camera);
-      //return;
 
     PROFILE_SCOPE("RenderSystem::render");
     m_currentTime += deltaTime;
 
     // 更新光源位置（含日出/日落平滑过渡强度 m_sunIntensity）
-    //move_DirLight(deltaTime);
+    move_DirLight(deltaTime);
 
     // 粒子系统按 active chunk 范围限制采样
     {
@@ -717,11 +948,24 @@ void RenderSystem::render(const ChunkManager& chunkManager,
         m_particleManager.update(deltaTime, camera, activeChunkPositions);
     }
 
-    // 几何通道：渲染方块到 G-Buffer
-    { PROFILE_SCOPE("geometryPass"); geometryPass(chunkManager, view, projection); }
+    // ---- TAA：投影矩阵亚像素抖动 ----
+    // jitteredProj 用于所有写入当前帧颜色/深度的几何（G-Buffer + forward），
+    // 让每帧采样落在像素内不同位置，多帧累积等效超采样。
+    // projection（未抖动）保留给 SSAO（AO 不应吃几何 jitter）与 motion vector 反算。
+    glm::mat4 jitteredProj = projection;
+    if (m_taaEnabled) {
+        glm::vec2 jitterNDC = haltonJitterNDC(m_frameIndex, m_screenWidth, m_screenHeight);
+        jitteredProj[2][0] += jitterNDC.x;   // 列主序 m[col][row]，平移作用于裁剪空间 xy
+        jitteredProj[2][1] += jitterNDC.y;
+    }
+    const glm::mat4& geoProj = m_taaEnabled ? jitteredProj : projection;
 
-    // SSAO 通道
-    { PROFILE_SCOPE("ssaoPass"); ssaoPass(view, projection); }
+    // 几何通道：渲染方块到 G-Buffer（抖动投影）
+    { PROFILE_SCOPE("geometryPass"); geometryPass(chunkManager, view, geoProj); }
+
+    // SSAO 通道：位置重建/投影必须用与深度一致的 geoProj（深度由 geoProj 写入）。
+    // jitter 是全屏统一的亚像素平移，不会给 AO 引入偏置；AO 的时域噪声由 TAA 降噪。
+    { PROFILE_SCOPE("ssaoPass"); ssaoPass(view, geoProj); }
     { PROFILE_SCOPE("ssaoBlurPass"); ssaoBlurPass(); }
 
     // 阴影映射
@@ -732,8 +976,24 @@ void RenderSystem::render(const ChunkManager& chunkManager,
         sunShineShadowMap(chunkManager, camera, sunShine_near, sunShine_far, lightSpaceMatrix);
     }
 
-    // 4. 光照通道：计算结果到 lightingFBO
-    { PROFILE_SCOPE("lightingPass"); lightingPass(camera, view, projection, sunShine_near, sunShine_far, lightSpaceMatrix); }
+    // 3.5 阴影可见度（单帧 PCSS）+ 时域累积。
+    //     - 可见度 pass 用 geoProj 重建世界位置（与写入 m_depthTexture 的投影一致）。
+    //     - 累积 pass 的 motion vector 用未抖动 viewProj（与 TAA 同一套），prevViewProj
+    //       是上一帧未抖动 viewProj。光源旋转导致的逐 shadow-texel 翻转在此被跨帧平滑。
+    {
+        PROFILE_SCOPE("shadowVisibilityPass");
+        shadowVisibilityPass(view, geoProj, lightSpaceMatrix);
+    }
+    {
+        PROFILE_SCOPE("shadowAccumulatePass");
+        // 与 TAA 同一套：未抖动 viewProj 的逆做 motion vector（jitter < 1px，误差可忽略）
+        glm::mat4 invViewProj = glm::inverse(projection * view);
+        shadowAccumulatePass(invViewProj, m_prevViewProj);
+    }
+
+    // 4. 光照通道：计算结果到 lightingFBO（读取累积后的阴影可见度）
+    //    深度由 geoProj（抖动）写入，故位置重建必须用同一 geoProj 的逆，否则世界坐标有偏移
+    { PROFILE_SCOPE("lightingPass"); lightingPass(camera, view, geoProj, sunShine_near, sunShine_far, lightSpaceMatrix); }
 
     // 5. 将光照颜色复制到合成 FBO
     //    深度无需 blit：compositeFBO 直接共享 G-Buffer 的深度纹理
@@ -752,40 +1012,68 @@ void RenderSystem::render(const ChunkManager& chunkManager,
 
 
     // 6.1 渲染模型（不透明，写入深度）
-    // 必须传入与 G-Buffer 一致的 view/projection，否则模型与场景投影不匹配
-    // （Camera::GetProjectionMatrix() 的 AspectRatio 可能与窗口实际比例不同）
-    renderModel(camera, view, projection, player);  // 内部已开启深度测试和深度写入
+    // 用 geoProj（与 G-Buffer 一致的抖动投影），否则模型与场景投影不匹配
+    renderModel(camera, view, geoProj, player);  // 内部已开启深度测试和深度写入
     //renderModel_test(camera, view, projection);
 
     // 远程玩家模型
     if (netManager) {
         PROFILE_SCOPE("render.remotePlayers");
-        renderRemotePlayers(netManager, view, projection, camera);
+        renderRemotePlayers(netManager, view, geoProj, camera);
     }
 
     // 6.2 渲染粒子（半透明，深度测试开启，深度写入关闭）
     // 确保粒子系统内部已设置 glDepthMask(GL_FALSE)
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    m_particleManager.render(view, projection);
+    m_particleManager.render(view, geoProj);
     glDisable(GL_BLEND);
 
-    //// 6.3 渲染边框（根据配置，通常关闭深度测试）
+    //// 6.3 渲染边框（3D 几何，吃 jitter 才与场景对齐）
     if (m_hasSelectedBlock) {
-        renderOutlines(view, projection);
+        renderOutlines(view, geoProj);
     }
 
-    //// 6.4 渲染 UI（深度测试关闭）
+    // 7. TAA resolve：对当前帧合成色（含场景+模型+粒子+选中框，不含 UI）做时域累积。
+    //    结果写入 m_taaHistory[m_taaCurrIdx]，既是显示源也是下一帧的历史。
+    glm::mat4 currViewProj = projection * view;          // 未抖动，用于 motion vector
+    if (m_taaEnabled) {
+        glm::mat4 invViewProj = glm::inverse(currViewProj);
+        { PROFILE_SCOPE("taaResolvePass"); taaResolvePass(invViewProj, m_prevViewProj); }
+
+        // 8. 把 TAA 结果复制到默认帧缓冲
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, m_taaFBO[m_taaCurrIdx]);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+        glBlitFramebuffer(0, 0, m_screenWidth, m_screenHeight,
+            0, 0, m_screenWidth, m_screenHeight,
+            GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    } else {
+        // TAA 关闭：直接把合成色上屏
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, m_compositeFBO);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+        glBlitFramebuffer(0, 0, m_screenWidth, m_screenHeight,
+            0, 0, m_screenWidth, m_screenHeight,
+            GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    }
+
+    // 9. UI 在 TAA 之后、直接画到默认帧缓冲——绝不让准星/物品栏被时域累积模糊或拖影
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, m_screenWidth, m_screenHeight);
     glDisable(GL_DEPTH_TEST);
     renderUI();
-    glEnable(GL_DEPTH_TEST); // 恢复，以备后用
+    glEnable(GL_DEPTH_TEST);
 
-    // 7. 将合成 FBO 的颜色复制到默认帧缓冲
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, m_compositeFBO);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-    glBlitFramebuffer(0, 0, m_screenWidth, m_screenHeight,
-        0, 0, m_screenWidth, m_screenHeight,
-        GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    // 10. 帧末更新 TAA 时域状态
+    m_prevViewProj   = currViewProj;     // 下一帧 motion vector 用本帧未抖动 viewProj
+    m_taaHistoryValid = true;            // 本帧已写入历史，下一帧可用
+    m_taaCurrIdx     ^= 1;               // ping-pong 翻转
+
+    // 阴影时域累积状态：本帧累积已写入 m_shadowAccum[curr]（lightingPass 已读取），
+    // 翻转后下一帧把它当历史。先标 valid 再翻转。
+    m_shadowAccumValid   = true;
+    m_shadowAccumCurrIdx ^= 1;
+
+    m_frameIndex++;
 
     // 解绑
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -868,6 +1156,38 @@ void RenderSystem::ssaoBlurPass()
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+// TAA resolve：把当前帧合成色（m_compositeColor）与历史累积混合，结果写入
+// m_taaHistory[m_taaCurrIdx]（既作本帧显示源，也作下一帧的历史）。
+void RenderSystem::taaResolvePass(const glm::mat4& invViewProj, const glm::mat4& prevViewProj)
+{
+    GLuint dst = m_taaHistory[m_taaCurrIdx];
+    GLuint src = m_taaHistory[1 - m_taaCurrIdx];   // 上一帧历史
+
+    glBindFramebuffer(GL_FRAMEBUFFER, m_taaFBO[m_taaCurrIdx]);
+    glViewport(0, 0, m_screenWidth, m_screenHeight);
+    glDisable(GL_DEPTH_TEST);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    m_taaShader.use();
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_compositeColor);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, src);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, m_depthTexture);
+
+    m_taaShader.setMat4("invViewProj", invViewProj);
+    m_taaShader.setMat4("prevViewProj", prevViewProj);
+    m_taaShader.setVec2("screenSize", glm::vec2(m_screenWidth, m_screenHeight));
+    // 历史无效（首帧 / resize 后）时强制纯当前帧
+    m_taaShader.setInt("frameIndex", m_taaHistoryValid ? (int)m_frameIndex : 0);
+
+    RenderQuad();
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    (void)dst;
+}
+
 void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std::shared_ptr<Camera>camera
     , float& sunShine_near, float& sunShine_far, glm::mat4& lightSpaceMatrix)
 {
@@ -895,10 +1215,11 @@ void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std
     {
         const float worldUnitsPerTexel = (2.0f * radius) / float(SHADOW_WIDTH);
         glm::vec4 centerLS = lightView * glm::vec4(center, 1.0f);
+        // 阶段 2：snap Z 也对齐到纹素整数倍，减少光源/相机移动时深度方向的量化跳变
         glm::vec3 snappedLS = glm::vec3(
             std::floor(centerLS.x / worldUnitsPerTexel) * worldUnitsPerTexel,
             std::floor(centerLS.y / worldUnitsPerTexel) * worldUnitsPerTexel,
-            centerLS.z
+            std::floor(centerLS.z / worldUnitsPerTexel) * worldUnitsPerTexel
         );
         // 把 snappedLS 变回世界空间，作为新的 center
         glm::mat4 invLightView = glm::inverse(lightView);
@@ -925,12 +1246,10 @@ void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std
     lightSpaceMatrix = lightProjection * lightView;
 
 
-    // 渲染场景到深度贴图
+    // 渲染场景到深度贴图（仅深度，无颜色附件）
     glViewport(0, 0, SHADOW_WIDTH, SHADOW_HEIGHT);
     glBindFramebuffer(GL_FRAMEBUFFER, m_depthMapFBO);
-    // 清除为“最远”深度（m1=1, m2=1），保证未被写入区域不会产生假阴影
-    glClearColor(1.0f, 1.0f, 0.0f, 0.0f);
-    glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
+    glClear(GL_DEPTH_BUFFER_BIT);
     glCullFace(GL_BACK);
     m_blockRenderer.bindArenaVBO(chunkManager.getArenaVBO());
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, chunkManager.getSectionBaseSSBO());
@@ -943,17 +1262,88 @@ void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, m_screenWidth, m_screenHeight);
 
-
-    // VSSM 的 blocker search 需要 mipmap 提供区域均值，必须每帧重生成
-    glBindTexture(GL_TEXTURE_2D, m_depthMap);
-    glGenerateMipmap(GL_TEXTURE_2D);
-    glBindTexture(GL_TEXTURE_2D, 0);
+    // 阶段 2：普通深度 + 手动 PCF，不再需要每帧 glGenerateMipmap（省一笔开销）
 
     // 缓存当前阴影矩阵，供夜晚冻结使用
     m_cachedLightSpaceMatrix = lightSpaceMatrix;
     m_cachedSunNear = sunShine_near;
     m_cachedSunFar  = sunShine_far;
     m_hasCachedLightMatrix = true;
+}
+
+// 单帧 PCSS 可见度 → m_shadowVisCurr（R8，1=受光，0=阴影）。蓝噪声 + 帧序号抖动，
+// 单帧噪声大，由 shadowAccumulatePass 跨帧累积降噪。
+void RenderSystem::shadowVisibilityPass(const glm::mat4& view, const glm::mat4& projection,
+    const glm::mat4& lightSpaceMatrix)
+{
+    glBindFramebuffer(GL_FRAMEBUFFER, m_shadowVisFBO);
+    glViewport(0, 0, m_screenWidth, m_screenHeight);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_DEPTH_TEST);
+
+    m_shadowVisShader.use();
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_depthTexture);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, m_gNormal);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, m_depthMap);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, m_blueNoiseTex);
+
+    m_shadowVisShader.setInt("gDepth", 0);
+    m_shadowVisShader.setInt("gNormal", 1);
+    m_shadowVisShader.setInt("shadowMap", 2);
+    m_shadowVisShader.setInt("blueNoiseTex", 3);
+
+    m_shadowVisShader.setMat4("invProjection", glm::inverse(projection));
+    m_shadowVisShader.setMat4("invView", glm::inverse(view));
+    m_shadowVisShader.setMat4("lightSpaceMatrix", lightSpaceMatrix);
+    m_shadowVisShader.setVec3("sunShineDir", lightDir);
+    m_shadowVisShader.setFloat("sunShineIntensity", m_sunIntensity);
+
+    const RuntimeConfig& rc = RuntimeConfig::get();
+    m_shadowVisShader.setInt("blueNoiseSize", m_blueNoiseSize);
+    m_shadowVisShader.setInt("frameIndex", (int)m_frameIndex);
+    m_shadowVisShader.setInt("uBlockerSamples", rc.shadowBlockerSamples);
+    m_shadowVisShader.setInt("uFilterSamples", rc.shadowFilterSamples);
+    m_shadowVisShader.setFloat("uLightSizeUV", rc.shadowLightSize);
+
+    RenderQuad();
+    glEnable(GL_DEPTH_TEST);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+// 阴影时域累积：重投影上一帧累积 + 邻域 clamp + 混合 → m_shadowAccum[curr]。
+void RenderSystem::shadowAccumulatePass(const glm::mat4& invViewProj, const glm::mat4& prevViewProj)
+{
+    int curr = m_shadowAccumCurrIdx;
+    int prev = 1 - curr;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, m_shadowAccumFBO[curr]);
+    glViewport(0, 0, m_screenWidth, m_screenHeight);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_DEPTH_TEST);
+
+    m_shadowAccumShader.use();
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_shadowVisCurr);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, m_shadowAccum[prev]);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, m_depthTexture);
+
+    m_shadowAccumShader.setInt("shadowVisCurr", 0);
+    m_shadowAccumShader.setInt("shadowVisHist", 1);
+    m_shadowAccumShader.setInt("depthTex", 2);
+    m_shadowAccumShader.setMat4("invViewProj", invViewProj);
+    m_shadowAccumShader.setMat4("prevViewProj", prevViewProj);
+    m_shadowAccumShader.setVec2("screenSize", glm::vec2(m_screenWidth, m_screenHeight));
+    m_shadowAccumShader.setInt("frameIndex", m_shadowAccumValid ? (int)m_frameIndex : 0);
+
+    RenderQuad();
+    glEnable(GL_DEPTH_TEST);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 
@@ -981,7 +1371,7 @@ void RenderSystem::lightingPass(const std::shared_ptr<Camera>camera
     glActiveTexture(GL_TEXTURE4);
     glBindTexture(GL_TEXTURE_2D, m_ssaoColorBufferBlur);
     glActiveTexture(GL_TEXTURE5);
-    glBindTexture(GL_TEXTURE_2D, m_depthMap);
+    glBindTexture(GL_TEXTURE_2D, m_shadowAccum[m_shadowAccumCurrIdx]); // 时域累积后的阴影可见度
 
     // 从深度重建位置所需的逆矩阵
     m_deferredLightingShader.setMat4("invProjection", glm::inverse(projection));
@@ -1001,11 +1391,6 @@ void RenderSystem::lightingPass(const std::shared_ptr<Camera>camera
     // 乘以基础强度 0.8 作为功率
     m_deferredLightingShader.setVec3("sunShineDiffuse", m_sunDiffuseColor * 0.8f);
     m_deferredLightingShader.setFloat("sunShineIntensity", m_sunIntensity);
-    m_deferredLightingShader.setFloat("sunShineSize", 5.0f);
-    m_deferredLightingShader.setInt("SHADOW_WIDTH", SHADOW_WIDTH);
-    m_deferredLightingShader.setFloat("sunShineFar", sunShine_far);
-    m_deferredLightingShader.setFloat("sunShineNear", sunShine_near);
-    m_deferredLightingShader.setMat4("lightSpaceMatrix", lightSpaceMatrix);
 
     RenderQuad();
 

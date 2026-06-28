@@ -83,6 +83,9 @@ void RuntimeConfig::loadFrom(const std::string& path) {
     if (root.isMember("auto_save_interval_sec")) autoSaveIntervalSec = root["auto_save_interval_sec"].asInt();
     if (root.isMember("retain_margin_chunks")) retainMarginChunks = root["retain_margin_chunks"].asInt();
     if (root.isMember("anisotropy")) anisotropy = (float)root["anisotropy"].asDouble();
+    if (root.isMember("shadow_blocker_samples")) shadowBlockerSamples = root["shadow_blocker_samples"].asInt();
+    if (root.isMember("shadow_filter_samples")) shadowFilterSamples = root["shadow_filter_samples"].asInt();
+    if (root.isMember("shadow_light_size")) shadowLightSize = (float)root["shadow_light_size"].asDouble();
 
     std::cout << "[RuntimeConfig] loaded from " << path
               << " | render_radius=" << renderRadius

@@ -34,6 +34,12 @@ public:
     // 存档：自动保存间隔（秒）。设为 0 禁用定时自动保存（区块卸载时仍会保存）
     int autoSaveIntervalSec = 60;
 
+    // ---- 阴影（阶段 2：PCSS/PCF + 蓝噪声 + TAA 降噪）----
+    // 单帧故意少样本（噪声大但便宜），靠 TAA 跨帧累积变干净。调参不必重编。
+    int   shadowBlockerSamples = 8;     // blocker search 抽样数（估遮挡物平均深度）
+    int   shadowFilterSamples  = 8;     // PCF filter 抽样数（半影内可见度平均）
+    float shadowLightSize      = 0.008f;// 光源"大小"（阴影贴图 UV），决定半影强度
+
     // 温存/落盘半径余量：chunk 离开渲染半径后，在 renderRadius + retainMarginChunks 内
     // 仍保留在内存（不渲染、不卸载、不落盘），形成"温存区"吸收边界抖动；
     // 超出此半径才真正落盘 + 卸载。调大 = 更省磁盘 IO/地形重生成，但占更多内存。

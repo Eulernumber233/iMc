@@ -334,6 +334,8 @@
     <None Include="shader\particle.frag" />
     <None Include="shader\particle.comp" />
     <None Include="assert\runtime_config.json" />
+    <None Include="shader\taa_resolve.vert" />
+    <None Include="shader\taa_resolve.frag" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="assert\textures\block\birch_log.png">

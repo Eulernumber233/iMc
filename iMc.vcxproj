@@ -250,6 +250,8 @@
     <None Include="shader\ssao.vert" />
     <None Include="shader\ssao_blur.frag" />
     <None Include="shader\ssao_blur.vert" />
+    <None Include="shader\taa_resolve.frag" />
+    <None Include="shader\taa_resolve.vert" />
     <None Include="shader\ui.frag" />
     <None Include="shader\ui.vert" />
   </ItemGroup>

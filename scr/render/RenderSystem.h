@@ -124,7 +124,21 @@ private:
 
     // 阴影
     GLuint m_depthMapFBO;
-    GLuint m_depthMap;                        // 阴影深度图
+    GLuint m_depthMap;                        // 阴影深度图（DEPTH_COMPONENT32F，普通深度，阶段 2）
+
+    // 蓝噪声纹理：阴影 PCSS 的 blocker/filter 抖动源（配合帧序号时域去相关 + TAA 降噪）。
+    // 程序生成的 tileable 64² 蓝噪声（void-and-cluster 近似），R 通道存 [0,1] 值。
+    GLuint m_blueNoiseTex = 0;
+    int    m_blueNoiseSize = 64;
+
+    // ---- 阴影时域累积 ----
+    // 单帧 PCSS 可见度（噪声大）→ 跨帧累积成干净结果，专治光源旋转时阴影边缘逐格波动。
+    GLuint m_shadowVisFBO   = 0;
+    GLuint m_shadowVisCurr  = 0;            // 当前帧单帧可见度（R8）
+    GLuint m_shadowAccumFBO[2] = { 0, 0 };
+    GLuint m_shadowAccum[2]    = { 0, 0 };  // 累积可见度 ping-pong
+    int    m_shadowAccumCurrIdx = 0;
+    bool   m_shadowAccumValid   = false;
 
     // 光照FBO（延迟光照结果）
     GLuint m_lightingFBO;
@@ -134,6 +148,18 @@ private:
     GLuint m_compositeFBO;
     GLuint m_compositeColor;                  // 最终颜色纹理
     GLuint m_compositeDepth;                   // 最终深度纹理
+
+    // ---- TAA（时域抗锯齿）----
+    // 历史帧 ping-pong：当前帧 resolve 写入 m_taaHistory[m_taaCurrIdx]，
+    // 读取 m_taaHistory[1-m_taaCurrIdx] 作为上一帧累积结果。
+    GLuint m_taaFBO[2]     = { 0, 0 };
+    GLuint m_taaHistory[2] = { 0, 0 };
+    int    m_taaCurrIdx    = 0;
+    unsigned m_frameIndex  = 0;
+    bool   m_taaHistoryValid = false;
+    bool   m_taaEnabled    = true;
+    // 上一帧的未抖动 viewProj，用于 motion vector 重投影（体素世界静态几何，仅相机动）
+    glm::mat4 m_prevViewProj = glm::mat4(1.0f);
 
     // 光源参数
     glm::vec3 lightPos = { -100.0f, 100.0f, -50.0f };
@@ -199,6 +225,19 @@ private:
         { GL_VERTEX_SHADER,   "shader/mode.vert" },
         { GL_FRAGMENT_SHADER, "shader/mode.frag" }
     } };
+    Shader m_taaShader{ {
+        { GL_VERTEX_SHADER,   "shader/taa_resolve.vert" },
+        { GL_FRAGMENT_SHADER, "shader/taa_resolve.frag" }
+    } };
+    // 阴影可见度（单帧 PCSS）与时域累积（复用延迟光照的全屏 quad 顶点着色器）
+    Shader m_shadowVisShader{ {
+        { GL_VERTEX_SHADER,   "shader/deferred_lighting.vert" },
+        { GL_FRAGMENT_SHADER, "shader/shadow_visibility.frag" }
+    } };
+    Shader m_shadowAccumShader{ {
+        { GL_VERTEX_SHADER,   "shader/deferred_lighting.vert" },
+        { GL_FRAGMENT_SHADER, "shader/shadow_accumulate.frag" }
+    } };
 
     // 模型
     Model spyglass{ "assert/mode/spyglass_in_hand_obj/spyglass_in_hand.obj" };
@@ -236,6 +275,15 @@ private:
     bool createLightingFBO();          // 新增：创建光照FBO
     bool createCompositeFBO();         // 新增：创建合成FBO
     void destroyCompositeFBO();        // 新增：销毁合成FBO
+    bool createTAATargets();           // TAA 历史 ping-pong 缓冲
+    void destroyTAATargets();
+    void createBlueNoiseTexture();     // 程序生成蓝噪声纹理（阴影抖动源）
+    bool createShadowVisTargets();     // 阴影可见度 + 时域累积 ping-pong 缓冲
+    void destroyShadowVisTargets();
+    // TAA resolve：当前帧合成色 + 历史 → 时域累积，结果写入并显示
+    void taaResolvePass(const glm::mat4& invViewProj, const glm::mat4& prevViewProj);
+    // Halton(2,3) 亚像素抖动偏移（NDC 单位），按帧序号循环
+    static glm::vec2 haltonJitterNDC(unsigned frameIndex, int w, int h);
 
     void RenderQuad();
     void geometryPass(const ChunkManager& chunkManager,
@@ -245,6 +293,11 @@ private:
     void ssaoBlurPass();
     void sunShineShadowMap(const ChunkManager& chunkManager, const std::shared_ptr<Camera>camera,
         float& sunShine_near, float& sunShine_far, glm::mat4& lightSpaceMatrix);
+    // 单帧 PCSS 可见度 → m_shadowVisCurr
+    void shadowVisibilityPass(const glm::mat4& view, const glm::mat4& projection,
+        const glm::mat4& lightSpaceMatrix);
+    // 时域累积：重投影历史 + 邻域 clamp + 混合 → m_shadowAccum[curr]
+    void shadowAccumulatePass(const glm::mat4& invViewProj, const glm::mat4& prevViewProj);
     void lightingPass(const std::shared_ptr<Camera>camera,
         const glm::mat4& view, const glm::mat4& projection,
         float sunShine_near, float sunShine_far, glm::mat4& lightSpaceMatrix);
