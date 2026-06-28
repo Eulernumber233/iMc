@@ -84,6 +84,9 @@
     <ClCompile Include="scr\net\NetChunkSync.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="scr\net\NetSerializeWorker.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="scr\net\NetManager.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
@@ -213,6 +216,9 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="scr\net\NetChunkSync.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\net\NetSerializeWorker.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="scr\net\NetCommon.h">

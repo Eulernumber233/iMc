@@ -1,7 +1,10 @@
 ﻿#include "NetTransport.h"
 #include <cstdio>
+#include <cstring>
+#include <chrono>
 
 NetTransport::~NetTransport() {
+    stopNetThread();
     if (m_host) {
         destroyHost();
     }
@@ -21,6 +24,8 @@ bool NetTransport::init() {
 }
 
 void NetTransport::shutdown() {
+    // 必须先停网络线程，再销毁 host / deinitialize
+    stopNetThread();
     if (m_host) {
         destroyHost();
     }
@@ -124,12 +129,92 @@ void NetTransport::disconnectAll() {
     }
 }
 
-void NetTransport::poll(std::vector<NetEvent>& outEvents, uint32_t timeoutMs) {
+// ============================================================================
+// 网络线程
+// ============================================================================
+
+void NetTransport::startNetThread() {
+    if (m_threadRunning.load()) return;
+    if (!m_host) {
+        fprintf(stderr, "[NetTransport] startNetThread: no host\n");
+        return;
+    }
+    m_threadStop.store(false);
+    m_threadRunning.store(true);
+    m_netThread = std::thread(&NetTransport::netThreadMain, this);
+}
+
+void NetTransport::stopNetThread() {
+    if (!m_threadRunning.load()) return;
+    m_threadStop.store(true);
+    m_outCV.notify_all();
+    if (m_netThread.joinable()) m_netThread.join();
+    m_threadRunning.store(false);
+
+    // 清空残留队列（线程已 join，无并发）
+    {
+        std::lock_guard<std::mutex> lk(m_outMutex);
+        m_outQueue.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lk(m_inMutex);
+        m_inQueue.clear();
+    }
+}
+
+void NetTransport::netThreadMain() {
+    // 每轮：drain 出站 → enet_peer_send + flush → enet_host_service 收事件（小超时阻塞）。
+    // 小超时（5ms）既给收包阻塞、又限制出站延迟上限。
+    static constexpr uint32_t SERVICE_TIMEOUT_MS = 5;
+
+    std::deque<OutboundMsg> outBatch;
+    while (!m_threadStop.load()) {
+        // 1) 取走本轮出站消息
+        outBatch.clear();
+        {
+            std::unique_lock<std::mutex> lk(m_outMutex);
+            // 没有出站消息时，等一小会（被新出站消息或停止信号唤醒），避免空转。
+            if (m_outQueue.empty()) {
+                m_outCV.wait_for(lk, std::chrono::milliseconds(SERVICE_TIMEOUT_MS),
+                    [this] { return m_threadStop.load() || !m_outQueue.empty(); });
+            }
+            outBatch.swap(m_outQueue);
+        }
+
+        // 2) 发送（仅网络线程触碰 enet_peer_send / packet_create）
+        bool sentAny = false;
+        for (auto& msg : outBatch) {
+            if (!msg.peer || msg.data.empty()) continue;
+            ENetPacket* pkt = enet_packet_create(
+                msg.data.data(), msg.data.size(),
+                msg.reliable ? ENET_PACKET_FLAG_RELIABLE : ENET_PACKET_FLAG_UNSEQUENCED);
+            int ch = msg.reliable ? NetConstants::CHANNEL_RELIABLE
+                                  : NetConstants::CHANNEL_UNRELIABLE;
+            if (enet_peer_send(msg.peer, ch, pkt) < 0) {
+                // peer 已断开/无效：enet_peer_send 失败时未入队，需手动销毁 packet
+                enet_packet_destroy(pkt);
+            } else {
+                sentAny = true;
+            }
+        }
+
+        // 3) 收事件 + 驱动 ENet（service 内部含 flush 出站）
+        serviceOnce(SERVICE_TIMEOUT_MS);
+
+        // service 已驱动发送；若本轮有 send 但 service 未及时 flush，再补一次。
+        if (sentAny && m_host) enet_host_flush(m_host);
+    }
+}
+
+void NetTransport::serviceOnce(uint32_t timeoutMs) {
     if (!m_host) return;
 
     ENetEvent ev;
-    while (enet_host_service(m_host, &ev, timeoutMs) > 0) {
+    // 第一次用 timeoutMs 阻塞等待，之后非阻塞收完本轮所有就绪事件。
+    int ret = enet_host_service(m_host, &ev, timeoutMs);
+    while (ret > 0) {
         NetEvent netEv;
+        bool keep = true;
         switch (ev.type) {
         case ENET_EVENT_TYPE_CONNECT:
             netEv.type = NetEvent::Connected;
@@ -148,38 +233,62 @@ void NetTransport::poll(std::vector<NetEvent>& outEvents, uint32_t timeoutMs) {
         case ENET_EVENT_TYPE_RECEIVE:
             netEv.type = NetEvent::Data;
             netEv.peer = ev.peer;
-            netEv.data = ev.packet->data;
-            netEv.dataLen = ev.packet->dataLength;
-            netEv.packet = ev.packet;  // 由 dispatch 层用完后 destroy
+            // 立即把 packet 字节拷进自持 vector，并销毁 packet（不跨线程传 ENetPacket）。
+            netEv.data.assign(ev.packet->data, ev.packet->data + ev.packet->dataLength);
+            enet_packet_destroy(ev.packet);
             break;
 
         default:
-            continue;
+            keep = false;
+            break;
         }
-        outEvents.push_back(netEv);
 
-        // Data 事件的 packet 需要调用方处理完后再 destroy
-        // 这里先不 destroy，由 dispatch 层负责
-        if (ev.type != ENET_EVENT_TYPE_RECEIVE) {
-            // 非 Data 事件不需要 packet
+        if (keep) {
+            std::lock_guard<std::mutex> lk(m_inMutex);
+            m_inQueue.push_back(std::move(netEv));
         }
+
+        ret = enet_host_service(m_host, &ev, 0);  // 非阻塞收完剩余
+    }
+}
+
+void NetTransport::drainInbound(std::vector<NetEvent>& outEvents) {
+    std::lock_guard<std::mutex> lk(m_inMutex);
+    while (!m_inQueue.empty()) {
+        outEvents.push_back(std::move(m_inQueue.front()));
+        m_inQueue.pop_front();
     }
 }
 
 void NetTransport::sendReliable(ENetPeer* peer, const void* data, size_t len) {
     if (!peer || !data || len == 0) return;
-    ENetPacket* pkt = enet_packet_create(data, len, ENET_PACKET_FLAG_RELIABLE);
-    enet_peer_send(peer, NetConstants::CHANNEL_RELIABLE, pkt);
+    OutboundMsg msg;
+    msg.peer = peer;
+    msg.reliable = true;
+    msg.data.assign(static_cast<const uint8_t*>(data),
+                    static_cast<const uint8_t*>(data) + len);
+    {
+        std::lock_guard<std::mutex> lk(m_outMutex);
+        m_outQueue.push_back(std::move(msg));
+    }
+    m_outCV.notify_one();
 }
 
 void NetTransport::sendUnreliable(ENetPeer* peer, const void* data, size_t len) {
     if (!peer || !data || len == 0) return;
-    ENetPacket* pkt = enet_packet_create(data, len, ENET_PACKET_FLAG_UNSEQUENCED);
-    enet_peer_send(peer, NetConstants::CHANNEL_UNRELIABLE, pkt);
+    OutboundMsg msg;
+    msg.peer = peer;
+    msg.reliable = false;
+    msg.data.assign(static_cast<const uint8_t*>(data),
+                    static_cast<const uint8_t*>(data) + len);
+    {
+        std::lock_guard<std::mutex> lk(m_outMutex);
+        m_outQueue.push_back(std::move(msg));
+    }
+    m_outCV.notify_one();
 }
 
 void NetTransport::flush() {
-    if (m_host) {
-        enet_host_flush(m_host);
-    }
+    // 阶段 2：网络线程每轮自动 flush，这里只唤醒它尽快处理出站队列。
+    m_outCV.notify_one();
 }

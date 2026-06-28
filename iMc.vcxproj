@@ -166,6 +166,7 @@
     <ClCompile Include="scr\net\NetObject.cpp" />
     <ClCompile Include="scr\net\NetObjectManager.cpp" />
     <ClCompile Include="scr\net\NetPlayer.cpp" />
+    <ClCompile Include="scr\net\NetSerializeWorker.cpp" />
     <ClCompile Include="scr\net\NetTransport.cpp" />
     <ClCompile Include="scr\World.cpp" />
   </ItemGroup>
@@ -218,6 +219,7 @@
     <ClInclude Include="scr\net\NetObjectManager.h" />
     <ClInclude Include="scr\net\NetPlayer.h" />
     <ClInclude Include="scr\net\NetSerializer.h" />
+    <ClInclude Include="scr\net\NetSerializeWorker.h" />
     <ClInclude Include="scr\net\NetTransport.h" />
     <ClInclude Include="scr\World.h" />
     <ClInclude Include="scr\CliManager.h" />

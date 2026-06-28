@@ -104,6 +104,11 @@ private:
     ChunkManager* m_chunkManager = nullptr;
     NetChunkSync m_chunkSync;
 
+    // 握手期（join）收到 JOIN_ACCEPT 后、同一 drainInbound 批次里剩余的入站事件。
+    // 此时 ChunkManager 尚未 setChunkManager，不能立刻 dispatch 含 chunk 的消息；
+    // 暂存于此，由主循环首次 dispatchEvents 先行消费（保留原「设置好再处理」语义）。
+    std::vector<NetEvent> m_deferredInbound;
+
     // ---- 消息分发 ----
     void dispatchEvents();
     void dispatchMessage(ENetPeer* peer, const NetMessage& msg);

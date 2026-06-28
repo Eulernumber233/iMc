@@ -6,6 +6,7 @@
 #include "../Profiler.h"
 #include <cstdio>
 #include <chrono>
+#include <thread>
 
 NetManager::NetManager() = default;
 
@@ -24,6 +25,8 @@ bool NetManager::host(uint16_t port, const std::string& worldName, uint32_t seed
     }
     if (!m_transport.init()) return false;
     if (!m_transport.createServer(port)) return false;
+    // 启动专用网络线程：之后所有 enet 收发都在该线程，主线程经队列通信。
+    m_transport.startNetThread();
 
     m_worldName = worldName;
     m_worldSeed = seed;
@@ -67,26 +70,47 @@ bool NetManager::join(const std::string& ip, uint16_t port, const std::string& p
 
     printf("[NetManager] joining %s:%u as \"%s\"\n", ip.c_str(), port, playerName.c_str());
 
-    // 等待 ENet 握手完成，然后发送 JOIN_REQUEST，再等待 JOIN_ACCEPT
-    // 注意：enet_peer_send 在 peer 处于 CONNECTING 状态时会直接返回 -1，
-    // 所以 JOIN_REQUEST 必须在 CONNECT 事件之后再发送。
+    // 阶段 2：启动网络线程后，握手通过入站队列 drainInbound 轮询完成（不再主线程直接 service）。
+    // enet_host_connect 已在主线程（线程启动前）调过；连接的真正建立（CONNECT 事件）由网络线程
+    // 收到并入队。注意：enet_peer_send 在 peer 处于 CONNECTING 状态会被丢弃，故 JOIN_REQUEST
+    // 必须在收到 Connected 入站事件之后再发。
+    m_transport.startNetThread();
+
     {
         using namespace std::chrono;
-        ENetEvent ev;
         bool gotConnect = false;
         bool gotAccept = false;
         bool joinRequestSent = false;
         auto startTime = steady_clock::now();
         auto lastLog = startTime;
+        std::vector<NetEvent> events;
+
+        auto failExit = [&]() {
+            m_transport.stopNetThread();
+            m_transport.destroyHost();
+            m_transport.shutdown();
+        };
+
         while (duration_cast<milliseconds>(steady_clock::now() - startTime).count() < 10000) {
-            int ret = enet_host_service(m_transport.getHost(), &ev, 100);
-            if (ret > 0) {
-                if (ev.type == ENET_EVENT_TYPE_CONNECT) {
+            events.clear();
+            m_transport.drainInbound(events);
+
+            for (auto& ev : events) {
+                // JOIN_ACCEPT 之后、同批次里剩余的事件（PLAYER_LIST / PLAYER_JOINED 等）不能丢——
+                // drainInbound 一次取走整批，旧实现在收到 ACCEPT 后 break 会丢弃它们，漏掉
+                // PLAYER_LIST 就导致客户端看不到其他玩家（随机复现）。但此刻 ChunkManager 尚未
+                // 设置，不能立即处理含 chunk 的消息，故统一暂存，交主循环首次 dispatchEvents 消费。
+                if (gotAccept) {
+                    m_deferredInbound.push_back(std::move(ev));
+                    continue;
+                }
+
+                if (ev.type == NetEvent::Connected) {
                     gotConnect = true;
                     printf("[NetManager] transport connected (elapsed=%lldms)\n",
                         duration_cast<milliseconds>(steady_clock::now() - startTime).count());
 
-                    // peer 现在是 CONNECTED 状态，发送 JOIN_REQUEST（带本机渲染半径）
+                    // peer 现在 CONNECTED，发送 JOIN_REQUEST（带本机渲染半径）。走出站队列。
                     uint16_t myRadius = (uint16_t)RuntimeConfig::get().renderRadius;
                     auto joinReq = NetMessage::joinRequest(playerName, myRadius);
                     std::vector<uint8_t> joinBuf;
@@ -96,9 +120,9 @@ bool NetManager::join(const std::string& ip, uint16_t port, const std::string& p
                     joinRequestSent = true;
                     printf("[NetManager] JOIN_REQUEST sent (elapsed=%lldms)\n",
                         duration_cast<milliseconds>(steady_clock::now() - startTime).count());
-                } else if (ev.type == ENET_EVENT_TYPE_RECEIVE) {
+                } else if (ev.type == NetEvent::Data) {
                     NetMessage netMsg;
-                    if (NetMessage::decode(ev.packet->data, ev.packet->dataLength, netMsg)) {
+                    if (NetMessage::decode(ev.data.data(), ev.data.size(), netMsg)) {
                         printf("[NetManager] received msg type=0x%02X (elapsed=%lldms)\n",
                             (int)netMsg.type,
                             duration_cast<milliseconds>(steady_clock::now() - startTime).count());
@@ -150,31 +174,21 @@ bool NetManager::join(const std::string& ip, uint16_t port, const std::string& p
                                 payload.writeBytes(netMsg.payload.data(), netMsg.payload.size());
                             std::string reason = payload.readString();
                             fprintf(stderr, "[NetManager] join denied: %s\n", reason.c_str());
-                            enet_packet_destroy(ev.packet);
-                            m_transport.destroyHost();
-                            m_transport.shutdown();
+                            failExit();
                             return false;
                         }
                     }
-                } else if (ev.type == ENET_EVENT_TYPE_DISCONNECT) {
+                } else if (ev.type == NetEvent::Disconnected) {
                     printf("[NetManager] disconnected before accept (elapsed=%lldms)\n",
                         duration_cast<milliseconds>(steady_clock::now() - startTime).count());
                     if (!gotConnect && !gotAccept) {
                         printf("[NetManager] connection refused or timed out\n");
                     }
-                    m_transport.destroyHost();
-                    m_transport.shutdown();
+                    failExit();
                     return false;
                 }
-                // 销毁 receive 事件的 packet
-                if (ev.packet)
-                    enet_packet_destroy(ev.packet);
-            } else if (ret < 0) {
-                fprintf(stderr, "[NetManager] enet_host_service error during connect\n");
-                m_transport.destroyHost();
-                m_transport.shutdown();
-                return false;
             }
+            // 本批处理完毕：若已 ACCEPT（且已 dispatch 完同批剩余事件）则结束握手。
             if (gotAccept) break;
 
             // 每 2 秒输出一次等待状态
@@ -185,13 +199,15 @@ bool NetManager::join(const std::string& ip, uint16_t port, const std::string& p
                     gotConnect ? 1 : 0, joinRequestSent ? 1 : 0);
                 lastLog = now;
             }
+
+            // 让网络线程有时间收发，避免主线程空转 drainInbound
+            std::this_thread::sleep_for(milliseconds(5));
         }
         if (!gotAccept) {
             auto elapsed = duration_cast<milliseconds>(steady_clock::now() - startTime).count();
             fprintf(stderr, "[NetManager] join handshake timed out (%lldms, gotConnect=%d, joinReqSent=%d)\n",
                 elapsed, gotConnect ? 1 : 0, joinRequestSent ? 1 : 0);
-            m_transport.destroyHost();
-            m_transport.shutdown();
+            failExit();
             return false;
         }
     }
@@ -203,8 +219,15 @@ bool NetManager::join(const std::string& ip, uint16_t port, const std::string& p
 void NetManager::leave() {
     if (!m_connected) return;
 
+    // 停止序列化线程：join 之前不能销毁 host / 清空容器，否则在途 result 取回时悬空。
+    // worker 本身不碰 ENet（只产 payload），故顺序上先 stop 最安全。
+    m_chunkSync.shutdown();
+
+    // 阶段 2：先停网络线程，之后 ENetHost 由主线程独占，disconnectAll/destroyHost 才安全。
+    m_transport.stopNetThread();
+
     if (m_isHost) {
-        // 通知所有客户端断开
+        // 通知所有客户端断开（线程已停，主线程直接发 + flush，同步推出 disconnect 包）
         m_transport.disconnectAll();
     }
 
@@ -235,6 +258,13 @@ void NetManager::update() {
     if (m_isHost) {
         PROFILE_SCOPE("net.pushChunks");
         m_chunkSync.pushChunks();
+    }
+
+    // 2b. 取回序列化线程完成的 chunk payload 并发送（主线程只做 enet_peer_send）。
+    //     服务端才有 chunk 推送；客户端 worker 始终空闲，drain 立即返回。
+    if (m_isHost) {
+        PROFILE_SCOPE("net.pollSerialize");
+        m_chunkSync.pollSerializeResults();
     }
 
     // 3. 收集脏属性并同步
@@ -275,8 +305,13 @@ void NetManager::update() {
 }
 
 void NetManager::dispatchEvents() {
+    // 阶段 2：网络线程已把事件解析好放进入站队列，主线程在此取走 dispatch（不再直接碰 ENet）。
     std::vector<NetEvent> events;
-    m_transport.poll(events, 0);
+    // 先消费握手期暂存的入站事件（JOIN_ACCEPT 同批次里 PLAYER_LIST 等），再取本帧新事件，保序。
+    if (!m_deferredInbound.empty()) {
+        events.swap(m_deferredInbound);
+    }
+    m_transport.drainInbound(events);
 
     for (auto& ev : events) {
         switch (ev.type) {
@@ -310,7 +345,7 @@ void NetManager::dispatchEvents() {
 
         case NetEvent::Data: {
             NetMessage msg;
-            if (!NetMessage::decode(ev.data, ev.dataLen, msg)) break;
+            if (!NetMessage::decode(ev.data.data(), ev.data.size(), msg)) break;
             dispatchMessage(ev.peer, msg);
             break;
         }
@@ -318,9 +353,6 @@ void NetManager::dispatchEvents() {
         default:
             break;
         }
-
-        // 销毁接收到的 packet
-        ev.destroyPacket();
     }
 }
 

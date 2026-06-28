@@ -14,6 +14,62 @@
 void NetChunkSync::init(ChunkManager* cm, NetManager* net) {
     m_chunkManager = cm;
     m_netManager = net;
+    // 启动专用序列化线程（仅服务端真正用到，但客户端启动也无害——它不投任务）
+    if (!m_serializeWorker.isRunning()) {
+        m_serializeWorker.start();
+    }
+}
+
+void NetChunkSync::shutdown() {
+    m_serializeWorker.stop();
+    m_pendingPush.clear();
+    m_pendingPushSet.clear();
+    m_pendingRequests.clear();
+    m_sentChunks.clear();
+    m_alivePeers.clear();
+}
+
+void NetChunkSync::submitSerializeJob(int chunkX, int chunkZ, const ChunkBoxes& boxes,
+                                      std::vector<ENetPeer*> targets) {
+    if (targets.empty()) return;
+    NetSerializeWorker::Job job;
+    job.chunkX = chunkX;
+    job.chunkZ = chunkZ;
+    job.boxes = boxes;                 // 拷 shared_ptr 数组，引用计数 +1 保活
+    job.targets = std::move(targets);
+    // 记录目标 peer 为存活（投递时它们都有效）
+    for (ENetPeer* p : job.targets) {
+        if (p) m_alivePeers.insert(p);
+    }
+    m_serializeWorker.submit(std::move(job));
+}
+
+void NetChunkSync::pollSerializeResults() {
+    if (!m_netManager) return;
+
+    // 限流：每帧最多取回 N 个，避免 join 突发一次回灌几百个 result 时主线程 send 抖动。
+    static constexpr size_t MAX_RESULTS_PER_FRAME = 16;
+    std::vector<NetSerializeWorker::Result> results;
+    m_serializeWorker.drainResults(results, MAX_RESULTS_PER_FRAME);
+    if (results.empty()) return;
+
+    bool sentAny = false;
+    for (auto& res : results) {
+        if (res.payload.empty()) continue;
+        // 包一层 CHUNK_DATA header（轻量，不压缩）
+        auto msg = NetMessage::chunkData(res.payload);
+        std::vector<uint8_t> buf;
+        msg.encode(buf);
+
+        for (ENetPeer* peer : res.targets) {
+            if (!peer) continue;
+            // peer 失效复核：result 取回时该 peer 可能已断开
+            if (m_alivePeers.find(peer) == m_alivePeers.end()) continue;
+            m_netManager->getTransport().sendReliable(peer, buf.data(), buf.size());
+            sentAny = true;
+        }
+    }
+    if (sentAny) m_netManager->getTransport().flush();
 }
 
 // ============================================================================
@@ -36,8 +92,8 @@ void NetChunkSync::pushChunks() {
     m_chunkManager->drainPromotedChunks(promoted);
     for (auto& p : promoted) {
         ChunkKey key = makeKey(p.x, p.y);
-        // 去重：同一 chunk 可能 block-ready 与 loaded 各入队一次，待发队列里只留一份，
-        // 真正序列化时优先取 loaded 版本（serializeChunk 内部走 getChunkAnyState）。
+        // 去重：同一 chunk 可能 block-ready 与 loaded 各入队一次，待发队列里只留一份。
+        // 真正投递序列化时由 getChunkBoxes 统一取 section box（loaded/block-ready 均可）。
         if (m_pendingPushSet.insert(key).second) {
             m_pendingPush.push_back(p);
         }
@@ -47,76 +103,64 @@ void NetChunkSync::pushChunks() {
     if (m_pendingPush.empty()) return;
 
     const int hostRadius = m_chunkManager->getRenderRadius();
-    static constexpr size_t BATCH_SIZE_LIMIT = 16384;  // 16KB per batch
 
-    // 本帧序列化预算：把多 worker 同时完成的晋升尖峰摊到多帧，避免单帧序列化+压缩
-    // 过多 chunk 造成卡顿。本帧只取队首 budget 个，剩余下帧继续。
+    // 本帧投递预算：把多 worker 同时完成的晋升尖峰摊到多帧。序列化已卸载到专用线程，
+    // 主线程这里只算相关性 + 拷 ChunkBoxes（shared_ptr）+ 投递，开销很低；预算主要
+    // 用于限制 worker 队列与每帧主线程拷贝量。本帧只取队首 budget 个，剩余下帧继续。
     static constexpr size_t MAX_PUSH_PER_FRAME = 8;
     size_t take = (std::min)(m_pendingPush.size(), MAX_PUSH_PER_FRAME);
 
-    // 统计本帧每个候选 chunk 还有几个 peer "尚未满足"（既没 sent、且需要但本帧未发到）。
+    // 预算内的候选 chunk：逐个算「哪些 peer 需要它且还没 sent」，攒成 targets 一次投递。
     // 仅当某 chunk 对所有当前 peer 都已满足（sent 或不需要）才出队；否则保留到下帧。
-    // 这保留了旧版"每帧重扫"的语义：远处玩家的 block-ready chunk 会一直留在队列里，
-    // 等玩家移近（落入其 pushR 半径）时才真正推送。
+    // 这保留了旧版语义：远处玩家的 block-ready chunk 会一直留在队列里，等玩家移近时才推。
     std::unordered_map<ChunkKey, int> unsatisfied;  // key -> 仍未满足的 peer 数
     for (size_t i = 0; i < take; ++i) {
         unsatisfied[makeKey(m_pendingPush[i].x, m_pendingPush[i].y)] = 0;
     }
 
-    // 每个 peer 各攒一个 batch，复用原有 16KB 合批逻辑。
-    for (auto& [id, player] : players) {
-        if (!player->peer) continue;  // 本地玩家
+    for (size_t i = 0; i < take; ++i) {
+        const glm::ivec2& pos = m_pendingPush[i];
+        ChunkKey key = makeKey(pos.x, pos.y);
 
-        auto& sent = m_sentChunks[player->peer];
+        // 先取一次 boxes（loaded 或 block-ready 均可，getChunkBoxes 统一返回 section box）。
+        // 取不到说明数据还没就绪，整 chunk 留到下帧。
+        ChunkBoxes boxes;
+        bool haveBoxes = m_chunkManager->getChunkBoxes(pos, boxes);
+        bool isLoaded = (m_chunkManager->getChunkAnyState(pos) != nullptr);
 
-        glm::vec3 ppos = player->getRenderPosition();
-        glm::ivec2 pChunk(
-            (int)std::floor(ppos.x / (float)ChunkConstants::CHUNK_WIDTH),
-            (int)std::floor(ppos.z / (float)ChunkConstants::CHUNK_DEPTH));
-        int pushR = (player->renderRadius > 0) ? player->renderRadius : hostRadius;
+        std::vector<ENetPeer*> targets;
+        for (auto& [id, player] : players) {
+            if (!player->peer) continue;  // 本地玩家
+            auto& sent = m_sentChunks[player->peer];
+            if (sent.count(key)) continue;  // 该 peer 已满足
 
-        std::vector<uint8_t> batch;
-        auto flushIfOver = [&](size_t before) {
-            if (batch.size() > BATCH_SIZE_LIMIT && before > 0) {
-                size_t added = batch.size() - before;
-                std::vector<uint8_t> lastChunk(batch.end() - added, batch.end());
-                batch.resize(before);
-                if (!batch.empty()) m_netManager->sendChunkData(player->peer, batch);
-                batch = std::move(lastChunk);
-            }
-        };
-
-        for (size_t i = 0; i < take; ++i) {
-            const glm::ivec2& pos = m_pendingPush[i];
-            ChunkKey key = makeKey(pos.x, pos.y);
-            if (sent.count(key)) continue;  // 该 peer 已满足（已推送过）
-
-            // loaded 优先（数据最新、含玩家/网络改动），否则用 block-ready（带相关性过滤）
-            if (m_chunkManager->getChunkAnyState(pos) != nullptr) {
-                size_t before = batch.size();
-                serializeChunk(pos.x, pos.y, batch);
-                flushIfOver(before);
-                sent.insert(key);  // 该 peer 已满足
+            if (isLoaded) {
+                // loaded chunk：所有 peer 都该收到最新数据，无半径过滤
+                if (!haveBoxes) { unsatisfied[key] += 1; continue; }
+                targets.push_back(player->peer);
+                sent.insert(key);  // 乐观标记：已投递，避免下帧重投
             } else {
+                // block-ready chunk：带相关性过滤，仅推给落入该玩家半径的
+                glm::vec3 ppos = player->getRenderPosition();
+                glm::ivec2 pChunk(
+                    (int)std::floor(ppos.x / (float)ChunkConstants::CHUNK_WIDTH),
+                    (int)std::floor(ppos.z / (float)ChunkConstants::CHUNK_DEPTH));
+                int pushR = (player->renderRadius > 0) ? player->renderRadius : hostRadius;
                 int dx = std::abs(pos.x - pChunk.x);
                 int dz = std::abs(pos.y - pChunk.y);
                 if (dx > pushR || dz > pushR) {
-                    unsatisfied[key] += 1;  // 该 peer 暂不需要，但仍未满足 → chunk 不能出队
+                    unsatisfied[key] += 1;  // 该 peer 暂不需要，但仍未满足 → chunk 不出队
                     continue;
                 }
-                ChunkBoxes boxes;
-                if (!m_chunkManager->getChunkBoxes(pos, boxes)) {
-                    unsatisfied[key] += 1;  // 数据还没就绪，下帧重试
-                    continue;
-                }
-                size_t before = batch.size();
-                serializeChunkFromBlocks(pos.x, pos.y, boxes, batch);
-                flushIfOver(before);
-                sent.insert(key);  // 该 peer 已满足
+                if (!haveBoxes) { unsatisfied[key] += 1; continue; }
+                targets.push_back(player->peer);
+                sent.insert(key);  // 乐观标记
             }
         }
 
-        if (!batch.empty()) m_netManager->sendChunkData(player->peer, batch);
+        if (!targets.empty()) {
+            submitSerializeJob(pos.x, pos.y, boxes, std::move(targets));
+        }
     }
 
     // 重建待发队列：take 范围内 unsatisfied==0（所有 peer 都满足）的出队；
@@ -152,10 +196,12 @@ void NetChunkSync::pushAllChunks(ENetPeer* peer) {
 
     auto& sent = m_sentChunks[peer];
     sent.clear();  // 新玩家加入，重置 sent set
+    m_alivePeers.insert(peer);
 
     auto positions = m_chunkManager->getLoadedChunkPositions();
 
-    // 按 Chebyshev 距离排序（从近到远），保证空间局部性
+    // 按 Chebyshev 距离排序（从近到远），保证空间局部性：近处 chunk 先投递、先序列化、
+    // 先到达客户端，玩家周围最先成形。
     std::sort(positions.begin(), positions.end(),
         [](const glm::ivec2& a, const glm::ivec2& b) {
             int da = (std::max)(std::abs(a.x), std::abs(a.y));
@@ -163,36 +209,19 @@ void NetChunkSync::pushAllChunks(ENetPeer* peer) {
             return da < db;
         });
 
-    std::vector<uint8_t> batch;
-    static constexpr size_t BATCH_SIZE_LIMIT = 16384;
-
+    // 关键：不再同步序列化 + 压缩（旧版会卡主线程 100-500ms）。改为逐 chunk 投递到
+    // 序列化线程，主线程立即返回。worker 慢慢做，主线程每帧 pollSerializeResults 取回发送。
     int count = 0;
     for (auto& pos : positions) {
         ChunkKey key = makeKey(pos.x, pos.y);
-
-        size_t before = batch.size();
-        serializeChunk(pos.x, pos.y, batch);
-
-        if (batch.size() > BATCH_SIZE_LIMIT && before > 0) {
-            size_t added = batch.size() - before;
-            std::vector<uint8_t> lastChunk(batch.end() - added, batch.end());
-            batch.resize(before);
-
-            if (!batch.empty()) {
-                m_netManager->sendChunkData(peer, batch);
-            }
-            batch = std::move(lastChunk);
-        }
-
-        sent.insert(key);
+        ChunkBoxes boxes;
+        if (!m_chunkManager->getChunkBoxes(pos, boxes)) continue;
+        submitSerializeJob(pos.x, pos.y, boxes, { peer });
+        sent.insert(key);  // 乐观标记
         ++count;
     }
 
-    if (!batch.empty()) {
-        m_netManager->sendChunkData(peer, batch);
-    }
-
-    printf("[NetChunkSync] pushAllChunks: sent %d chunks to peer\n", count);
+    printf("[NetChunkSync] pushAllChunks: queued %d chunks for serialization (peer)\n", count);
 }
 
 void NetChunkSync::handleChunkRequest(ENetPeer* peer, int chunkX, int chunkZ) {
@@ -200,41 +229,14 @@ void NetChunkSync::handleChunkRequest(ENetPeer* peer, int chunkX, int chunkZ) {
 
     glm::ivec2 pos(chunkX, chunkZ);
 
-    // 优先从 loaded chunk 序列化（有完整 mesh 的区块）
-    Chunk* chunk = m_chunkManager->getChunkAnyState(pos);
-    if (chunk) {
-        std::vector<uint8_t> data;
-        serializeChunk(chunkX, chunkZ, data);
-        if (!data.empty()) {
-            auto msg = NetMessage::chunkResponse(data);
-            std::vector<uint8_t> buf;
-            msg.encode(buf);
-            m_netManager->getTransport().sendReliable(peer, buf.data(), buf.size());
-            ChunkKey key = makeKey(chunkX, chunkZ);
-            m_sentChunks[peer].insert(key);
-            printf("[NetChunkSync] sent CHUNK_RESPONSE for (%d,%d), %zu bytes\n",
-                chunkX, chunkZ, data.size());
-        }
-        m_netManager->getTransport().flush();
-        return;
-    }
-
-    // 尝试从 block-ready 数据序列化（有方块数据但还没有 mesh）
+    // 有方块数据（loaded 或 block-ready 均可，getChunkBoxes 统一取 section box）：
+    // 投递到序列化线程，主线程 pollSerializeResults 取回发送。不再同步序列化阻塞。
     ChunkBoxes boxes;
     if (m_chunkManager->getChunkBoxes(pos, boxes)) {
-        std::vector<uint8_t> data;
-        serializeChunkFromBlocks(chunkX, chunkZ, boxes, data);
-        if (!data.empty()) {
-            auto msg = NetMessage::chunkResponse(data);
-            std::vector<uint8_t> buf;
-            msg.encode(buf);
-            m_netManager->getTransport().sendReliable(peer, buf.data(), buf.size());
-            ChunkKey key = makeKey(chunkX, chunkZ);
-            m_sentChunks[peer].insert(key);
-            printf("[NetChunkSync] sent CHUNK_RESPONSE (from block-ready) for (%d,%d), %zu bytes\n",
-                chunkX, chunkZ, data.size());
-        }
-        m_netManager->getTransport().flush();
+        submitSerializeJob(chunkX, chunkZ, boxes, { peer });
+        m_sentChunks[peer].insert(makeKey(chunkX, chunkZ));  // 乐观标记
+        printf("[NetChunkSync] queued CHUNK_REQUEST (%d,%d) for serialization\n",
+            chunkX, chunkZ);
         return;
     }
 
@@ -270,24 +272,18 @@ void NetChunkSync::pollPendingRequests() {
         ChunkBoxes boxes;
         if (!m_chunkManager->getChunkBoxes(glm::ivec2(cx, cz), boxes)) continue;
 
-        // 区块数据已就绪（在 m_blockReady 或 m_loadedChunks 中），序列化并发送
-        std::vector<uint8_t> data;
-        serializeChunkFromBlocks(cx, cz, boxes, data);
-        if (data.empty()) continue;
-
-        auto msg = NetMessage::chunkResponse(data);
-        std::vector<uint8_t> buf;
-        msg.encode(buf);
-
+        // 区块数据已就绪（在 m_blockReady 或 m_loadedChunks 中），投递到序列化线程。
+        std::vector<ENetPeer*> targets;
         for (ENetPeer* peer : peers) {
             if (!peer) continue;
-            m_netManager->getTransport().sendReliable(peer, buf.data(), buf.size());
-            m_sentChunks[peer].insert(key);
+            targets.push_back(peer);
+            m_sentChunks[peer].insert(key);  // 乐观标记
         }
-        m_netManager->getTransport().flush();
-
-        printf("[NetChunkSync] pollPending: sent CHUNK_RESPONSE for (%d,%d) to %zu peers\n",
-            cx, cz, peers.size());
+        if (!targets.empty()) {
+            submitSerializeJob(cx, cz, boxes, std::move(targets));
+            printf("[NetChunkSync] pollPending: queued (%d,%d) for serialization to %zu peers\n",
+                cx, cz, peers.size());
+        }
 
         resolved.push_back(key);
     }
@@ -313,6 +309,10 @@ void NetChunkSync::onPeerDisconnected(ENetPeer* peer) {
 
     // 清理该 peer 的已推送记录
     m_sentChunks.erase(peer);
+
+    // 从存活集合移除：序列化线程可能仍持有以此 peer 为 target 的在途 result，
+    // pollSerializeResults 取回时会因 peer 不在 m_alivePeers 而跳过发送（§1.4 失效复核）。
+    m_alivePeers.erase(peer);
 }
 
 void NetChunkSync::onChunkUnloaded(int chunkX, int chunkZ) {
@@ -320,164 +320,6 @@ void NetChunkSync::onChunkUnloaded(int chunkX, int chunkZ) {
     for (auto& [peer, sent] : m_sentChunks) {
         sent.erase(key);
     }
-}
-
-void NetChunkSync::serializeChunk(int chunkX, int chunkZ, std::vector<uint8_t>& out) {
-    // 格式: [chunkX:int32][chunkZ:int32][numSections:uint8][sections...]
-    // section: [sectionY:uint8][flags:uint8][dataLen:uint16][blocks (lz4)]
-
-    // 记录 numSections 的位置，后面回填
-    size_t headerPos = out.size();
-    out.push_back(static_cast<uint8_t>(chunkX & 0xFF));
-    out.push_back(static_cast<uint8_t>((chunkX >> 8) & 0xFF));
-    out.push_back(static_cast<uint8_t>((chunkX >> 16) & 0xFF));
-    out.push_back(static_cast<uint8_t>((chunkX >> 24) & 0xFF));
-    out.push_back(static_cast<uint8_t>(chunkZ & 0xFF));
-    out.push_back(static_cast<uint8_t>((chunkZ >> 8) & 0xFF));
-    out.push_back(static_cast<uint8_t>((chunkZ >> 16) & 0xFF));
-    out.push_back(static_cast<uint8_t>((chunkZ >> 24) & 0xFF));
-
-    size_t numSectionsPos = out.size();
-    out.push_back(0);  // placeholder for numSections
-    uint8_t numSections = 0;
-
-    Chunk* chunk = m_chunkManager->getChunkAnyState(glm::ivec2(chunkX, chunkZ));
-    if (!chunk) {
-        out[numSectionsPos] = 0;
-        return;
-    }
-
-    static constexpr int SECTION_COUNT = ChunkConstants::CHUNK_HEIGHT / Section::HEIGHT;
-    static constexpr int BLOCK_SIZE = Section::VOLUME * sizeof(BlockState);  // 8192
-    static constexpr int MAX_COMPRESSED = LZ4_COMPRESSBOUND(BLOCK_SIZE);
-
-    std::vector<BlockState> blockBuf(BLOCK_SIZE / sizeof(BlockState));
-    std::vector<uint8_t> compressBuf(MAX_COMPRESSED);
-
-    for (int sy = 0; sy < SECTION_COUNT; ++sy) {
-        Section& sec = chunk->getSection(sy);
-        if (sec.isEmpty()) {
-            // 全空气 section: 2 字节 (sectionY + flags=0)
-            out.push_back(static_cast<uint8_t>(sy));
-            out.push_back(0);  // flags: no data
-            ++numSections;
-            continue;
-        }
-
-        // 读取方块数据
-        sec.readAllBlocks(blockBuf);
-
-        // LZ4 压缩
-        int srcSize = static_cast<int>(blockBuf.size() * sizeof(BlockState));
-        int compressedSize = LZ4_compress_default(
-            reinterpret_cast<const char*>(blockBuf.data()),
-            reinterpret_cast<char*>(compressBuf.data()),
-            srcSize,
-            static_cast<int>(compressBuf.size()));
-
-        if (compressedSize <= 0 || compressedSize > 0xFFFF) {
-            // 压缩失败或太大，跳过此 section
-            fprintf(stderr, "[NetChunkSync] LZ4 compress failed for (%d,%d) sy=%d\n",
-                chunkX, chunkZ, sy);
-            continue;
-        }
-
-        // 写入 section header + compressed data
-        out.push_back(static_cast<uint8_t>(sy));
-        out.push_back(ChunkSyncFormat::FLAG_HAS_DATA);
-        uint16_t dataLen = static_cast<uint16_t>(compressedSize);
-        out.push_back(static_cast<uint8_t>(dataLen & 0xFF));
-        out.push_back(static_cast<uint8_t>((dataLen >> 8) & 0xFF));
-        out.insert(out.end(), compressBuf.data(),
-                   compressBuf.data() + compressedSize);
-
-        ++numSections;
-    }
-
-    out[numSectionsPos] = numSections;
-}
-
-void NetChunkSync::serializeChunkFromBlocks(int chunkX, int chunkZ,
-                                             const ChunkBoxes& boxes,
-                                             std::vector<uint8_t>& out) {
-    // 与 serializeChunk 相同的 header 格式
-    size_t headerPos = out.size();
-    out.push_back(static_cast<uint8_t>(chunkX & 0xFF));
-    out.push_back(static_cast<uint8_t>((chunkX >> 8) & 0xFF));
-    out.push_back(static_cast<uint8_t>((chunkX >> 16) & 0xFF));
-    out.push_back(static_cast<uint8_t>((chunkX >> 24) & 0xFF));
-    out.push_back(static_cast<uint8_t>(chunkZ & 0xFF));
-    out.push_back(static_cast<uint8_t>((chunkZ >> 8) & 0xFF));
-    out.push_back(static_cast<uint8_t>((chunkZ >> 16) & 0xFF));
-    out.push_back(static_cast<uint8_t>((chunkZ >> 24) & 0xFF));
-
-    size_t numSectionsPos = out.size();
-    out.push_back(0);
-    uint8_t numSections = 0;
-
-    static constexpr int SECTION_COUNT = ChunkConstants::CHUNK_HEIGHT / Section::HEIGHT;
-    static constexpr int SEC_VOL = Section::VOLUME;
-    static constexpr int BLOCK_SIZE = SEC_VOL * sizeof(BlockState);
-    static constexpr int MAX_COMPRESSED = LZ4_COMPRESSBOUND(BLOCK_SIZE);
-
-    std::vector<uint8_t> compressBuf(MAX_COMPRESSED);
-
-    for (int sy = 0; sy < SECTION_COUNT; ++sy) {
-        if (!boxes[sy]) {
-            // 该 section 无数据，按全空气处理
-            out.push_back(static_cast<uint8_t>(sy));
-            out.push_back(0);
-            ++numSections;
-            continue;
-        }
-        // 持读锁拷一份 section 数据（与玩家修改互斥）
-        std::array<BlockState, SEC_VOL> snapshot;
-        {
-            std::shared_lock<std::shared_mutex> lk(boxes[sy]->mutex);
-            snapshot = boxes[sy]->blocks;
-        }
-        const BlockState* sectionBlocks = snapshot.data();
-
-        // 检测全空气 section
-        bool allAir = true;
-        for (int i = 0; i < SEC_VOL; ++i) {
-            if (sectionBlocks[i].type() != BLOCK_AIR) {
-                allAir = false;
-                break;
-            }
-        }
-
-        if (allAir) {
-            out.push_back(static_cast<uint8_t>(sy));
-            out.push_back(0);
-            ++numSections;
-            continue;
-        }
-
-        int srcSize = static_cast<int>(SEC_VOL * sizeof(BlockState));
-        int compressedSize = LZ4_compress_default(
-            reinterpret_cast<const char*>(sectionBlocks),
-            reinterpret_cast<char*>(compressBuf.data()),
-            srcSize,
-            static_cast<int>(compressBuf.size()));
-
-        if (compressedSize <= 0 || compressedSize > 0xFFFF) {
-            fprintf(stderr, "[NetChunkSync] LZ4 compress failed for (%d,%d) sy=%d (block-data)\n",
-                chunkX, chunkZ, sy);
-            continue;
-        }
-
-        out.push_back(static_cast<uint8_t>(sy));
-        out.push_back(ChunkSyncFormat::FLAG_HAS_DATA);
-        uint16_t dataLen = static_cast<uint16_t>(compressedSize);
-        out.push_back(static_cast<uint8_t>(dataLen & 0xFF));
-        out.push_back(static_cast<uint8_t>((dataLen >> 8) & 0xFF));
-        out.insert(out.end(), compressBuf.data(), compressBuf.data() + compressedSize);
-
-        ++numSections;
-    }
-
-    out[numSectionsPos] = numSections;
 }
 
 void NetChunkSync::broadcastBlockChange(int chunkX, int chunkZ,

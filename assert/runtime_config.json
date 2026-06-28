@@ -1,44 +1,71 @@
 {
-  // ── 渲染 ──────────────────────────────────────────
-  "render_radius": 16,
-  //   视野半径（chunk），实际加载 (2r+1)^2 个 chunk
+    //--------------
+    // ── 渲染 ──────────────────────────────────────────
+    "render_radius": 16,
+    //   视野半径（chunk），实际加载 (2r+1)^2 个 chunk
 
-  "vertical_cull_ratio": 0.5,
-  //   下方 section 剔除比例：maxDownSections = render_radius × 此值
-  //   例 8×0.5=4 → 相机所在 section 向下 4 个以外不渲染。0 或负值 = 不限制
+    "vertical_cull_ratio": 0.5,
+    //   下方 section 剔除比例：maxDownSections = render_radius × 此值
+    //   例 8×0.5=4 → 相机所在 section 向下 4 个以外不渲染。0 或负值 = 不限制
 
-  // ── 多线程 ────────────────────────────────────────
-  "worker_threads": 2,
-  //   0 = 自动（hardware_concurrency）；正数 = 指定线程数
 
-  "max_inflight_requests": 32,
-  //   同时投递的最大 build 任务数，超过则暂停请求新 chunk
 
-  // ── GPU 上传 ──────────────────────────────────────
-  "max_uploads_per_frame": 16,
-  //   每帧最多上传多少个脏 section 到 GPU arena
+    //--------------
+    // ── 多线程 ────────────────────────────────────────
+    "worker_threads": 2,
+    //   0 = 自动（hardware_concurrency）；正数 = 指定线程数
 
-  // ── 存档 ──────────────────────────────────────────
-  "auto_save_interval_sec": 60,
-  //   自动保存间隔（秒）；设为 0 禁用定时自动保存，区块卸载时仍会保存
+    "max_inflight_requests": 32,
+    //   同时投递的最大 build 任务数，超过则暂停请求新 chunk
 
-  "retain_margin_chunks": 6,
-  //   温存/落盘半径余量：chunk 离开渲染半径后，在 render_radius + 此值 内仍保留在内存
-  //   （不渲染、不卸载、不落盘），吸收边界来回走动的抖动；超出才落盘 + 卸载。
-  //   调大 = 更省磁盘 IO 与地形重生成，但占更多内存
 
-  // ── 调试 ──────────────────────────────────────────
-  "print_profile_every_second": true,
-  //   每秒打印一次 profiler 汇总（各函数耗时 + 频道指标）
 
-  "profile_detailed": false,
-  //   细粒度计时/计数开关：关闭时（默认）完全绕过热路径里的细分插桩
-  //   （cullPass 每 chunk 的 rdc.cull.* 计时、getVisibleSectionMask 每 section 的 vis.*
-  //   计数），连 steady_clock::now() 都不调，零开销。仅排查 cullPass 内部分布时才开。
+    //--------------
+    // ── GPU 上传 ──────────────────────────────────────
+    "max_uploads_per_frame": 16,
+    //   每帧最多上传多少个脏 section 到 GPU arena
 
-  "verbose_texture_loading": false,
-  //   输出纹理加载详情日志（每次启动时输出纹理加载信息，可关闭以减少干扰）
 
-  "verbose_shader_loading": false
-  //   输出着色器编译日志（编译成功/失败消息，可关闭以减少干扰）
+
+    //--------------
+    // ── 存档 ──────────────────────────────────────────
+    "auto_save_interval_sec": 60,
+    //   自动保存间隔（秒）；设为 0 禁用定时自动保存，区块卸载时仍会保存
+
+    "retain_margin_chunks": 6,
+    //   温存/落盘半径余量：chunk 离开渲染半径后，在 render_radius + 此值 内仍保留在内存
+    //   （不渲染、不卸载、不落盘），吸收边界来回走动的抖动；超出才落盘 + 卸载。
+    //   调大 = 更省磁盘 IO 与地形重生成，但占更多内存
+
+
+
+    //--------------
+    // ── 调试 ──────────────────────────────────────────
+    "print_profile_every_second": true,
+    //   每秒打印一次 profiler 汇总（各函数耗时 + 频道指标）
+    //   验证网络线程化阶段 2：原地静止跑 Host+Join，看主线程 net.* 各段【毫秒数】——
+    //   net.dispatch/net.pushChunks/net.pollSerialize/net.propSync 应都趋近 0（dispatch 除外，
+    //   它含 chunk 导入）。FPS 在单机多开下被 GPU 争抢污染，不可作为网络开销的判据，只看 CPU ms。
+
+    "profile_detailed": false,
+    //   细粒度计时/计数开关：关闭时（默认）完全绕过热路径里的细分插桩
+    //   （cullPass 每 chunk 的 rdc.cull.* 计时、getVisibleSectionMask 每 section 的 vis.*
+    //   计数），连 steady_clock::now() 都不调，零开销。仅排查 cullPass 内部分布时才开。
+
+    "verbose_texture_loading": false,
+    //   输出纹理加载详情日志（每次启动时输出纹理加载信息，可关闭以减少干扰）
+
+    "verbose_shader_loading": false
+    //   输出着色器编译日志（编译成功/失败消息，可关闭以减少干扰）
 }
+
+
+
+
+
+
+
+
+
+
+
