@@ -375,12 +375,29 @@ void TextureMgr::parseConfig() {
                     std::cout << "[TextureMgr] 方块纹理: " << config.name << " layer=" << layer << std::endl;
             }
 
-            // 设置纹理数组过滤为最近邻 mipmap 最近邻
-            glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+            // 过滤策略（去远处闪烁 / 抗走样，参考原版 MC mipmap 实践）：
+            //  - MIN: GL_NEAREST_MIPMAP_LINEAR —— 在 mip 级内最近邻（保留像素画硬边的
+            //    "马赛克"质感），但在相邻两级 mip 之间线性插值，消除 mip 边界处的硬跳变
+            //    （NEAREST_MIPMAP_NEAREST 会在 mip 切换处一闪一闪）。
+            //  - MAG: GL_NEAREST —— 近处放大仍是清晰像素块，不丢 MC 像素感。
+            glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_LINEAR);
             glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
             glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
             glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
             glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
+
+            // 各向异性过滤：掠射角（远处地形、飞行俯视）下纹理被极度压缩，
+            // 各向同性 mipmap 要么过糊要么闪。AF 沿压缩方向多取样，是去远景闪烁的核心。
+            // GL 4.6 起 GL_TEXTURE_MAX_ANISOTROPY 进入核心，无需扩展。
+            {
+                GLfloat maxAniso = 1.0f;
+                glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY, &maxAniso);
+                // 受运行时配置上限约束（0 或负 = 取硬件最大）
+                float cfgAniso = RuntimeConfig::get().anisotropy;
+                float aniso = (cfgAniso > 0.0f) ? std::min(cfgAniso, maxAniso) : maxAniso;
+                if (aniso > 1.0f)
+                    glTexParameterf(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_ANISOTROPY, aniso);
+            }
             glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
         }
 

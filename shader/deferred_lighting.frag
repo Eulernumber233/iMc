@@ -4,11 +4,15 @@ in vec2 vTexCoord;
 out vec4 FragColor;
 
 // G-Buffer 纹理
-uniform sampler2D gPosition;
+uniform sampler2D gDepth;       // 深度纹理（GL_DEPTH_COMPONENT32F），用于重建位置
 uniform sampler2D gNormal;
 uniform sampler2D gAlbedo;
 uniform sampler2D gProperties;
 uniform sampler2D ssao;
+
+// 从深度重建位置所需的逆矩阵
+uniform mat4 invProjection;     // 深度 + 屏幕 UV → 视图空间
+uniform mat4 invView;           // 视图空间 → 世界空间
 
 // 光照参数
 uniform vec3 sunShineAmbient;
@@ -57,14 +61,22 @@ struct GBufferData {
     float metallic;
 };
 
+// 从深度纹理 + 屏幕 UV 重建世界空间位置。
+vec3 worldPosFromDepth(vec2 uv, float depth) {
+    vec4 clip = vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+    vec4 viewPos = invProjection * clip;
+    viewPos /= viewPos.w;                 // 视图空间位置
+    return (invView * viewPos).xyz;       // 世界空间位置
+}
+
 GBufferData readGBuffer(vec2 texCoord) {
     GBufferData data;
-    vec4 posData = texture(gPosition, texCoord);
+    float depth = texture(gDepth, texCoord).r;
     vec4 normalData = texture(gNormal, texCoord);
     vec4 albedoData = texture(gAlbedo, texCoord);
     vec4 propData = texture(gProperties, texCoord);
 
-    data.position = posData.xyz;
+    data.position = worldPosFromDepth(texCoord, depth);
     data.normal = normalize(normalData.xyz);
     data.albedo = albedoData.rgb;
     data.blockType = int(propData.r * 255.0);

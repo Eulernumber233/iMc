@@ -273,7 +273,7 @@ bool RenderSystem::initialize() {
     createScreenQuad();
 
     m_deferredLightingShader.use();
-    m_deferredLightingShader.setInt("gPosition", 0);
+    m_deferredLightingShader.setInt("gDepth", 0);     // 深度纹理（重建世界空间位置）
     m_deferredLightingShader.setInt("gNormal", 1);
     m_deferredLightingShader.setInt("gAlbedo", 2);
     m_deferredLightingShader.setInt("gProperties", 3);
@@ -327,7 +327,7 @@ bool RenderSystem::initialize() {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
     m_ssaoShader.use();
-    m_ssaoShader.setInt("gPositionDepth", 0);
+    m_ssaoShader.setInt("gDepth", 0);          // 深度纹理（重建视图空间位置）
     m_ssaoShader.setInt("gNormal", 1);
     m_ssaoShader.setInt("texNoise", 2);
     m_ssaoShader.setVec2("screenSize", glm::vec2(m_screenWidth, m_screenHeight));
@@ -708,7 +708,7 @@ void RenderSystem::render(const ChunkManager& chunkManager,
     m_currentTime += deltaTime;
 
     // 更新光源位置（含日出/日落平滑过渡强度 m_sunIntensity）
-    move_DirLight(deltaTime);
+    //move_DirLight(deltaTime);
 
     // 粒子系统按 active chunk 范围限制采样
     {
@@ -733,7 +733,7 @@ void RenderSystem::render(const ChunkManager& chunkManager,
     }
 
     // 4. 光照通道：计算结果到 lightingFBO
-    { PROFILE_SCOPE("lightingPass"); lightingPass(camera, sunShine_near, sunShine_far, lightSpaceMatrix); }
+    { PROFILE_SCOPE("lightingPass"); lightingPass(camera, view, projection, sunShine_near, sunShine_far, lightSpaceMatrix); }
 
     // 5. 将光照颜色复制到合成 FBO
     //    深度无需 blit：compositeFBO 直接共享 G-Buffer 的深度纹理
@@ -842,16 +842,17 @@ void RenderSystem::ssaoPass(const glm::mat4& view, const glm::mat4& projection)
     glClear(GL_COLOR_BUFFER_BIT);
     m_ssaoShader.use();
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, m_gPosition);
+    glBindTexture(GL_TEXTURE_2D, m_depthTexture);   // 深度纹理，重建视图空间位置
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, m_gNormal);
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D, m_noiseTexture);
-    // Send kernel + rotation 
+    // Send kernel + rotation
     for (GLuint i = 0; i < 64; ++i)
         m_ssaoShader.setVec3("samples[" + std::to_string(i) + "]", ssaoKernel[i]);
     m_ssaoShader.setMat4("projection", projection);
     m_ssaoShader.setMat4("view", view);
+    m_ssaoShader.setMat4("invProjection", glm::inverse(projection));
     RenderQuad();
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
@@ -958,6 +959,7 @@ void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std
 
 
 void RenderSystem::lightingPass(const std::shared_ptr<Camera>camera
+    , const glm::mat4& view, const glm::mat4& projection
     , float sunShine_near, float sunShine_far, glm::mat4& lightSpaceMatrix) {
     glBindFramebuffer(GL_FRAMEBUFFER, m_lightingFBO);
     glViewport(0, 0, m_screenWidth, m_screenHeight);
@@ -969,7 +971,7 @@ void RenderSystem::lightingPass(const std::shared_ptr<Camera>camera
     m_deferredLightingShader.use();
 
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, m_gPosition);
+    glBindTexture(GL_TEXTURE_2D, m_depthTexture);   // 深度纹理，重建世界空间位置
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, m_gNormal);
     glActiveTexture(GL_TEXTURE2);
@@ -980,6 +982,10 @@ void RenderSystem::lightingPass(const std::shared_ptr<Camera>camera
     glBindTexture(GL_TEXTURE_2D, m_ssaoColorBufferBlur);
     glActiveTexture(GL_TEXTURE5);
     glBindTexture(GL_TEXTURE_2D, m_depthMap);
+
+    // 从深度重建位置所需的逆矩阵
+    m_deferredLightingShader.setMat4("invProjection", glm::inverse(projection));
+    m_deferredLightingShader.setMat4("invView", glm::inverse(view));
 
     m_deferredLightingShader.setVec3("uViewPos", camera->Position);
     m_deferredLightingShader.setVec3("sunShinePos", lightPos);

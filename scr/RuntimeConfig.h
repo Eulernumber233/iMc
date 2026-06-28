@@ -27,6 +27,10 @@ public:
     bool verboseTextureLoading = false;   // 输出纹理加载详情日志
     bool verboseShaderLoading = false;    // 输出着色器编译详情日志
 
+    // 各向异性过滤等级（方块纹理数组）。去远处地形闪烁的核心手段。
+    // <=0 或缺省 = 取硬件支持的最大值（通常 16）；填具体值则取 min(该值, 硬件最大)。
+    float anisotropy = 0.0f;
+
     // 存档：自动保存间隔（秒）。设为 0 禁用定时自动保存（区块卸载时仍会保存）
     int autoSaveIntervalSec = 60;
 

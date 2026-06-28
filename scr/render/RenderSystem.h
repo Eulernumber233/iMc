@@ -246,6 +246,7 @@ private:
     void sunShineShadowMap(const ChunkManager& chunkManager, const std::shared_ptr<Camera>camera,
         float& sunShine_near, float& sunShine_far, glm::mat4& lightSpaceMatrix);
     void lightingPass(const std::shared_ptr<Camera>camera,
+        const glm::mat4& view, const glm::mat4& projection,
         float sunShine_near, float sunShine_far, glm::mat4& lightSpaceMatrix);
     void renderOutlines(const glm::mat4& view, const glm::mat4& projection);
     void renderUI();
