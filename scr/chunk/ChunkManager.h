@@ -112,9 +112,12 @@ public:
 
     uint32_t getVisibilityGeneration() const { return m_visGeneration; }
 
-    // 网络导入：从网络接收整个 chunk 的方块数据（绕过地形生成）
-    void importChunkData(int chunkX, int chunkZ,
-                         std::unique_ptr<BlockState[]> blockBuffer);
+    // 网络导入（客户端）：把单 chunk 的「已序列化+LZ4 压缩」字节投递到 worker 线程，
+    // 由 worker 解压 + 切片成 BlockBox（绕过地形生成），产出走 block 完成队列、与本地生成
+    // 同一条 integrateBlockData 路径落入 m_blockReady。主线程在此只做一次 in-flight 标记 +
+    // 入队，解压这件重活不再占主线程（CHUNK_DATA 高频/批量到达时尤其受益）。
+    void submitNetworkChunkImport(int chunkX, int chunkZ,
+                                  std::vector<uint8_t>&& serializedChunk);
 
     // 网络客户端模式
     void setNetworkClient(bool v) { m_networkClient = v; }

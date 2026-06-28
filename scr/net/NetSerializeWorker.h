@@ -49,10 +49,20 @@ public:
     NetSerializeWorker(const NetSerializeWorker&) = delete;
     NetSerializeWorker& operator=(const NetSerializeWorker&) = delete;
 
-    // 启动 / 停止 worker 线程
+    // 序列化线程池上限（不超过它，且不少于 1）。取 min(4, 硬件并发-1) 的保守上限——
+    // 序列化+LZ4 不是主导 CPU，给太多线程只会和 mesh worker 抢核。
+    static int maxThreads();
+
+    // 启动线程池（初始 1 个线程）。已运行则忽略。
     void start();
+    // 停止并 join 所有线程，清空队列。
     void stop();
     bool isRunning() const { return m_running.load(std::memory_order_relaxed); }
+
+    // 动态调整目标线程数到 [1, maxThreads()]。增：立即补线程；减：多余线程下轮唤醒后自行退出。
+    // 由 NetManager 在客户端加入/离开时按当前 peer 数调用。线程安全。
+    void setThreadCount(int desired);
+    int threadCount() const { return m_aliveThreads.load(std::memory_order_relaxed); }
 
     // 主线程投递一个序列化任务（move 进队列）
     void submit(Job&& job);
@@ -73,9 +83,15 @@ private:
     //   每 section: [sectionY:u8][flags:u8]( [dataLen:u16][lz4 blocks] )
     static void serialize(const Job& job, std::vector<uint8_t>& out);
 
-    std::thread m_thread;
+    void spawnThread();  // 持 m_threadsMutex 调用，detach 一个新 worker
+
     std::atomic<bool> m_stop{ false };
     std::atomic<bool> m_running{ false };
+
+    // 线程池管理（worker 线程 detach，靠 m_aliveThreads 计数 + 目标数做动态扩缩容）
+    std::mutex m_threadsMutex;               // 串行化扩缩容（start/stop/setThreadCount）
+    std::atomic<int> m_targetThreads{ 1 };   // 期望线程数 [1, maxThreads()]
+    std::atomic<int> m_aliveThreads{ 0 };    // 当前存活 worker 数
 
     // 任务队列
     mutable std::mutex m_jobMutex;

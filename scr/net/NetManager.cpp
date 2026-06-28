@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <chrono>
 #include <thread>
+#include <algorithm>
 
 NetManager::NetManager() = default;
 
@@ -304,6 +305,17 @@ void NetManager::update() {
     }
 }
 
+void NetManager::updateSerializeThreadCount() {
+    if (!m_isHost) return;
+    // 远程客户端数 = 有 peer 的玩家数（排除 host 本地玩家，其 peer 为 nullptr）。
+    int clientCount = 0;
+    for (auto& [id, p] : m_players) {
+        if (p->peer) ++clientCount;
+    }
+    // 线程数 = max(1, clientCount)，由 NetSerializeWorker 内部夹到 [1, maxThreads()]。
+    m_chunkSync.setSerializeThreadCount((std::max)(1, clientCount));
+}
+
 void NetManager::dispatchEvents() {
     // 阶段 2：网络线程已把事件解析好放进入站队列，主线程在此取走 dispatch（不再直接碰 ENet）。
     std::vector<NetEvent> events;
@@ -338,6 +350,8 @@ void NetManager::dispatchEvents() {
                 if (m_isHost) {
                     auto msg = NetMessage::playerLeft(pid);
                     sendToAll(nullptr, msg, true);
+                    // 客户端减少 → 缩小序列化线程池
+                    updateSerializeThreadCount();
                 }
             }
             break;
@@ -356,12 +370,10 @@ void NetManager::dispatchEvents() {
     }
 }
 
-void NetManager::dispatchMessage(ENetPeer* peer, const NetMessage& msg) {
-    // 复制 payload，因为需要多次读取
-    MemoryStream payload;
-    if (msg.payload.size() > 0) {
-        payload.writeBytes(msg.payload.data(), msg.payload.size());
-    }
+void NetManager::dispatchMessage(ENetPeer* peer, NetMessage& msg) {
+    // 直接读 msg.payload —— decode 已把包字节拷进它且读游标在 0，无需再拷一份 MemoryStream。
+    // 高频不可靠位置包尤其受益（每客户端每帧一个）。
+    MemoryStream& payload = msg.payload;
 
     switch (msg.type) {
     case NetMsgType::JOIN_REQUEST:
@@ -396,7 +408,6 @@ void NetManager::dispatchMessage(ENetPeer* peer, const NetMessage& msg) {
     case NetMsgType::CHUNK_DATA:
     case NetMsgType::CHUNK_RESPONSE:
         if (!m_isHost) {
-            printf("[NetManager] received CHUNK_DATA/CHUNK_RESPONSE (%zu bytes)\n", payload.size());
             handleChunkData(payload);
         }
         break;
@@ -529,6 +540,9 @@ void NetManager::handleJoinRequest(ENetPeer* peer, MemoryStream& payload) {
         auto msg = NetMessage::playerJoined(newId, playerName, px, py, pz, pyaw, skinName);
         sendToAll(peer, msg, true);  // 排除新玩家自己
     }
+
+    // 客户端增加 → 先扩大序列化线程池，再投递全量推送（pushAllChunks 会一次提交几百个 job）。
+    updateSerializeThreadCount();
 
     // 全量推送地形给新玩家
     m_chunkSync.pushAllChunks(peer);
@@ -705,7 +719,6 @@ void NetManager::handleChunkRequest(ENetPeer* peer, MemoryStream& payload) {
     if (!peer || payload.remaining() < 8) return;
     int32_t chunkX = payload.readPod<int32_t>();
     int32_t chunkZ = payload.readPod<int32_t>();
-    printf("[NetManager] CHUNK_REQUEST for (%d,%d)\n", chunkX, chunkZ);
     m_chunkSync.handleChunkRequest(peer, chunkX, chunkZ);
 }
 

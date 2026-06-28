@@ -33,6 +33,11 @@ public:
     // 关闭序列化线程（NetManager::leave 调用）
     void shutdown();
 
+    // 按当前远程客户端数动态调整序列化线程池大小（host 模式，玩家加入/离开时调用）。
+    void setSerializeThreadCount(int clientCount) {
+        if (m_serializeWorker.isRunning()) m_serializeWorker.setThreadCount(clientCount);
+    }
+
     // ---- 服务端 ----
 
     // 增量：推送新晋升到 loaded 的 chunk

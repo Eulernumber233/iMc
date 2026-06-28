@@ -2,6 +2,8 @@
 #include "Chunk.h"
 #include "../generate/TerrainGenerator.h"
 #include "../save/ChunkSaveManager.h"
+#include "../net/lz4.h"
+#include "../net/NetChunkSync.h"  // ChunkSyncFormat::FLAG_HAS_DATA
 #include <iostream>
 #include <cstring>
 #include <shared_mutex>
@@ -72,6 +74,20 @@ void ChunkWorkerPool::submitMeshBuild(const MeshBuildInput& input) {
     m_jobCV.notify_one();
 }
 
+void ChunkWorkerPool::submitNetImport(int chunkX, int chunkZ, std::vector<uint8_t>&& serialized) {
+    Job j;
+    j.kind = JOB_NET_IMPORT;
+    j.pos = glm::ivec2(chunkX, chunkZ);
+    j.netData = std::move(serialized);
+    {
+        std::lock_guard<std::mutex> lk(m_jobMutex);
+        m_jobs.push_back(std::move(j));
+    }
+    // 与 JOB_BUILD 一样计入 pending（产出走 block 完成队列，主线程同一条 integrate 路径消化）
+    m_pending.fetch_add(1, std::memory_order_relaxed);
+    m_jobCV.notify_one();
+}
+
 std::vector<BlockDataResult> ChunkWorkerPool::drainBlockData() {
     std::deque<std::unique_ptr<BlockDataResult>> tmp;
     {
@@ -116,6 +132,16 @@ void ChunkWorkerPool::workerMain() {
                 m_blockDone.push_back(std::move(result));
             }
             m_pending.fetch_sub(1, std::memory_order_relaxed);
+        } else if (job.kind == JOB_NET_IMPORT) {
+            // 客户端网络导入：解压 + 切片在 worker 做，产出与 JOB_BUILD 同型，走同一完成队列。
+            auto result = std::make_unique<BlockDataResult>();
+            result->pos = job.pos;
+            netImportOne(job.pos, job.netData, *result);
+            {
+                std::lock_guard<std::mutex> lk(m_blockDoneMutex);
+                m_blockDone.push_back(std::move(result));
+            }
+            m_pending.fetch_sub(1, std::memory_order_relaxed);
         } else {
             // JOB_MESH
             auto result = std::make_unique<ChunkBuildResult>();
@@ -150,6 +176,71 @@ void ChunkWorkerPool::buildOne(const glm::ivec2& pos, BlockDataResult& out) cons
     }
 
     splitChunkBufferToBoxes(tmp.get(), out.boxes);
+}
+
+// ============================================================================
+// 网络导入（客户端）：解压单 chunk 序列化字节 → 16 个 BlockBox
+// ============================================================================
+
+void ChunkWorkerPool::netImportOne(const glm::ivec2& pos,
+                                   const std::vector<uint8_t>& serialized,
+                                   BlockDataResult& out) {
+    // 格式（与 NetSerializeWorker::serialize 一致）：
+    //   [chunkX:i32][chunkZ:i32][numSections:u8]
+    //   每 section：[sy:u8][flags:u8]( [dataLen:u16][lz4 blocks] )
+    // 解压进整 chunk buffer（默认 AIR），再切片成 16 个 box。
+    constexpr int VOL = ChunkConstants::CHUNK_VOLUME;
+    constexpr int BLOCK_SIZE = Section::VOLUME * sizeof(BlockState);
+
+    auto blockBuf = std::make_unique<BlockState[]>(VOL);
+    std::memset(blockBuf.get(), 0, VOL * sizeof(BlockState));  // 默认 AIR
+
+    const uint8_t* data = serialized.data();
+    size_t len = serialized.size();
+    size_t p = 0;
+
+    // 跳过 chunkX/Z（投递时已知 pos，这里只为对齐格式），读 numSections
+    if (len < 9) {
+        // 数据损坏：boxes 留空（全 nullptr），主线程 integrate 仍会把它当 block-ready 空 chunk。
+        splitChunkBufferToBoxes(blockBuf.get(), out.boxes);
+        return;
+    }
+    p += 8;  // 4+4 字节 chunkX/Z
+    uint8_t numSections = data[p++];
+
+    std::vector<uint8_t> decompressBuf(BLOCK_SIZE);
+
+    for (uint8_t i = 0; i < numSections && p < len; ++i) {
+        if (p >= len) break;
+        uint8_t sy = data[p++];
+        if (p >= len) break;
+        uint8_t flags = data[p++];
+
+        if ((flags & ChunkSyncFormat::FLAG_HAS_DATA) == 0) {
+            continue;  // 全空气 section
+        }
+
+        if (p + 2 > len) break;
+        uint16_t dataLen = static_cast<uint16_t>(data[p])
+            | (static_cast<uint16_t>(data[p + 1]) << 8);
+        p += 2;
+        if (p + dataLen > len) break;
+
+        int decompressedSize = LZ4_decompress_safe(
+            reinterpret_cast<const char*>(data + p),
+            reinterpret_cast<char*>(decompressBuf.data()),
+            dataLen, BLOCK_SIZE);
+        p += dataLen;
+
+        if (decompressedSize != BLOCK_SIZE) continue;  // 解压失败，跳过此 section
+
+        if (sy < (ChunkConstants::CHUNK_HEIGHT / Section::HEIGHT)) {
+            int sectionStart = sy * Section::VOLUME;
+            std::memcpy(blockBuf.get() + sectionStart, decompressBuf.data(), BLOCK_SIZE);
+        }
+    }
+
+    splitChunkBufferToBoxes(blockBuf.get(), out.boxes);
 }
 
 // ============================================================================

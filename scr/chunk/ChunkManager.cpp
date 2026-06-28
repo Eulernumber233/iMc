@@ -505,35 +505,20 @@ void ChunkManager::forceChunkLoad(const glm::ivec2& chunkPos) {
     m_workerPool.submitBuild(chunkPos);
 }
 
-void ChunkManager::importChunkData(int chunkX, int chunkZ,
-                                   std::unique_ptr<BlockState[]> blockBuffer) {
+void ChunkManager::submitNetworkChunkImport(int chunkX, int chunkZ,
+                                            std::vector<uint8_t>&& serializedChunk) {
     glm::ivec2 pos(chunkX, chunkZ);
     ChunkKey key = chunkPosToKey(pos);
 
-    if (m_loadedChunks.find(key) != m_loadedChunks.end()) {
-        printf("[ChunkManager] importChunkData: (%d,%d) already loaded, skip\n", chunkX, chunkZ);
-        return;
-    }
-    if (m_blockReady.find(key) != m_blockReady.end()) {
-        printf("[ChunkManager] importChunkData: (%d,%d) already block-ready, skip\n", chunkX, chunkZ);
-        return;
-    }
+    // 已就绪则不必再投递（worker 解压是浪费）。整批晋升后的二次到达在这里就被挡掉；
+    // 即便漏挡，integrateBlockData 也会再做一次同样的 dup-check（line ~559）。
+    if (m_loadedChunks.find(key) != m_loadedChunks.end()) return;
+    if (m_blockReady.find(key) != m_blockReady.end()) return;
 
-    // 从 m_inFlight 移除（由 requestMissingChunks 插入的 CHUNK_REQUEST 标记）
-    m_inFlight.erase(key);
-
-    // 直接在主线程构造 BlockReadyEntry，无需走 worker（数据已经解压完毕）。
-    // 网络反序列化出的整 chunk buffer 切片进 16 个 section BlockBox。
-    BlockReadyEntry entry;
-    splitChunkBufferToBoxes(blockBuffer.get(), entry.boxes);
-    m_blockReady[key] = std::move(entry);
-
-    // 通知邻居并检查是否可投递 mesh
-    notifyNeighborsBlockReady(pos);
-    checkAndSubmitMesh(pos);
-
-    printf("[ChunkManager] importChunkData: (%d,%d) block-ready, inflight=%zu, blockReady=%zu\n",
-        chunkX, chunkZ, m_inFlight.size(), m_blockReady.size());
+    // 标记 in-flight（与本地生成的 JOB_BUILD 共用 m_inFlight 语义）。worker 解压完产出
+    // BlockDataResult 进 block 完成队列，integrateBlockData 会 erase 掉这个标记。
+    m_inFlight[key] = glfwGetTime();
+    m_workerPool.submitNetImport(chunkX, chunkZ, std::move(serializedChunk));
 }
 
 // ============================================================================

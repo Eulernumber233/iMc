@@ -60,6 +60,11 @@ public:
     // Task 2：生成完整可见面（含边界）
     void submitMeshBuild(const MeshBuildInput& input);
 
+    // 网络导入（客户端）：把单个 chunk 的「已序列化+LZ4 压缩」字节（含 chunkX/Z 头 + 各 section）
+    // 投递到 worker，由 worker 解压 + 切片成 16 个 BlockBox，产出 BlockDataResult 进 block 完成队列，
+    // 与 JOB_BUILD 同构——主线程 drainBlockData / integrateBlockData 直接复用，无需单独集成路径。
+    void submitNetImport(int chunkX, int chunkZ, std::vector<uint8_t>&& serialized);
+
     // 主线程每帧调用：拿出已完成的 Task 1 结果
     std::vector<BlockDataResult> drainBlockData();
     // 主线程每帧调用：拿出已完成的 Task 2 结果
@@ -75,13 +80,17 @@ private:
     void workerMain();
     void buildOne(const glm::ivec2& pos, BlockDataResult& out) const;
     void meshBuildOne(const MeshBuildInput& in, ChunkBuildResult& out) const;
+    // 网络导入：解压 serialized → 切片成 16 个 box。失败（数据损坏）时 out.boxes 全 nullptr。
+    static void netImportOne(const glm::ivec2& pos, const std::vector<uint8_t>& serialized,
+                             BlockDataResult& out);
 
-    enum JobKind : uint8_t { JOB_BUILD = 0, JOB_MESH = 1 };
+    enum JobKind : uint8_t { JOB_BUILD = 0, JOB_MESH = 1, JOB_NET_IMPORT = 2 };
 
     struct Job {
         JobKind kind;
         glm::ivec2 pos{ 0, 0 };
         MeshBuildInput meshInput{};
+        std::vector<uint8_t> netData;  // JOB_NET_IMPORT：单 chunk 的序列化字节
     };
 
     const TerrainGenerator* m_generator = nullptr;

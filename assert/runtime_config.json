@@ -41,7 +41,7 @@
 
     //--------------
     // ── 调试 ──────────────────────────────────────────
-    "print_profile_every_second": true,
+    "print_profile_every_second": false,
     //   每秒打印一次 profiler 汇总（各函数耗时 + 频道指标）
     //   验证网络线程化阶段 2：原地静止跑 Host+Join，看主线程 net.* 各段【毫秒数】——
     //   net.dispatch/net.pushChunks/net.pollSerialize/net.propSync 应都趋近 0（dispatch 除外，

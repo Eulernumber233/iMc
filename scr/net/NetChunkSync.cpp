@@ -3,7 +3,6 @@
 #include "../chunk/ChunkManager.h"
 #include "../chunk/Chunk.h"
 #include "../chunk/Section.h"
-#include "lz4.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -14,8 +13,9 @@
 void NetChunkSync::init(ChunkManager* cm, NetManager* net) {
     m_chunkManager = cm;
     m_netManager = net;
-    // 启动专用序列化线程（仅服务端真正用到，但客户端启动也无害——它不投任务）
-    if (!m_serializeWorker.isRunning()) {
+    // 序列化线程只服务端用（推送 chunk）；客户端的反序列化已改走 ChunkWorkerPool，
+    // 故非 host 模式不启动此线程池。init 在 host()/join() 之后调，isHosting() 此时有效。
+    if (net && net->isHosting() && !m_serializeWorker.isRunning()) {
         m_serializeWorker.start();
     }
 }
@@ -235,8 +235,6 @@ void NetChunkSync::handleChunkRequest(ENetPeer* peer, int chunkX, int chunkZ) {
     if (m_chunkManager->getChunkBoxes(pos, boxes)) {
         submitSerializeJob(chunkX, chunkZ, boxes, { peer });
         m_sentChunks[peer].insert(makeKey(chunkX, chunkZ));  // 乐观标记
-        printf("[NetChunkSync] queued CHUNK_REQUEST (%d,%d) for serialization\n",
-            chunkX, chunkZ);
         return;
     }
 
@@ -281,8 +279,6 @@ void NetChunkSync::pollPendingRequests() {
         }
         if (!targets.empty()) {
             submitSerializeJob(cx, cz, boxes, std::move(targets));
-            printf("[NetChunkSync] pollPending: queued (%d,%d) for serialization to %zu peers\n",
-                cx, cz, peers.size());
         }
 
         resolved.push_back(key);
@@ -351,11 +347,23 @@ void NetChunkSync::onChunkData(const uint8_t* data, size_t len) {
 
 void NetChunkSync::deserializeAndImport(const uint8_t* data, size_t len) {
     // 一个 CHUNK_DATA 消息可能包含多个拼接的 chunk（pushChunks 按 16KB 批次打包）。
-    // 循环解析直到全部消费，避免批次中第 2 个及以后的 chunk 被静默丢弃。
+    // 这里【只走 framing】把每个 chunk 的字节子区间切出来，投递给 worker 线程做 LZ4 解压 + 切片
+    // （重活离开主线程）。framing 解析极廉价：读 chunkX/Z + numSections + 各 section 的 dataLen
+    // 跳过即可，不触碰 LZ4。worker 产出 BlockDataResult 走 ChunkManager 的 block 完成队列集成。
+    if (!m_chunkManager) {
+        static int nullCmWarnCount = 0;
+        if (nullCmWarnCount < 5) {
+            fprintf(stderr, "[NetChunkSync] deserializeAndImport: m_chunkManager is null!\n");
+            ++nullCmWarnCount;
+        }
+        return;
+    }
+
     size_t pos = 0;
-    int chunkCount = 0;
 
     while (pos + 9 <= len) {  // 至少需要 4+4+1 = 9 字节 header
+        size_t chunkStart = pos;  // 本 chunk 字节起点（含 chunkX/Z 头）
+
         auto readI32 = [&]() -> int32_t {
             int32_t v = static_cast<int32_t>(data[pos])
                 | (static_cast<int32_t>(data[pos + 1]) << 8)
@@ -370,23 +378,16 @@ void NetChunkSync::deserializeAndImport(const uint8_t* data, size_t len) {
         if (pos >= len) break;
         uint8_t numSections = data[pos++];
 
-        static constexpr int VOL = ChunkConstants::CHUNK_VOLUME;
-        static constexpr int BLOCK_SIZE = Section::VOLUME * sizeof(BlockState);
-        auto blockBuf = std::make_unique<BlockState[]>(VOL);
-        std::memset(blockBuf.get(), 0, VOL * sizeof(BlockState));  // 默认 AIR
-
-        std::vector<uint8_t> decompressBuf(BLOCK_SIZE);
         bool parseOk = true;
-
         for (uint8_t i = 0; i < numSections && pos < len; ++i) {
             if (pos >= len) { parseOk = false; break; }
-            uint8_t sy = data[pos++];
+            /*sy*/ (void)data[pos++];
 
             if (pos >= len) { parseOk = false; break; }
             uint8_t flags = data[pos++];
 
             if ((flags & ChunkSyncFormat::FLAG_HAS_DATA) == 0) {
-                continue;
+                continue;  // 全空气 section，无数据体
             }
 
             if (pos + 2 > len) { parseOk = false; break; }
@@ -395,37 +396,13 @@ void NetChunkSync::deserializeAndImport(const uint8_t* data, size_t len) {
             pos += 2;
 
             if (pos + dataLen > len) { parseOk = false; break; }
-
-            int decompressedSize = LZ4_decompress_safe(
-                reinterpret_cast<const char*>(data + pos),
-                reinterpret_cast<char*>(decompressBuf.data()),
-                dataLen,
-                BLOCK_SIZE);
-
-            pos += dataLen;
-
-            if (decompressedSize != BLOCK_SIZE) {
-                fprintf(stderr, "[NetChunkSync] LZ4 decompress failed for (%d,%d) sy=%d: "
-                    "expected %d, got %d\n", chunkX, chunkZ, sy, BLOCK_SIZE, decompressedSize);
-                continue;
-            }
-
-            int sectionStart = sy * Section::VOLUME;
-            std::memcpy(blockBuf.get() + sectionStart,
-                decompressBuf.data(), BLOCK_SIZE);
+            pos += dataLen;  // 跳过 lz4 数据体（不在主线程解压）
         }
 
-        if (parseOk && m_chunkManager) {
-            m_chunkManager->importChunkData(chunkX, chunkZ, std::move(blockBuf));
-            ++chunkCount;
-        } else if (!m_chunkManager) {
-            static int nullCmWarnCount = 0;
-            if (nullCmWarnCount < 5) {
-                fprintf(stderr, "[NetChunkSync] deserializeAndImport: m_chunkManager is null!\n");
-                ++nullCmWarnCount;
-            }
-            break;
-        }
-        // 解析失败（数据损坏或截断）：跳过本轮，while 条件会阻止继续
+        if (!parseOk) break;  // 数据损坏/截断：停止解析本批次剩余
+
+        // 切出本 chunk 完整字节 [chunkStart, pos)，投递到 worker 解压 + 切片。
+        std::vector<uint8_t> slice(data + chunkStart, data + pos);
+        m_chunkManager->submitNetworkChunkImport(chunkX, chunkZ, std::move(slice));
     }
 }

@@ -109,9 +109,13 @@ private:
     // 暂存于此，由主循环首次 dispatchEvents 先行消费（保留原「设置好再处理」语义）。
     std::vector<NetEvent> m_deferredInbound;
 
+    // 按当前远程客户端数更新序列化线程池大小（仅 host）。玩家加入/离开后调用。
+    void updateSerializeThreadCount();
+
     // ---- 消息分发 ----
     void dispatchEvents();
-    void dispatchMessage(ENetPeer* peer, const NetMessage& msg);
+    // 注意：非 const —— 直接读 msg.payload（推进其读游标），省掉一次 payload 拷贝。
+    void dispatchMessage(ENetPeer* peer, NetMessage& msg);
 
     // Handlers (服务端)
     void handleJoinRequest(ENetPeer* peer, MemoryStream& payload);
