@@ -73,6 +73,11 @@ private:
     // 渲染系统
     RenderSystem* m_renderSystem = nullptr;
 
+    // ---- 时间控制（o/p 调时间比例，固定灵敏度）----
+    void updateSunSpeedKeys(float deltaTime);    // 主循环每帧轮询 o/p 持续按住状态
+    void printTimeFlowSpeed();                   // 输出当前时间流速（现实世界单位）
+    static std::string formatWorldTime(float hour);  // 0-24 浮点 → "HH:MM"
+
     // 区块管理器
     std::shared_ptr<ChunkManager> m_chunkManager;
 

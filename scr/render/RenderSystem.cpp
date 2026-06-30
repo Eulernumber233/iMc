@@ -208,6 +208,7 @@ RenderSystem::~RenderSystem() {
     destroyTAATargets();
     destroyShadowVisTargets();
     destroyAoAccumTargets();
+    destroyShadowMapTargets();
     if (m_blueNoiseTex) glDeleteTextures(1, &m_blueNoiseTex);
 
     if (m_screenQuadVAO) glDeleteVertexArrays(1, &m_screenQuadVAO);
@@ -345,41 +346,11 @@ bool RenderSystem::initialize() {
 
 
 
-    // 配置阴影深度贴图 FBO（阶段 2：退 VSSM → 普通深度 + PCSS/PCF）
-    // 不再存 (d, d²) 的 RG32F 颜色，改用纯深度纹理附件，硬件直接写深度，
-    // FBO 无颜色附件（glDrawBuffer/ReadBuffer = GL_NONE），最省带宽且无每帧 mipmap 生成。
-    glGenFramebuffers(1, &m_depthMapFBO);
-    glBindFramebuffer(GL_FRAMEBUFFER, m_depthMapFBO);
-
-    glGenTextures(1, &m_depthMap);
-    glBindTexture(GL_TEXTURE_2D, m_depthMap);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, SHADOW_WIDTH, SHADOW_HEIGHT,
-        0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
-    // 必须 GL_LINEAR：PCSS 的半影连续过渡依赖深度图亚纹素插值。
-    // consumer 端 PCF 每个 tap 是硬比较（currentDepth <= d ? 1 : 0），可见度 = N 个 tap 的平均。
-    // 用 GL_NEAREST 时，接触处半影收窄会让所有 tap 落进同一纹素读到相同深度，
-    // 平均恰好为 0 或 1 —— 半影梯度被抹平，整面非黑即白（"只有亮暗没有阴影"）。
-    // GL_LINEAR 下 COMPARE_MODE=GL_NONE 返回的就是插值后的原始深度，行为是定义良好的。
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-    // 显式关闭深度比较模式：保证 texture(shadowMap, uv).r 返回（插值后的）原始深度而非比较结果。
-    // 默认值各驱动可能不一致 —— 显式设 GL_NONE 消除环境相关行为。
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_NONE);
-    // 边界深度=1.0（最远），保证阴影框外的 receiver 采到"无遮挡"，不产生假阴影
-    float borderColor[] = { 1.0f, 1.0f, 1.0f, 1.0f };
-    glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_depthMap, 0);
-
-    // 无颜色附件：显式关闭颜色读写
-    glDrawBuffer(GL_NONE);
-    glReadBuffer(GL_NONE);
-
-    // 检查阴影FBO是否完整
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-        std::cout << "ERROR::FRAMEBUFFER::m_depthMapFBO is not complete!" << std::endl;
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    // 配置 CSM 级联阴影深度贴图（阶段 3：深度纹理数组 + 逐级联渲染）
+    if (!createShadowMapTargets()) {
+        std::cerr << "Failed to create CSM shadow targets!" << std::endl;
+        return false;
+    }
 
 
 
@@ -415,6 +386,9 @@ bool RenderSystem::initialize() {
         std::cerr << "Failed to create AO accum targets!" << std::endl;
         return false;
     }
+    // 时间比例初值从 RuntimeConfig 取（运行时可被 o/p 覆盖）
+    m_timeScale = RuntimeConfig::get().timeScale;
+
     // TAA shader 纹理单元绑定（固定）
     m_taaShader.use();
     m_taaShader.setInt("currColor", 0);
@@ -526,13 +500,17 @@ void RenderSystem::setScreenSize(int width, int height) {
 
 void RenderSystem::move_DirLight(float deltaTime)
 {
-    // test
-    //deltaTime = 0;
-
-    static float time_now = 1.0f;
-    const float rotate_speed = 0.08f;   // 一个完整昼夜周期约 2π/0.08 ≈ 78 秒
-    time_now += deltaTime;
-    float angle = rotate_speed * time_now;
+    // 世界时间推进：m_sunMoving 时按"现实秒 → 游戏小时"的比例累加。比例可负（时间倒流）。
+    // 用 0-24 浮点表示世界时间，wrap 到 [0,24)。
+    if (m_sunMoving) {
+        m_worldTimeHours += m_timeScale * deltaTime;
+        m_worldTimeHours = glm::mod(m_worldTimeHours, 24.0f);
+        if (m_worldTimeHours < 0.0f) m_worldTimeHours += 24.0f;  // glm::mod 对负数已规范，这里双保险
+    }
+    // 世界时间 → 太阳角度：12 点太阳最高(angle=π/2)、6/18 点在地平线、0 点最低。
+    // angle = (h/24)*2π - π/2，与 lightPos.y = R*sin(angle) 对齐。
+    const float TWO_PI = 6.2831853f;
+    float angle = (m_worldTimeHours / 24.0f) * TWO_PI - TWO_PI * 0.25f;
 
     const float R = 100.0f;
     // 在 YZ 平面旋转，X 固定 —— 形成东升西落的日照弧线
@@ -862,6 +840,51 @@ void RenderSystem::destroyAoAccumTargets() {
     m_aoAccumValid = false;
 }
 
+// CSM 阴影深度纹理数组（每级联一个 layer）+ 单 FBO（渲染时逐级联重附 layer）。
+// 纹理参数与阶段 2 单张 shadow map 完全一致（GL_LINEAR + CLAMP_TO_BORDER + border=1.0 +
+// COMPARE_MODE=GL_NONE），原因见下方逐条注释，与单张时相同。
+bool RenderSystem::createShadowMapTargets() {
+    const RuntimeConfig& rc = RuntimeConfig::get();
+    // 实际级联数受编译期上限约束（shader 数组 uniform / 缓存数组定长）
+    m_csmSize = (rc.csmShadowSize > 0) ? rc.csmShadowSize : CSM_SHADOW_SIZE;
+
+    glGenTextures(1, &m_csmDepth);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, m_csmDepth);
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_DEPTH_COMPONENT32F,
+        m_csmSize, m_csmSize, CASCADE_COUNT,
+        0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+    // 必须 GL_LINEAR：PCSS 半影连续过渡依赖深度图亚纹素插值（详见阶段 2 单张时的同款注释）。
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    // 显式关闭比较模式：texture(shadowMap, ...).r 返回插值后的原始深度而非比较结果
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+    // 边界深度=1.0（最远）：级联框外 receiver 采到"无遮挡"，不产生假阴影
+    float borderColor[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    glTexParameterfv(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BORDER_COLOR, borderColor);
+
+    // 单 FBO，无颜色附件；渲染时逐级联 glFramebufferTextureLayer 切 layer
+    glGenFramebuffers(1, &m_csmFBO);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_csmFBO);
+    glDrawBuffer(GL_NONE);
+    glReadBuffer(GL_NONE);
+    // 先附 layer 0 做一次完整性检查
+    glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, m_csmDepth, 0, 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        std::cout << "ERROR::FRAMEBUFFER::m_csmFBO is not complete!" << std::endl;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+    return true;
+}
+
+void RenderSystem::destroyShadowMapTargets() {
+    if (m_csmFBO) glDeleteFramebuffers(1, &m_csmFBO);
+    if (m_csmDepth) glDeleteTextures(1, &m_csmDepth);
+    m_csmFBO = 0;
+    m_csmDepth = 0;
+}
+
 // 程序生成 tileable 蓝噪声纹理（void-and-cluster 算法，Ulichney 1993）。
 // 输出每像素一个 [0,1] 的 rank/256，能量谱呈高频（蓝噪声）。供阴影 PCSS 抖动用：
 // 配合"帧序号驱动的黄金角旋转"，让每帧采样方向去相关，TAA 跨帧累积成干净结果。
@@ -1054,21 +1077,20 @@ void RenderSystem::render(const ChunkManager& chunkManager,
     }
     { PROFILE_SCOPE("hbaoBlurPass"); hbaoBlurPass(); }
 
-    // 阴影映射
-    float sunShine_near, sunShine_far;
-    glm::mat4 lightSpaceMatrix;
+    // 阴影映射（CSM：逐级联算光锥 + 渲染深度到 m_csmDepth 各 layer）。
+    // 级联子视锥切分用未抖动的相机 projection（jitter 是亚像素平移，不影响切分）。
     {
         PROFILE_SCOPE("sunShineShadowMap");
-        sunShineShadowMap(chunkManager, camera, sunShine_near, sunShine_far, lightSpaceMatrix);
+        sunShineShadowMap(chunkManager, camera, view, projection);
     }
 
-    // 3.5 阴影可见度（单帧 PCSS）+ 时域累积。
+    // 3.5 阴影可见度（单帧 PCSS，按视距选级联）+ 时域累积。
     //     - 可见度 pass 用 geoProj 重建世界位置（与写入 m_depthTexture 的投影一致）。
     //     - 累积 pass 的 motion vector 用未抖动 viewProj（与 TAA 同一套），prevViewProj
     //       是上一帧未抖动 viewProj。光源旋转导致的逐 shadow-texel 翻转在此被跨帧平滑。
     {
         PROFILE_SCOPE("shadowVisibilityPass");
-        shadowVisibilityPass(view, geoProj, lightSpaceMatrix);
+        shadowVisibilityPass(view, geoProj);
     }
     {
         PROFILE_SCOPE("shadowAccumulatePass");
@@ -1079,7 +1101,7 @@ void RenderSystem::render(const ChunkManager& chunkManager,
 
     // 4. 光照通道：计算结果到 lightingFBO（读取累积后的阴影可见度）
     //    深度由 geoProj（抖动）写入，故位置重建必须用同一 geoProj 的逆，否则世界坐标有偏移
-    { PROFILE_SCOPE("lightingPass"); lightingPass(camera, view, geoProj, sunShine_near, sunShine_far, lightSpaceMatrix); }
+    { PROFILE_SCOPE("lightingPass"); lightingPass(camera, view, geoProj); }
 
     // 5. 将光照颜色复制到合成 FBO
     //    深度无需 blit：compositeFBO 直接共享 G-Buffer 的深度纹理
@@ -1335,98 +1357,174 @@ void RenderSystem::taaResolvePass(const glm::mat4& invViewProj, const glm::mat4&
     (void)dst;
 }
 
-void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std::shared_ptr<Camera>camera
-    , float& sunShine_near, float& sunShine_far, glm::mat4& lightSpaceMatrix)
+// practical split scheme（Zhang 2006）：对数切分与均匀切分按 lambda 混合。
+// 输出每级联的远边界（视图空间正距离）。near 取相机近平面，far 取阴影总覆盖距离。
+void RenderSystem::computeCascadeSplits(float nearP, float farP, float lambda, int count, float* outSplitView)
 {
-    // 夜晚（阳光强度为 0）：冻结上一帧的阴影矩阵，不再重建。
-    // 避免光方向接近水平时 lookAt 退化、阴影贴图乱跳；且夜晚着色器不使用阴影，
-    // 首次进入夜晚若无缓存则跳过阴影渲染。
-    if (m_sunIntensity <= 0.001f && m_hasCachedLightMatrix) {
-        lightSpaceMatrix = m_cachedLightSpaceMatrix;
-        sunShine_near    = m_cachedSunNear;
-        sunShine_far     = m_cachedSunFar;
-        return;
+    for (int i = 0; i < count; ++i) {
+        float p = float(i + 1) / float(count);
+        float logSplit = nearP * std::pow(farP / nearP, p);     // 对数：近处密
+        float uniSplit = nearP + (farP - nearP) * p;            // 均匀
+        outSplitView[i] = lambda * logSplit + (1.0f - lambda) * uniSplit;
+    }
+}
+
+// 为级联（视距区间 [splitNear, splitFar]）算贴合子视锥包围球的正交光空间矩阵。
+// 用包围球（对相机旋转不变）+ 各自 snap-to-texel，保证转视角/平移时光锥尺寸与纹素足迹稳定。
+glm::mat4 RenderSystem::computeCascadeMatrix(float splitNear, float splitFar,
+    const glm::mat4& camView, const glm::mat4& camProj,
+    const glm::vec3& lightDirNorm, int cascadeSize, float& outWorldExtent)
+{
+    // 1. 取相机子视锥 8 角点（世界空间）：用 invViewProj 反投影 NDC 立方体角点，
+    //    再按视距区间在近/远之间插值。
+    glm::mat4 invCamVP = glm::inverse(camProj * camView);
+    glm::vec3 frustumCorners[8];
+    int ci = 0;
+    for (int x = 0; x < 2; ++x)
+        for (int y = 0; y < 2; ++y)
+            for (int z = 0; z < 2; ++z) {
+                glm::vec4 pt = invCamVP * glm::vec4(
+                    2.0f * x - 1.0f, 2.0f * y - 1.0f, 2.0f * z - 1.0f, 1.0f);
+                frustumCorners[ci++] = glm::vec3(pt) / pt.w;
+            }
+    // frustumCorners 现在是整个相机视锥（真实 near..far）的 8 角点。把它沿 near→far 方向
+    // 重新插值到本级联的 [splitNear, splitFar] 区间。循环里 z 最内层，故 index 偶数=near 面、
+    // 奇数=far 面，相邻配对（i*2 与 i*2+1 是同一条棱的两端）。
+    //
+    // 关键：插值参数必须相对相机的【真实】near/far（投影 far=1000，见 World.cpp），而非阴影
+    // 覆盖距离——nearC/farC 这条棱跨越的是真实 0.1→1000，用 180 当 far 会把级联角点算错位。
+    // 真实 near/far 直接从角点的视图空间深度取，免去对 World.cpp 投影参数的硬编码耦合。
+    glm::vec3 splitCorners[8];
+    {
+        glm::vec3 n0 = frustumCorners[0], f0 = frustumCorners[1];
+        float realNear = -(camView * glm::vec4(n0, 1.0f)).z;   // 视图空间正距离
+        float realFar  = -(camView * glm::vec4(f0, 1.0f)).z;
+        float tNear = (splitNear - realNear) / (realFar - realNear);
+        float tFar  = (splitFar  - realNear) / (realFar - realNear);
+        for (int i = 0; i < 4; ++i) {
+            glm::vec3 nearC = frustumCorners[i * 2];
+            glm::vec3 farC  = frustumCorners[i * 2 + 1];
+            glm::vec3 dir = farC - nearC;              // 整条棱：真实 near→far
+            splitCorners[i]     = nearC + dir * tNear; // 本级联近面
+            splitCorners[i + 4] = nearC + dir * tFar;  // 本级联远面
+        }
     }
 
-    const float radius = MAX_SHADOW_DISTANCE;
-    glm::vec3 center = camera->Position;
+    // 2. 包围球：中心=8 角质心，半径=到质心最大距离
+    glm::vec3 center(0.0f);
+    for (int i = 0; i < 8; ++i) center += splitCorners[i];
+    center /= 8.0f;
+    float radius = 0.0f;
+    for (int i = 0; i < 8; ++i) {
+        float d = glm::length(splitCorners[i] - center);
+        if (d > radius) radius = d;     // 避开 windows.h 的 max 宏（NOMINMAX 未定义）
+    }
+    radius = std::ceil(radius);   // 取整，进一步减少半径随相机的微抖
 
-    // 光源视图：看向 center
-    glm::vec3 lightDirNorm = glm::normalize(lightDir);
-    // 近平面留 radius 余量，远平面 2*radius，保证 center 附近各方向都能命中
-    glm::vec3 lightEye = center - lightDirNorm * (radius + 50.0f);
+    const float pad = 50.0f;      // 沿光向往外扩，包住区间外更靠光源侧的 caster
+    glm::vec3 lightEye = center - lightDirNorm * (radius + pad);
     glm::mat4 lightView = glm::lookAt(lightEye, center, glm::vec3(0.0f, 1.0f, 0.0f));
 
-    // ---- snap-to-texel ----
-    // 只有 center 跨过纹素边界时才会跳一格
+    // 3. snap-to-texel（本级联自己的 texel 尺度），XYZ 都 snap
     {
-        const float worldUnitsPerTexel = (2.0f * radius) / float(SHADOW_WIDTH);
+        const float worldUnitsPerTexel = (2.0f * radius) / float(cascadeSize);
         glm::vec4 centerLS = lightView * glm::vec4(center, 1.0f);
-        // 阶段 2：snap Z 也对齐到纹素整数倍，减少光源/相机移动时深度方向的量化跳变
         glm::vec3 snappedLS = glm::vec3(
             std::floor(centerLS.x / worldUnitsPerTexel) * worldUnitsPerTexel,
             std::floor(centerLS.y / worldUnitsPerTexel) * worldUnitsPerTexel,
             std::floor(centerLS.z / worldUnitsPerTexel) * worldUnitsPerTexel
         );
-        // 把 snappedLS 变回世界空间，作为新的 center
         glm::mat4 invLightView = glm::inverse(lightView);
         glm::vec4 snappedWS = invLightView * glm::vec4(snappedLS, 1.0f);
         glm::vec3 newCenter = glm::vec3(snappedWS);
-
-        // 重建 lightView：对齐后的视图矩阵把 newCenter 映射到纹素整数位置
-        lightEye = newCenter - lightDirNorm * (radius + 50.0f);
+        lightEye = newCenter - lightDirNorm * (radius + pad);
         lightView = glm::lookAt(lightEye, newCenter, glm::vec3(0.0f, 1.0f, 0.0f));
     }
 
-    // 正交框固定为 [-radius, radius]
-    float left = -radius, right = radius;
-    float bottom = -radius, top = radius;
-    float nearP = 0.0f;
-    float farP = 2.0f * radius + 100.0f;
+    // 4. 正交框 [-radius, radius]，near=0、far=2*radius+pad（包住 caster 到 receiver 全程）
+    glm::mat4 lightProjection = glm::ortho(-radius, radius, -radius, radius,
+        0.0f, 2.0f * radius + pad);
+    outWorldExtent = 2.0f * radius;   // 世界跨度（正交框全宽），供 consumer 归一化半影
+    return lightProjection * lightView;
+}
 
-    glm::mat4 lightProjection = glm::ortho(left, right, bottom, top, nearP, farP);
+void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std::shared_ptr<Camera>camera,
+    const glm::mat4& camView, const glm::mat4& camProj)
+{
+    const RuntimeConfig& rc = RuntimeConfig::get();
+    const int cascadeCount = glm::clamp(rc.csmCascadeCount, 1, CASCADE_COUNT);
 
-    // 与 shader 约定：currentDepth 使用 projCoords.z（正交投影下即 [0,1] 线性），
-    // 这里的 sunShine_near/far 仅用于 PCSS 的世界尺度换算，不再用于 LinearizeDepth。
-    sunShine_near = nearP;
-    sunShine_far  = farP;
-    lightSpaceMatrix = lightProjection * lightView;
+    // 夜晚（阳光强度为 0）：冻结上一帧的级联矩阵，不再重建。
+    // 避免光方向接近水平时 lookAt 退化；夜晚着色器不用阴影，首次进夜晚若无缓存则跳过。
+    if (m_sunIntensity <= 0.001f && m_hasCachedLightMatrix) {
+        for (int i = 0; i < CASCADE_COUNT; ++i) {
+            m_cascadeLightMatrix[i]  = m_cachedCascadeLightMatrix[i];
+            m_cascadeSplitView[i]    = m_cachedCascadeSplitView[i];
+            m_cascadeWorldExtent[i]  = m_cachedCascadeWorldExtent[i];
+        }
+        return;
+    }
 
+    // 1. 算切分距离（视图空间远边界）
+    const float nearP = 0.1f;                              // 相机近平面（与 World.cpp 一致）
+    const float farP  = rc.shadowMaxDistance;              // 阴影总覆盖距离
+    float splits[CASCADE_COUNT];
+    computeCascadeSplits(nearP, farP, rc.csmSplitLambda, cascadeCount, splits);
 
-    // 渲染场景到深度贴图（仅深度，无颜色附件）
-    glViewport(0, 0, SHADOW_WIDTH, SHADOW_HEIGHT);
-    glBindFramebuffer(GL_FRAMEBUFFER, m_depthMapFBO);
+    glm::vec3 lightDirNorm = glm::normalize(lightDir);
+
+    // 2. 逐级联算光锥矩阵 + 渲染深度到对应 layer
+    glBindFramebuffer(GL_FRAMEBUFFER, m_csmFBO);
     // 生产者自保：深度图渲染必须 GL_DEPTH_TEST + glDepthMask 都开才会写深度。
     // 显式开启，防止上游全屏 pass 泄漏的关闭状态让阴影贴图渲成空图
-    // （这正是 AO 重构曾引入的 regression 根因 —— 详见 CLAUDE.md「GL 状态约定」）。
+    // （AO 重构曾引入的 regression 根因 —— 详见 CLAUDE.md「GL 状态约定」）。
     glEnable(GL_DEPTH_TEST);
     glDepthMask(GL_TRUE);
-    glClear(GL_DEPTH_BUFFER_BIT);
     glCullFace(GL_BACK);
     m_blockRenderer.bindArenaVBO(chunkManager.getArenaVBO());
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, chunkManager.getSectionBaseSSBO());
     const auto& cmds = chunkManager.getDrawCommands();
-    if (!cmds.empty()) {
-        m_blockRenderer.renderDepth(chunkManager.getIndirectBuffer(), (int)cmds.size(),
-            lightSpaceMatrix, nearP, farP);
-        m_drawCalls++;
+
+    glViewport(0, 0, m_csmSize, m_csmSize);
+    float prevSplit = nearP;
+    for (int i = 0; i < cascadeCount; ++i) {
+        m_cascadeSplitView[i]   = splits[i];
+        m_cascadeLightMatrix[i] = computeCascadeMatrix(prevSplit, splits[i],
+            camView, camProj, lightDirNorm, m_csmSize, m_cascadeWorldExtent[i]);
+        prevSplit = splits[i];
+
+        // 把 FBO 的深度附件指向本级联 layer，清深度，渲染
+        glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, m_csmDepth, 0, i);
+        glClear(GL_DEPTH_BUFFER_BIT);
+        if (!cmds.empty()) {
+            // renderDepth 的 near/far 参数 PCSS 不使用（projCoords.z 已是 [0,1] 线性），传 0/1 占位
+            m_blockRenderer.renderDepth(chunkManager.getIndirectBuffer(), (int)cmds.size(),
+                m_cascadeLightMatrix[i], 0.0f, 1.0f);
+            m_drawCalls++;
+        }
     }
+    // 未使用的级联槽（cascadeCount < CASCADE_COUNT）：矩阵留旧值，splitView 设很大，
+    // consumer 的选级联循环不会选到它们（viewDepth < splits[last] 必先命中有效级联）。
+    for (int i = cascadeCount; i < CASCADE_COUNT; ++i) {
+        m_cascadeSplitView[i]   = 1e9f;
+        m_cascadeWorldExtent[i] = m_cascadeWorldExtent[cascadeCount - 1]; // 防除零，取最后有效级联
+    }
+
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, m_screenWidth, m_screenHeight);
 
-    // 阶段 2：普通深度 + 手动 PCF，不再需要每帧 glGenerateMipmap（省一笔开销）
-
-    // 缓存当前阴影矩阵，供夜晚冻结使用
-    m_cachedLightSpaceMatrix = lightSpaceMatrix;
-    m_cachedSunNear = sunShine_near;
-    m_cachedSunFar  = sunShine_far;
+    // 缓存级联数组，供夜晚冻结使用
+    for (int i = 0; i < CASCADE_COUNT; ++i) {
+        m_cachedCascadeLightMatrix[i]  = m_cascadeLightMatrix[i];
+        m_cachedCascadeSplitView[i]    = m_cascadeSplitView[i];
+        m_cachedCascadeWorldExtent[i]  = m_cascadeWorldExtent[i];
+    }
     m_hasCachedLightMatrix = true;
 }
 
 // 单帧 PCSS 可见度 → m_shadowVisCurr（R8，1=受光，0=阴影）。蓝噪声 + 帧序号抖动，
 // 单帧噪声大，由 shadowAccumulatePass 跨帧累积降噪。
-void RenderSystem::shadowVisibilityPass(const glm::mat4& view, const glm::mat4& projection,
-    const glm::mat4& lightSpaceMatrix)
+void RenderSystem::shadowVisibilityPass(const glm::mat4& view, const glm::mat4& projection)
 {
     glBindFramebuffer(GL_FRAMEBUFFER, m_shadowVisFBO);
     glViewport(0, 0, m_screenWidth, m_screenHeight);
@@ -1439,7 +1537,7 @@ void RenderSystem::shadowVisibilityPass(const glm::mat4& view, const glm::mat4& 
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, m_gNormal);
     glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, m_depthMap);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, m_csmDepth);   // CSM 深度纹理数组
     glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_2D, m_blueNoiseTex);
 
@@ -1450,11 +1548,27 @@ void RenderSystem::shadowVisibilityPass(const glm::mat4& view, const glm::mat4& 
 
     m_shadowVisShader.setMat4("invProjection", glm::inverse(projection));
     m_shadowVisShader.setMat4("invView", glm::inverse(view));
-    m_shadowVisShader.setMat4("lightSpaceMatrix", lightSpaceMatrix);
     m_shadowVisShader.setVec3("sunShineDir", lightDir);
     m_shadowVisShader.setFloat("sunShineIntensity", m_sunIntensity);
 
+    // CSM：逐级联矩阵 + 切分远边界 + 用于算片元视距的 view 矩阵
     const RuntimeConfig& rc = RuntimeConfig::get();
+    const int cascadeCount = glm::clamp(rc.csmCascadeCount, 1, CASCADE_COUNT);
+    m_shadowVisShader.setInt("cascadeCount", cascadeCount);
+    m_shadowVisShader.setMat4("view", view);
+    // 数组 uniform 逐元素上传（Shader 类无数组 setter，用 glUniform* 直传）
+    GLint locMat = glGetUniformLocation(m_shadowVisShader.programID, "cascadeLightMatrix");
+    if (locMat >= 0)
+        glUniformMatrix4fv(locMat, CASCADE_COUNT, GL_FALSE, &m_cascadeLightMatrix[0][0][0]);
+    GLint locSplit = glGetUniformLocation(m_shadowVisShader.programID, "cascadeSplitView");
+    if (locSplit >= 0)
+        glUniform1fv(locSplit, CASCADE_COUNT, m_cascadeSplitView);
+    GLint locExtent = glGetUniformLocation(m_shadowVisShader.programID, "cascadeWorldExtent");
+    if (locExtent >= 0)
+        glUniform1fv(locExtent, CASCADE_COUNT, m_cascadeWorldExtent);
+    // 参考世界尺度：用最远级联跨度，让 shadow_light_size 的语义 = 阶段 2 单张覆盖全程时的半影
+    m_shadowVisShader.setFloat("uRefWorldExtent", m_cascadeWorldExtent[cascadeCount - 1]);
+
     m_shadowVisShader.setInt("blueNoiseSize", m_blueNoiseSize);
     m_shadowVisShader.setInt("frameIndex", (int)m_frameIndex);
     m_shadowVisShader.setInt("uBlockerSamples", rc.shadowBlockerSamples);
@@ -1501,8 +1615,7 @@ void RenderSystem::shadowAccumulatePass(const glm::mat4& invViewProj, const glm:
 
 
 void RenderSystem::lightingPass(const std::shared_ptr<Camera>camera
-    , const glm::mat4& view, const glm::mat4& projection
-    , float sunShine_near, float sunShine_far, glm::mat4& lightSpaceMatrix) {
+    , const glm::mat4& view, const glm::mat4& projection) {
     glBindFramebuffer(GL_FRAMEBUFFER, m_lightingFBO);
     glViewport(0, 0, m_screenWidth, m_screenHeight);
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
@@ -1553,6 +1666,10 @@ void RenderSystem::lightingPass(const std::shared_ptr<Camera>camera
     m_deferredLightingShader.setVec3("sunShineDiffuse", m_sunDiffuseColor * sunWeight);
     // 注：sunIntensity 已折进 sunWeight，shader 内不再二次乘，避免重复衰减
     m_deferredLightingShader.setFloat("sunShineIntensity", 1.0f);
+
+    // AO 随昼夜淡出：白天全效(=1)，夜晚淡到 aoNightStrength。解决"夜晚没光却有强阴影"。
+    float aoStrength = glm::mix(rc.aoNightStrength, 1.0f, m_sunIntensity);
+    m_deferredLightingShader.setFloat("aoStrength", aoStrength);
 
     RenderQuad();
 

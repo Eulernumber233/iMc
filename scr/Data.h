@@ -200,3 +200,9 @@ const unsigned int SHADOW_WIDTH = 4096;
 const unsigned int SHADOW_HEIGHT = 4096;
 
 const float MAX_SHADOW_DISTANCE = 180.0f;
+
+// 运行时实际级联数由 RuntimeConfig.csmCascadeCount 决定
+// 取 min(配置, CASCADE_COUNT)。
+const int CASCADE_COUNT = 4;
+// 每级联默认分辨率（可被 RuntimeConfig.csmShadowSize 覆盖）
+const int CSM_SHADOW_SIZE = 2048;

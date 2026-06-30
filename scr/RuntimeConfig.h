@@ -38,6 +38,14 @@ public:
     int   shadowFilterSamples  = 8;     // PCF filter 抽样数（半影内可见度平均）
     float shadowLightSize      = 0.008f;// 光源"大小"（阴影贴图 UV），决定半影强度
 
+    // ---- CSM 级联阴影（阶段 3）----
+    // 把单张 shadow map 换成按视距分级的多张，根治远处阴影边缘随视角晃的"波浪"。
+    // 级联数 / 分辨率改后需重建 CSM target（重启最稳）；lambda / 距离每帧重算即生效。
+    int   csmCascadeCount = 4;          // 级联数（1~CASCADE_COUNT 编译期上限），超上限被截断
+    float csmSplitLambda  = 0.7f;       // 切分混合：1=纯对数(近处极密)，0=纯均匀
+    int   csmShadowSize   = 2048;       // 每级联分辨率（重建 target 才生效）
+    float shadowMaxDistance = 180.0f;   // 阴影总覆盖距离（最远级联远边界，米）
+
     // ---- AO（阶段 2：HBAO + 蓝噪声 + 时域累积）----
     // 单帧少方向/少步数（噪声大但便宜），靠时域累积降噪。AO 纯几何恒定，收敛快。
     int   aoDirections = 4;             // HBAO 采样方向数
@@ -45,6 +53,9 @@ public:
     float aoRadius     = 0.8f;          // 采样半径（世界尺度，米）
     float aoIntensity  = 1.5f;          // 遮蔽强度（指数，越大越黑）
     float aoBias       = 0.1f;          // 切线角 bias（弧度），抑制自遮挡暗带
+    // AO 随昼夜淡出：白天 AO 全效(=1)，夜晚淡到此弱底值。解决"夜晚没光却有强阴影"的违和。
+    // effectiveAO = mix(1.0, ao, aoStrength)，aoStrength = mix(aoNightStrength, 1.0, sunIntensity)
+    float aoNightStrength = 0.25f;      // 夜晚 AO 强度底值（0=夜晚完全无 AO，1=不淡出）
 
     // ---- 直接光照能量分配（参考原版 MC：环境光 + 阳光两份，按昼夜分配）----
     // 模型：result = budget * (ambientWeight*albedo*ao + sunWeight*NdotL*visibility*albedo)
@@ -58,6 +69,10 @@ public:
     float ambientDay    = 0.55f;        // 白天环境光占比（未受阳光处的底光，调大→阴影更亮）
     float ambientNight  = 0.40f;        // 夜晚环境光占比（夜间底光）
     float sunStrength    = 0.55f;       // 阳光份额（正午满日照时的直射功率）
+
+    // 时间比例：1 现实秒 = 多少游戏小时。默认 0.2 → 一整天 24h 约 120 现实秒。
+    // o/p 键运行时可调（可负=时间倒流），此处是初值。
+    float timeScale = 0.2f;
 
     // 温存/落盘半径余量：chunk 离开渲染半径后，在 renderRadius + retainMarginChunks 内
     // 仍保留在内存（不渲染、不卸载、不落盘），形成"温存区"吸收边界抖动；

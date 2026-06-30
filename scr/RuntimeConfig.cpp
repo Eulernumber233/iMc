@@ -86,15 +86,21 @@ void RuntimeConfig::loadFrom(const std::string& path) {
     if (root.isMember("shadow_blocker_samples")) shadowBlockerSamples = root["shadow_blocker_samples"].asInt();
     if (root.isMember("shadow_filter_samples")) shadowFilterSamples = root["shadow_filter_samples"].asInt();
     if (root.isMember("shadow_light_size")) shadowLightSize = (float)root["shadow_light_size"].asDouble();
+    if (root.isMember("csm_cascade_count")) csmCascadeCount = root["csm_cascade_count"].asInt();
+    if (root.isMember("csm_split_lambda")) csmSplitLambda = (float)root["csm_split_lambda"].asDouble();
+    if (root.isMember("csm_shadow_size")) csmShadowSize = root["csm_shadow_size"].asInt();
+    if (root.isMember("shadow_max_distance")) shadowMaxDistance = (float)root["shadow_max_distance"].asDouble();
     if (root.isMember("ao_directions")) aoDirections = root["ao_directions"].asInt();
     if (root.isMember("ao_steps")) aoSteps = root["ao_steps"].asInt();
     if (root.isMember("ao_radius")) aoRadius = (float)root["ao_radius"].asDouble();
     if (root.isMember("ao_intensity")) aoIntensity = (float)root["ao_intensity"].asDouble();
     if (root.isMember("ao_bias")) aoBias = (float)root["ao_bias"].asDouble();
+    if (root.isMember("ao_night_strength")) aoNightStrength = (float)root["ao_night_strength"].asDouble();
     if (root.isMember("light_budget")) lightBudget = (float)root["light_budget"].asDouble();
     if (root.isMember("ambient_day")) ambientDay = (float)root["ambient_day"].asDouble();
     if (root.isMember("ambient_night")) ambientNight = (float)root["ambient_night"].asDouble();
     if (root.isMember("sun_strength")) sunStrength = (float)root["sun_strength"].asDouble();
+    if (root.isMember("time_scale")) timeScale = (float)root["time_scale"].asDouble();
 
     std::cout << "[RuntimeConfig] loaded from " << path
               << " | render_radius=" << renderRadius

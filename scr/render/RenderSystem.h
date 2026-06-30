@@ -99,6 +99,20 @@ public:
     UIManager& getUIManager() { return m_uiManager; }
     void setScreenSize(int width, int height);
 
+    // ---- 世界时间控制（o/p/l + 8/9/0 按键）----
+    // 调时间比例：delta 为增量（游戏小时/现实秒），可把比例调成负值（时间倒流）。
+    // 夹到 [-kTimeScaleMax, kTimeScaleMax]。
+    void adjustTimeScale(float delta) {
+        m_timeScale = glm::clamp(m_timeScale + delta, -kTimeScaleMax, kTimeScaleMax);
+    }
+    void toggleSunMoving() { m_sunMoving = !m_sunMoving; }
+    // 预设时间：直接把世界时间跳到 hour（[0,24)），不改比例（调用方决定是否顺便暂停）。
+    void setWorldTime(float hour) { m_worldTimeHours = glm::mod(hour, 24.0f); }
+    void setSunMoving(bool moving) { m_sunMoving = moving; }
+    float getTimeScale() const { return m_timeScale; }
+    float getWorldTime() const { return m_worldTimeHours; }
+    bool  isSunMoving() const { return m_sunMoving; }
+
     // 粒子系统
     void toggleWeather() { m_particleManager.toggleWeather(); }
     void emitBlockDebris(const glm::vec3& blockPosition, BlockType blockType, int count = 50) {
@@ -129,9 +143,19 @@ private:
     int    m_aoAccumCurrIdx = 0;
     bool   m_aoAccumValid   = false;
 
-    // 阴影
-    GLuint m_depthMapFBO;
-    GLuint m_depthMap;                        // 阴影深度图（DEPTH_COMPONENT32F，普通深度，阶段 2）
+    // 阴影（阶段 3：CSM 级联阴影）
+    // 单张 shadow map → 深度纹理数组（每级联一个 layer）。producer 逐级联渲染深度，
+    // consumer 按片元视距选级联在对应 layer 里跑 PCSS。时域累积/光照 pass 不受影响。
+    GLuint m_csmFBO   = 0;                     // 无颜色附件，逐级联重附 m_csmDepth 的不同 layer
+    GLuint m_csmDepth = 0;                     // GL_TEXTURE_2D_ARRAY，DEPTH_COMPONENT32F，depth=CASCADE_COUNT
+    int    m_csmSize  = CSM_SHADOW_SIZE;       // 每级联分辨率（创建时从 RuntimeConfig 取）
+    // 逐级联光空间矩阵 + 切分远边界（视图空间正距离，consumer 比对片元视距选级联）
+    glm::mat4 m_cascadeLightMatrix[CASCADE_COUNT];
+    float     m_cascadeSplitView[CASCADE_COUNT] = { 0.0f };
+    // 每级联的世界跨度（正交框全宽 = 2*包围球半径）。consumer 用它把半影按世界尺度归一化：
+    // lightSizeUV = shadowLightSize * (refExtent / extent)，使世界半影宽度跨级联一致
+    // （否则 UV 半影在近级联对应的世界半影远小于远级联 → 近处阴影偏锐，软度丢失）。
+    float     m_cascadeWorldExtent[CASCADE_COUNT] = { 0.0f };
 
     // 蓝噪声纹理：阴影 PCSS 的 blocker/filter 抖动源（配合帧序号时域去相关 + TAA 降噪）。
     // 程序生成的 tileable 64² 蓝噪声（void-and-cluster 近似），R 通道存 [0,1] 值。
@@ -172,6 +196,15 @@ private:
     glm::vec3 lightPos = { -100.0f, 100.0f, -50.0f };
     glm::vec3 lightDir = glm::normalize(glm::vec3(1.0f, -1.0f, 0.5f));
 
+    // ---- 世界时间驱动的太阳（o/p/l + 8/9/0 按键）----
+    // 抽象出 0-24 的世界时间（小时），由它换算太阳角度：angle = (h/24)*2π - π/2，
+    // 使 12 点太阳最高、6/18 点在地平线、0 点最低（与 lightPos.y=R*sin(angle) 对齐）。
+    // 时间按"现实秒 → 游戏小时"的比例推进：m_worldTimeHours += m_timeScale * dt。
+    float m_worldTimeHours = 12.0f;   // 当前世界时间 [0,24)，默认正午
+    float m_timeScale      = 0.2f;    // 时间比例：1 现实秒 = 多少游戏小时（可负=倒流）
+    bool  m_sunMoving      = true;    // 时间是否流动（l 切换；关 = 冻结时间）
+    static constexpr float kTimeScaleMax = 6.0f; // 比例上限（1 现实秒最多 6 游戏小时 → 4 秒一昼夜）
+
     // 白天->夜晚的强度系数 [0,1]，地平线附近平滑过渡
     float m_sunIntensity = 1.0f;
     // 日出/日落暖色系数 [0,1]，1=完全暖色(橙红)，0=中午白光
@@ -179,10 +212,10 @@ private:
     // 太阳当前色温对应的 diffuse 颜色（随 m_sunWarmth 在冷白↔暖橙间插值）
     glm::vec3 m_sunDiffuseColor = glm::vec3(1.0f);
 
-    // 夜晚冻结用的缓存（避免光方向退化时 lightSpaceMatrix 抖动）
-    glm::mat4 m_cachedLightSpaceMatrix = glm::mat4(1.0f);
-    float     m_cachedSunNear = 0.0f;
-    float     m_cachedSunFar  = 1.0f;
+    // 夜晚冻结用的缓存（避免光方向退化时级联矩阵抖动）。阶段 3：缓存整个级联数组。
+    glm::mat4 m_cachedCascadeLightMatrix[CASCADE_COUNT];
+    float     m_cachedCascadeSplitView[CASCADE_COUNT] = { 0.0f };
+    float     m_cachedCascadeWorldExtent[CASCADE_COUNT] = { 0.0f };
     bool      m_hasCachedLightMatrix = false;
 
     // 太阳绕固定轴做圆周运动：在 YZ 平面内旋转（Y 为高度），X 固定
@@ -268,6 +301,15 @@ private:
     void destroyShadowVisTargets();
     bool createAoAccumTargets();       // AO 时域累积 ping-pong 缓冲
     void destroyAoAccumTargets();
+    bool createShadowMapTargets();     // CSM 深度纹理数组 + FBO
+    void destroyShadowMapTargets();
+    // 计算 N 个级联的视图空间切分远边界（practical split scheme：对数+均匀混合）
+    void computeCascadeSplits(float nearP, float farP, float lambda, int count, float* outSplitView);
+    // 为级联 i（视距区间 [splitNear, splitFar]）算贴合子视锥包围球的正交光空间矩阵 +
+    // 各自 snap-to-texel。返回该级联的 lightSpaceMatrix。
+    glm::mat4 computeCascadeMatrix(float splitNear, float splitFar,
+        const glm::mat4& camView, const glm::mat4& camProj,
+        const glm::vec3& lightDirNorm, int cascadeSize, float& outWorldExtent);
     // TAA resolve：当前帧合成色 + 历史 → 时域累积，结果写入并显示
     void taaResolvePass(const glm::mat4& invViewProj, const glm::mat4& prevViewProj);
     // Halton(2,3) 亚像素抖动偏移（NDC 单位），按帧序号循环
@@ -281,16 +323,17 @@ private:
     void hbaoBlurPass();
     // AO 时域累积：重投影历史 + 邻域 clamp + 混合 → m_aoAccum[curr]
     void aoAccumulatePass(const glm::mat4& invViewProj, const glm::mat4& prevViewProj);
+    // CSM：逐级联算光锥 + 渲染深度到 m_csmDepth 各 layer。结果写入成员
+    // m_cascadeLightMatrix[] / m_cascadeSplitView[]（不再走出参）。
+    // camView/camProj 用未抖动的相机矩阵，按视距切子视锥。
     void sunShineShadowMap(const ChunkManager& chunkManager, const std::shared_ptr<Camera>camera,
-        float& sunShine_near, float& sunShine_far, glm::mat4& lightSpaceMatrix);
-    // 单帧 PCSS 可见度 → m_shadowVisCurr
-    void shadowVisibilityPass(const glm::mat4& view, const glm::mat4& projection,
-        const glm::mat4& lightSpaceMatrix);
+        const glm::mat4& camView, const glm::mat4& camProj);
+    // 单帧 PCSS 可见度 → m_shadowVisCurr（按视距选级联，采 m_csmDepth）
+    void shadowVisibilityPass(const glm::mat4& view, const glm::mat4& projection);
     // 时域累积：重投影历史 + 邻域 clamp + 混合 → m_shadowAccum[curr]
     void shadowAccumulatePass(const glm::mat4& invViewProj, const glm::mat4& prevViewProj);
     void lightingPass(const std::shared_ptr<Camera>camera,
-        const glm::mat4& view, const glm::mat4& projection,
-        float sunShine_near, float sunShine_far, glm::mat4& lightSpaceMatrix);
+        const glm::mat4& view, const glm::mat4& projection);
     void renderOutlines(const glm::mat4& view, const glm::mat4& projection);
     void renderUI();
     void renderModel(const std::shared_ptr<Camera>camera,

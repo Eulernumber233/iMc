@@ -9,17 +9,29 @@
 in vec2 vTexCoord;
 out float FragColor;   // 阳光可见度 [0,1]
 
+// 阶段 3：CSM 级联阴影。单张 shadow map → 深度纹理数组（每级联一个 layer）。
+// 按片元视距选级联，在选中 layer 里跑与阶段 2 完全相同的 PCSS；级联边界做淡入混合。
+#define CASCADE_COUNT 4   // 须与 C++ 端 Data.h 的 CASCADE_COUNT 一致（数组 uniform 编译期定长）
+
 // G-Buffer：深度重建世界位置 + 法线
 uniform sampler2D gDepth;
 uniform sampler2D gNormal;
 uniform mat4 invProjection;
 uniform mat4 invView;
 
-// 阴影贴图（普通深度）
-uniform sampler2D shadowMap;
-uniform mat4 lightSpaceMatrix;
+// CSM 阴影贴图数组（普通深度）+ 逐级联矩阵 + 切分远边界
+uniform sampler2DArray shadowMap;
+uniform mat4  cascadeLightMatrix[CASCADE_COUNT];
+uniform float cascadeSplitView[CASCADE_COUNT];  // 每级联远边界（视图空间正距离）
+uniform float cascadeWorldExtent[CASCADE_COUNT]; // 每级联世界跨度（正交框全宽）
+uniform float uRefWorldExtent;                  // 参考世界跨度（最远级联），半影归一化基准
+uniform int   cascadeCount;                     // 实际级联数（≤ CASCADE_COUNT）
+uniform mat4  view;                             // 算片元视图空间深度以选级联
 uniform vec3 sunShineDir;
 uniform float sunShineIntensity;
+
+// debug：把每级联染成不同颜色输出（验证切分/接缝），平时设 0
+#define CSM_DEBUG_TINT 0
 
 // 蓝噪声抖动 + 帧序号时域去相关
 uniform sampler2D blueNoiseTex;
@@ -70,32 +82,34 @@ mat2 ditherRotation(vec2 fragCoord) {
     return mat2(ca, -sa, sa, ca);
 }
 
-float FindBlockerAvgDepth(vec2 uv, float currentDepth, float searchRadiusUV, mat2 rot) {
+float FindBlockerAvgDepth(vec2 uv, float currentDepth, float searchRadiusUV, mat2 rot, int cascade) {
     float sum = 0.0;
     int count = 0;
     int N = min(uBlockerSamples, 16);
     for (int i = 0; i < N; i++) {
         vec2 sUV = uv + rot * poissonDisk[i] * searchRadiusUV;
-        float d = texture(shadowMap, sUV).r;
+        float d = texture(shadowMap, vec3(sUV, float(cascade))).r;
         if (d < currentDepth - 2e-4) { sum += d; count++; }
     }
     if (count == 0) return -1.0;
     return sum / float(count);
 }
 
-float PCSS_PCF_Filter(vec2 uv, float filterRadiusUV, float currentDepth, mat2 rot) {
+float PCSS_PCF_Filter(vec2 uv, float filterRadiusUV, float currentDepth, mat2 rot, int cascade) {
     float sum = 0.0;
     int N = min(uFilterSamples, 16);
     for (int i = 0; i < N; i++) {
         vec2 sUV = uv + rot * poissonDisk[i] * filterRadiusUV;
-        float d = texture(shadowMap, sUV).r;
+        float d = texture(shadowMap, vec3(sUV, float(cascade))).r;
         sum += (currentDepth <= d) ? 1.0 : 0.0;
     }
     return sum / float(N);
 }
 
-// 返回阳光可见度 [0,1]：1=受光，0=阴影
-float ShadowVisibility(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir, vec2 screenUV) {
+// 在指定级联里跑完整 PCSS，返回阳光可见度 [0,1]：1=受光，0=阴影。
+// 与阶段 2 单张逻辑完全一致，只是采样多了 cascade layer 维度。
+float ShadowVisibilityCascade(vec3 worldPos, vec3 normal, vec3 lightDir, vec2 screenUV, int cascade) {
+    vec4 fragPosLightSpace = cascadeLightMatrix[cascade] * vec4(worldPos, 1.0);
     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
     projCoords = projCoords * 0.5 + 0.5;
 
@@ -111,26 +125,62 @@ float ShadowVisibility(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir, vec2 
     float bias = CalculateBias(NdotL);
     float currentDepth = projCoords.z - bias;
 
-    ivec2 smSize = textureSize(shadowMap, 0);
+    ivec3 smSize = textureSize(shadowMap, 0);
     float texelUV = 1.0 / float(smSize.x);
 
     mat2 rot = ditherRotation(screenUV);
 
-    float blocker = FindBlockerAvgDepth(projCoords.xy, currentDepth, uLightSizeUV, rot);
+    // 半影世界尺度归一化：uLightSizeUV 是 UV 量，近级联覆盖世界范围小 → 同一 UV 对应的
+    // 世界半影更窄（阴影偏锐）。按 (参考跨度 / 本级联跨度) 放大近级联的 UV 半影，使世界
+    // 半影宽度跨级联一致——shadow_light_size 的语义回到"单张覆盖全程时的半影"。
+    float lightSizeUV = uLightSizeUV * (uRefWorldExtent / max(cascadeWorldExtent[cascade], 1e-3));
+
+    float blocker = FindBlockerAvgDepth(projCoords.xy, currentDepth, lightSizeUV, rot, cascade);
     if (blocker < 0.0) return 1.0;   // 无遮挡：完全受光
 
-    float penumbraUV = (currentDepth - blocker) / max(blocker, 1e-4) * uLightSizeUV;
+    float penumbraUV = (currentDepth - blocker) / max(blocker, 1e-4) * lightSizeUV;
+    // 半影上限同样按级联跨度放大：否则固定的 MAX_FILTER_TEXELS 纹素上限会把近级联放大后的
+    // 半影重新夹窄，归一化白做。放大后单帧采样更稀疏，靠蓝噪声 + 时域累积补（与阶段 2 同理）。
+    float extentScale = uRefWorldExtent / max(cascadeWorldExtent[cascade], 1e-3);
     float filterRadiusUV = clamp(penumbraUV,
                                  MIN_FILTER_TEXELS * texelUV,
-                                 MAX_FILTER_TEXELS * texelUV);
+                                 MAX_FILTER_TEXELS * texelUV * extentScale);
 
-    float visibility = PCSS_PCF_Filter(projCoords.xy, filterRadiusUV, currentDepth, rot);
+    float visibility = PCSS_PCF_Filter(projCoords.xy, filterRadiusUV, currentDepth, rot, cascade);
 
-    // 边界淡出：接近阴影贴图边缘平滑过渡到完全受光
+    // 边界淡出：接近阴影贴图边缘平滑过渡到完全受光（仅对最远级联有意义——更近级联的
+    // 框外会落到下一级联，由级联混合接管；但统一处理也无害）
     vec2 fade = min(projCoords.xy, 1.0 - projCoords.xy);
     float edgeFade = smoothstep(0.0, 0.05, min(fade.x, fade.y));
     float zFade = 1.0 - smoothstep(0.9, 1.0, projCoords.z);
     visibility = mix(1.0, visibility, edgeFade * zFade);
+
+    return visibility;
+}
+
+// CSM 入口：按视距选级联 + 级联边界淡入混合。
+float ShadowVisibility(vec3 worldPos, vec3 normal, vec3 lightDir, vec2 screenUV) {
+    // 片元视图空间深度（正值，越远越大）
+    float viewDepth = -(view * vec4(worldPos, 1.0)).z;
+
+    // 选级联：第一个 viewDepth < 切分远边界的级联
+    int cascade = cascadeCount - 1;
+    for (int i = 0; i < cascadeCount; ++i) {
+        if (viewDepth < cascadeSplitView[i]) { cascade = i; break; }
+    }
+
+    float visibility = ShadowVisibilityCascade(worldPos, normal, lightDir, screenUV, cascade);
+
+    // 级联边界淡入：在本级联远边界最后 10% 区间内，与下一级联混合，消除接缝硬线。
+    if (cascade + 1 < cascadeCount) {
+        float splitFar = cascadeSplitView[cascade];
+        float blendStart = splitFar * 0.9;
+        float blend = smoothstep(blendStart, splitFar, viewDepth);
+        if (blend > 0.0) {
+            float visNext = ShadowVisibilityCascade(worldPos, normal, lightDir, screenUV, cascade + 1);
+            visibility = mix(visibility, visNext, blend);
+        }
+    }
 
     return visibility;
 }
@@ -146,31 +196,17 @@ void main() {
     vec3 normal = normalize(texture(gNormal, vTexCoord).xyz);
     vec3 dirLightDir = normalize(-sunShineDir);
 
-    vec4 fragPosLightSpace = lightSpaceMatrix * vec4(worldPos, 1.0);
+#if CSM_DEBUG_TINT
+    // debug：把可见度按级联编号偏置输出（配合外部把 R 通道映射成伪彩看环带），
+    // 验证完把 CSM_DEBUG_TINT 设回 0。此处直接用可见度叠加级联序号的小阶梯，肉眼可辨切分。
+    float viewDepth = -(view * vec4(worldPos, 1.0)).z;
+    int dbgCascade = cascadeCount - 1;
+    for (int i = 0; i < cascadeCount; ++i) {
+        if (viewDepth < cascadeSplitView[i]) { dbgCascade = i; break; }
+    }
+    FragColor = float(dbgCascade) / float(max(cascadeCount - 1, 1));
+    return;
+#endif
 
-    // // ===== 调试开关 =====
-    // // DEBUG=1：直接显示阴影贴图在本片元投影处的深度（看贴图是否为空/投影是否对齐）
-    // //   全白(=1.0) → 阴影贴图是空的（几何没渲染进去）或投影落在框外
-    // //   有深度渐变 → 贴图有内容、投影对齐，问题在比较逻辑
-    // // DEBUG=2：显示 currentDepth（本片元在光源空间的深度），应与上面同范围
-    // // DEBUG=0：正常可见度
-    // const int DEBUG = 0;
-    // if (DEBUG == 1) {
-    //     vec3 pc = fragPosLightSpace.xyz / fragPosLightSpace.w;
-    //     pc = pc * 0.5 + 0.5;
-    //     if (pc.x < 0.0 || pc.x > 1.0 || pc.y < 0.0 || pc.y > 1.0 || pc.z < 0.0 || pc.z > 1.0) {
-    //         FragColor = 0.5;   // 灰 = 投影落在阴影贴图框外（关键线索！）
-    //         return;
-    //     }
-    //     FragColor = texture(shadowMap, pc.xy).r;  // 贴图深度
-    //     return;
-    // }
-    // if (DEBUG == 2) {
-    //     vec3 pc = fragPosLightSpace.xyz / fragPosLightSpace.w;
-    //     pc = pc * 0.5 + 0.5;
-    //     FragColor = pc.z;
-    //     return;
-    // }
-
-    FragColor = ShadowVisibility(fragPosLightSpace, normal, dirLightDir, gl_FragCoord.xy);
+    FragColor = ShadowVisibility(worldPos, normal, dirLightDir, gl_FragCoord.xy);
 }

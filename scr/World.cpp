@@ -13,6 +13,9 @@
 #include <iostream>
 #include <thread>
 #include <chrono>
+#include <string>
+#include <cstdio>
+#include <cmath>
 
 World::World(GLFWwindow* window_, const std::string& worldName,
              uint64_t seed, bool isNewWorld, NetMode netMode)
@@ -264,6 +267,9 @@ int World::run() {
             deltaTime = 0.1f; // 最大100ms
         }
 
+        // o/p 长按调太阳速度（持续按住每帧轮询，越按越快）
+        updateSunSpeedKeys(deltaTime);
+
         // 显示FPS
         showFPS();
 
@@ -391,11 +397,80 @@ void World::processKey(int key, int action) {
             m_player->toggleThirdPerson();
         }
     }
+    // L：时间是否流动的开关（关 = 冻结时间）
+    if (key == GLFW_KEY_L && action == GLFW_PRESS) {
+        if (m_renderSystem) {
+            m_renderSystem->toggleSunMoving();
+            std::cout << "[时间] " << (m_renderSystem->isSunMoving() ? "继续流动" : "已暂停")
+                      << "（当前 " << formatWorldTime(m_renderSystem->getWorldTime()) << "）" << std::endl;
+        }
+    }
+    // 8/9/0：预设时间 早上7点 / 正午12点 / 晚上7点，并顺便暂停时间（方便定格观察光照）
+    if (action == GLFW_PRESS && (key == GLFW_KEY_8 || key == GLFW_KEY_9 || key == GLFW_KEY_0)) {
+        if (m_renderSystem) {
+            float hour = (key == GLFW_KEY_8) ? 7.0f : (key == GLFW_KEY_9) ? 12.0f : 19.0f;
+            m_renderSystem->setWorldTime(hour);
+            m_renderSystem->setSunMoving(false);   // 预设顺便暂停
+            std::cout << "[时间] 跳到 " << formatWorldTime(hour) << "（已暂停）" << std::endl;
+        }
+    }
+    // O/P 松开时输出最终的时间流逝速度（按住期间连续调整，松开报告结果）
+    if (action == GLFW_RELEASE && (key == GLFW_KEY_O || key == GLFW_KEY_P)) {
+        if (m_renderSystem) {
+            printTimeFlowSpeed();
+        }
+    }
 
     // 转发给玩家处理
     if (m_player) {
         m_player->processKey(key, action);
     }
+}
+
+// o/p 调时间比例（固定灵敏度）。主循环每帧轮询持续按住状态。
+// o = 加快时间流逝（time_scale +），p = 减慢（time_scale -，可越过 0 变负 → 时间倒流）。
+// 比例上限由 RenderSystem::adjustTimeScale 内部夹紧（kTimeScaleMax）。
+void World::updateSunSpeedKeys(float deltaTime) {
+    if (!m_renderSystem || !m_window) return;
+
+    bool oHeld = glfwGetKey(m_window, GLFW_KEY_O) == GLFW_PRESS;
+    bool pHeld = glfwGetKey(m_window, GLFW_KEY_P) == GLFW_PRESS;
+
+    // 只允许单方向：同时按或都不按 → 不调
+    int dir = 0;
+    if (oHeld && !pHeld) dir = +1;
+    else if (pHeld && !oHeld) dir = -1;
+    if (dir == 0) return;
+
+    // 固定灵敏度：每现实秒把 time_scale 调整 kRate（游戏小时/现实秒 每秒）
+    const float kRate = 0.4f;
+    m_renderSystem->adjustTimeScale((float)dir * kRate * deltaTime);
+}
+
+// 把 0-24 浮点世界时间格式化成 "HH:MM"。
+std::string World::formatWorldTime(float hour) {
+    hour = std::fmod(hour, 24.0f);
+    if (hour < 0.0f) hour += 24.0f;
+    int h = (int)hour;
+    int m = (int)((hour - h) * 60.0f);
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%02d:%02d", h, m);
+    return std::string(buf);
+}
+
+// 输出当前时间流逝速度，用现实世界单位表示（"X 游戏小时 / 现实秒"，并附"一昼夜约 Y 现实秒"）。
+void World::printTimeFlowSpeed() {
+    if (!m_renderSystem) return;
+    float ts = m_renderSystem->getTimeScale();   // 游戏小时 / 现实秒
+    std::cout << std::fixed << std::setprecision(3);
+    if (std::fabs(ts) < 1e-4f) {
+        std::cout << "[时间] 流速 ≈ 0（几乎静止）" << std::endl;
+        return;
+    }
+    float secPerDay = 24.0f / std::fabs(ts);     // 一昼夜需要多少现实秒
+    std::cout << "[时间] 流速 " << ts << " 游戏小时/现实秒"
+              << (ts < 0 ? "（倒流）" : "")
+              << "，一昼夜约 " << secPerDay << " 现实秒" << std::endl;
 }
 
 void World::processMouseScroll(double xoffset, double yoffset) {
