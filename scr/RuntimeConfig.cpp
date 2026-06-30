@@ -86,6 +86,15 @@ void RuntimeConfig::loadFrom(const std::string& path) {
     if (root.isMember("shadow_blocker_samples")) shadowBlockerSamples = root["shadow_blocker_samples"].asInt();
     if (root.isMember("shadow_filter_samples")) shadowFilterSamples = root["shadow_filter_samples"].asInt();
     if (root.isMember("shadow_light_size")) shadowLightSize = (float)root["shadow_light_size"].asDouble();
+    if (root.isMember("ao_directions")) aoDirections = root["ao_directions"].asInt();
+    if (root.isMember("ao_steps")) aoSteps = root["ao_steps"].asInt();
+    if (root.isMember("ao_radius")) aoRadius = (float)root["ao_radius"].asDouble();
+    if (root.isMember("ao_intensity")) aoIntensity = (float)root["ao_intensity"].asDouble();
+    if (root.isMember("ao_bias")) aoBias = (float)root["ao_bias"].asDouble();
+    if (root.isMember("light_budget")) lightBudget = (float)root["light_budget"].asDouble();
+    if (root.isMember("ambient_day")) ambientDay = (float)root["ambient_day"].asDouble();
+    if (root.isMember("ambient_night")) ambientNight = (float)root["ambient_night"].asDouble();
+    if (root.isMember("sun_strength")) sunStrength = (float)root["sun_strength"].asDouble();
 
     std::cout << "[RuntimeConfig] loaded from " << path
               << " | render_radius=" << renderRadius

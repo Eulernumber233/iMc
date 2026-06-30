@@ -4,8 +4,6 @@
 // 运行时可调参数。第一次访问时延迟从 assert/runtime_config.json 加载；
 // 文件缺失或字段缺失时回退到代码默认值。
 //
-// 想改 RENDER_RADIUS 等参数：编辑 assert/runtime_config.json 即可，
-// 不需要重新编译任何 cpp。
 class RuntimeConfig {
 public:
     static const RuntimeConfig& get();
@@ -39,6 +37,27 @@ public:
     int   shadowBlockerSamples = 8;     // blocker search 抽样数（估遮挡物平均深度）
     int   shadowFilterSamples  = 8;     // PCF filter 抽样数（半影内可见度平均）
     float shadowLightSize      = 0.008f;// 光源"大小"（阴影贴图 UV），决定半影强度
+
+    // ---- AO（阶段 2：HBAO + 蓝噪声 + 时域累积）----
+    // 单帧少方向/少步数（噪声大但便宜），靠时域累积降噪。AO 纯几何恒定，收敛快。
+    int   aoDirections = 4;             // HBAO 采样方向数
+    int   aoSteps      = 4;             // 每方向步进次数
+    float aoRadius     = 0.8f;          // 采样半径（世界尺度，米）
+    float aoIntensity  = 1.5f;          // 遮蔽强度（指数，越大越黑）
+    float aoBias       = 0.1f;          // 切线角 bias（弧度），抑制自遮挡暗带
+
+    // ---- 直接光照能量分配（参考原版 MC：环境光 + 阳光两份，按昼夜分配）----
+    // 模型：result = budget * (ambientWeight*albedo*ao + sunWeight*NdotL*visibility*albedo)
+    //   ambientWeight = mix(ambientNight, ambientDay, sunIntensity)  —— 始终保留的底光，
+    //     夜晚/清晨较大（保证未受阳光直射处也够亮），正午较小（让阳光主导）
+    //   sunWeight     = sunStrength * sunIntensity                   —— 阳光份额，夜晚=0，
+    //     地平线附近由 sunIntensity 平滑过渡（清晨/傍晚不突变）
+    // 整体亮度调 lightBudget；嫌阴影处太黑调大 ambientDay/ambientNight；嫌阳光太弱调 sunStrength。
+    // 近似能量守恒：ambientDay + sunStrength ≈ 1 时，正午完全受光面约等于 lightBudget。
+    float lightBudget   = 1.25f;        // 总光照预算（整体亮度旋钮，>1 提亮）
+    float ambientDay    = 0.55f;        // 白天环境光占比（未受阳光处的底光，调大→阴影更亮）
+    float ambientNight  = 0.40f;        // 夜晚环境光占比（夜间底光）
+    float sunStrength    = 0.55f;       // 阳光份额（正午满日照时的直射功率）
 
     // 温存/落盘半径余量：chunk 离开渲染半径后，在 renderRadius + retainMarginChunks 内
     // 仍保留在内存（不渲染、不卸载、不落盘），形成"温存区"吸收边界抖动；

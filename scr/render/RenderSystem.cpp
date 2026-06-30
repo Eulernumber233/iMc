@@ -207,6 +207,7 @@ RenderSystem::~RenderSystem() {
     destroyGBuffer();
     destroyTAATargets();
     destroyShadowVisTargets();
+    destroyAoAccumTargets();
     if (m_blueNoiseTex) glDeleteTextures(1, &m_blueNoiseTex);
 
     if (m_screenQuadVAO) glDeleteVertexArrays(1, &m_screenQuadVAO);
@@ -283,7 +284,7 @@ bool RenderSystem::initialize() {
     m_deferredLightingShader.setInt("gNormal", 1);
     m_deferredLightingShader.setInt("gAlbedo", 2);
     m_deferredLightingShader.setInt("gProperties", 3);
-    m_deferredLightingShader.setInt("ssao", 4);
+    m_deferredLightingShader.setInt("aoTex", 4);
     m_deferredLightingShader.setInt("shadowVisibility", 5);
 
     m_modeShader.use();
@@ -332,14 +333,14 @@ bool RenderSystem::initialize() {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    m_ssaoShader.use();
-    m_ssaoShader.setInt("gDepth", 0);          // 深度纹理（重建视图空间位置）
-    m_ssaoShader.setInt("gNormal", 1);
-    m_ssaoShader.setInt("texNoise", 2);
-    m_ssaoShader.setVec2("screenSize", glm::vec2(m_screenWidth, m_screenHeight));
+    m_hbaoShader.use();
+    m_hbaoShader.setInt("gDepth", 0);          // 深度纹理（重建视图空间位置）
+    m_hbaoShader.setInt("gNormal", 1);
+    m_hbaoShader.setInt("texNoise", 2);
+    m_hbaoShader.setVec2("screenSize", glm::vec2(m_screenWidth, m_screenHeight));
 
-    m_ssaoBlurShader.use();
-    m_ssaoBlurShader.setInt("ssaoInput", 0);
+    m_hbaoBlurShader.use();
+    m_hbaoBlurShader.setInt("aoInput", 0);
     std::cout << "RenderSystem initialized successfully!" << std::endl;
 
 
@@ -354,11 +355,18 @@ bool RenderSystem::initialize() {
     glBindTexture(GL_TEXTURE_2D, m_depthMap);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, SHADOW_WIDTH, SHADOW_HEIGHT,
         0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
-    // 普通深度比较：LINEAR 过滤（consumer 端做手动 PCF，无需 mipmap）
+    // 必须 GL_LINEAR：PCSS 的半影连续过渡依赖深度图亚纹素插值。
+    // consumer 端 PCF 每个 tap 是硬比较（currentDepth <= d ? 1 : 0），可见度 = N 个 tap 的平均。
+    // 用 GL_NEAREST 时，接触处半影收窄会让所有 tap 落进同一纹素读到相同深度，
+    // 平均恰好为 0 或 1 —— 半影梯度被抹平，整面非黑即白（"只有亮暗没有阴影"）。
+    // GL_LINEAR 下 COMPARE_MODE=GL_NONE 返回的就是插值后的原始深度，行为是定义良好的。
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    // 显式关闭深度比较模式：保证 texture(shadowMap, uv).r 返回（插值后的）原始深度而非比较结果。
+    // 默认值各驱动可能不一致 —— 显式设 GL_NONE 消除环境相关行为。
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_NONE);
     // 边界深度=1.0（最远），保证阴影框外的 receiver 采到"无遮挡"，不产生假阴影
     float borderColor[] = { 1.0f, 1.0f, 1.0f, 1.0f };
     glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
@@ -399,6 +407,12 @@ bool RenderSystem::initialize() {
     // 创建阴影可见度 + 时域累积缓冲
     if (!createShadowVisTargets()) {
         std::cerr << "Failed to create shadow visibility targets!" << std::endl;
+        return false;
+    }
+
+    // 创建 AO 时域累积缓冲
+    if (!createAoAccumTargets()) {
+        std::cerr << "Failed to create AO accum targets!" << std::endl;
         return false;
     }
     // TAA shader 纹理单元绑定（固定）
@@ -510,6 +524,38 @@ void RenderSystem::setScreenSize(int width, int height) {
 }
 
 
+void RenderSystem::move_DirLight(float deltaTime)
+{
+    // test
+    //deltaTime = 0;
+
+    static float time_now = 1.0f;
+    const float rotate_speed = 0.08f;   // 一个完整昼夜周期约 2π/0.08 ≈ 78 秒
+    time_now += deltaTime;
+    float angle = rotate_speed * time_now;
+
+    const float R = 100.0f;
+    // 在 YZ 平面旋转，X 固定 —— 形成东升西落的日照弧线
+    lightPos.x = 30.0f;                 // 固定非零 X 分量，避免 lookAt 退化
+    lightPos.y = R * sin(angle);
+    lightPos.z = R * cos(angle);
+    lightDir = glm::normalize(glm::vec3(0.0f) - lightPos);
+
+    // 高度角的正弦（>0 为白天，<0 为夜晚）
+    float sinElev = sin(angle);
+    // 地平线附近 ±0.1 弧度（约 ±5.7°）平滑过渡
+    m_sunIntensity = glm::smoothstep(-0.05f, 0.1f, sinElev);
+
+    // 色温：太阳越靠近地平线越暖
+    // sinElev ∈ [0.0, 0.35] → 暖色从 1 过渡到 0；更高时保持冷白
+    m_sunWarmth = 1.0f - glm::smoothstep(0.05f, 0.35f, sinElev);
+    // 冷白（中午）到暖橙（日出/日落）
+    glm::vec3 coolWhite(1.00f, 0.97f, 0.92f);
+    glm::vec3 warmOrange(1.00f, 0.55f, 0.25f);
+    m_sunDiffuseColor = glm::mix(coolWhite, warmOrange, m_sunWarmth);
+}
+
+
 bool RenderSystem::createGBuffer() {
     glGenFramebuffers(1, &m_gBuffer);
     glBindFramebuffer(GL_FRAMEBUFFER, m_gBuffer);
@@ -574,34 +620,34 @@ bool RenderSystem::createGBuffer() {
         return false;
     }
 
-    // Also create framebuffer to hold SSAO processing stage 
-    glGenFramebuffers(1, &m_ssaoFBO);
-    glBindFramebuffer(GL_FRAMEBUFFER, m_ssaoFBO);
-    // - SSAO color buffer
-    glGenTextures(1, &m_ssaoColorBuffer);
-    glBindTexture(GL_TEXTURE_2D, m_ssaoColorBuffer);
+    // Also create framebuffer to hold HBAO processing stage
+    glGenFramebuffers(1, &m_hbaoFBO);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_hbaoFBO);
+    // - HBAO color buffer
+    glGenTextures(1, &m_hbaoColorBuffer);
+    glBindTexture(GL_TEXTURE_2D, m_hbaoColorBuffer);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_R16F, m_screenWidth, m_screenHeight, 0, GL_RED, GL_FLOAT, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_ssaoColorBuffer, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_hbaoColorBuffer, 0);
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-        std::cout << "SSAO Framebuffer not complete!" << std::endl;
+        std::cout << "HBAO Framebuffer not complete!" << std::endl;
 
     // - and blur stage
-    glGenFramebuffers(1, &m_ssaoBlurFBO);
-    glBindFramebuffer(GL_FRAMEBUFFER, m_ssaoBlurFBO);
-    glGenTextures(1, &m_ssaoColorBufferBlur);
-    glBindTexture(GL_TEXTURE_2D, m_ssaoColorBufferBlur);
+    glGenFramebuffers(1, &m_hbaoBlurFBO);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_hbaoBlurFBO);
+    glGenTextures(1, &m_hbaoColorBufferBlur);
+    glBindTexture(GL_TEXTURE_2D, m_hbaoColorBufferBlur);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_R16F, m_screenWidth, m_screenHeight, 0, GL_RED, GL_FLOAT, nullptr);    
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_ssaoColorBufferBlur, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_hbaoColorBufferBlur, 0);
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-        std::cout << "SSAO Blur Framebuffer not complete!" << std::endl;
+        std::cout << "HBAO Blur Framebuffer not complete!" << std::endl;
 
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -782,6 +828,40 @@ void RenderSystem::destroyShadowVisTargets() {
     m_shadowAccumValid = false;
 }
 
+// AO 时域累积 ping-pong 缓冲（R16F，与 HBAO buffer 同格式）。
+bool RenderSystem::createAoAccumTargets() {
+    for (int i = 0; i < 2; ++i) {
+        glGenFramebuffers(1, &m_aoAccumFBO[i]);
+        glBindFramebuffer(GL_FRAMEBUFFER, m_aoAccumFBO[i]);
+        glGenTextures(1, &m_aoAccum[i]);
+        glBindTexture(GL_TEXTURE_2D, m_aoAccum[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R16F, m_screenWidth, m_screenHeight, 0, GL_RED, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_aoAccum[i], 0);
+        GLuint a[1] = { GL_COLOR_ATTACHMENT0 }; glDrawBuffers(1, a);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            std::cerr << "AO accum FBO " << i << " not complete!" << std::endl;
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            return false;
+        }
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    m_aoAccumValid = false;
+    return true;
+}
+
+void RenderSystem::destroyAoAccumTargets() {
+    for (int i = 0; i < 2; ++i) {
+        if (m_aoAccumFBO[i]) glDeleteFramebuffers(1, &m_aoAccumFBO[i]);
+        if (m_aoAccum[i]) glDeleteTextures(1, &m_aoAccum[i]);
+        m_aoAccumFBO[i] = 0; m_aoAccum[i] = 0;
+    }
+    m_aoAccumValid = false;
+}
+
 // 程序生成 tileable 蓝噪声纹理（void-and-cluster 算法，Ulichney 1993）。
 // 输出每像素一个 [0,1] 的 rank/256，能量谱呈高频（蓝噪声）。供阴影 PCSS 抖动用：
 // 配合"帧序号驱动的黄金角旋转"，让每帧采样方向去相关，TAA 跨帧累积成干净结果。
@@ -951,7 +1031,7 @@ void RenderSystem::render(const ChunkManager& chunkManager,
     // ---- TAA：投影矩阵亚像素抖动 ----
     // jitteredProj 用于所有写入当前帧颜色/深度的几何（G-Buffer + forward），
     // 让每帧采样落在像素内不同位置，多帧累积等效超采样。
-    // projection（未抖动）保留给 SSAO（AO 不应吃几何 jitter）与 motion vector 反算。
+    // projection（未抖动）保留给 HBAO（AO 不应吃几何 jitter）与 motion vector 反算。
     glm::mat4 jitteredProj = projection;
     if (m_taaEnabled) {
         glm::vec2 jitterNDC = haltonJitterNDC(m_frameIndex, m_screenWidth, m_screenHeight);
@@ -963,10 +1043,16 @@ void RenderSystem::render(const ChunkManager& chunkManager,
     // 几何通道：渲染方块到 G-Buffer（抖动投影）
     { PROFILE_SCOPE("geometryPass"); geometryPass(chunkManager, view, geoProj); }
 
-    // SSAO 通道：位置重建/投影必须用与深度一致的 geoProj（深度由 geoProj 写入）。
-    // jitter 是全屏统一的亚像素平移，不会给 AO 引入偏置；AO 的时域噪声由 TAA 降噪。
-    { PROFILE_SCOPE("ssaoPass"); ssaoPass(view, geoProj); }
-    { PROFILE_SCOPE("ssaoBlurPass"); ssaoBlurPass(); }
+    // HBAO 通道：位置重建/投影必须用与深度一致的 geoProj（深度由 geoProj 写入）。
+    // jitter 是全屏统一的亚像素平移，不会给 AO 引入偏置。
+    // 流程：单帧 HBAO（noisy）→ 时域累积（motion vector 重投影，与 TAA 同一套）→ 轻量 blur。
+    { PROFILE_SCOPE("hbaoPass"); hbaoPass(view, geoProj); }
+    {
+        PROFILE_SCOPE("aoAccumulatePass");
+        glm::mat4 invViewProj = glm::inverse(projection * view);  // 未抖动，与 TAA 一致
+        aoAccumulatePass(invViewProj, m_prevViewProj);
+    }
+    { PROFILE_SCOPE("hbaoBlurPass"); hbaoBlurPass(); }
 
     // 阴影映射
     float sunShine_near, sunShine_far;
@@ -1073,6 +1159,10 @@ void RenderSystem::render(const ChunkManager& chunkManager,
     m_shadowAccumValid   = true;
     m_shadowAccumCurrIdx ^= 1;
 
+    // AO 时域累积状态：同理（本帧累积已被 hbaoBlurPass 读取）
+    m_aoAccumValid   = true;
+    m_aoAccumCurrIdx ^= 1;
+
     m_frameIndex++;
 
     // 解绑
@@ -1099,12 +1189,16 @@ void RenderSystem::geometryPass(const ChunkManager& chunkManager,
     glBindFramebuffer(GL_FRAMEBUFFER, m_gBuffer);
     glViewport(0, 0, m_screenWidth, m_screenHeight);
 
+    // 生产者自保：本 pass 是整帧的深度生产者。深度 clear 受 glDepthMask 门控，
+    // 深度 write 受 GL_DEPTH_TEST 门控 —— 必须在 clear 前显式开好，绝不假设上游留对了。
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+
     // 清除缓冲区
     glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    // 启用深度测试和面剔除
-    glEnable(GL_DEPTH_TEST);
+    // 启用面剔除
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
 
@@ -1124,34 +1218,87 @@ void RenderSystem::geometryPass(const ChunkManager& chunkManager,
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-void RenderSystem::ssaoPass(const glm::mat4& view, const glm::mat4& projection)
+// HBAO pass：单帧地平线角 AO → m_hbaoColorBuffer。蓝噪声抖动方向 + 帧序号时域去相关，
+// 单帧少方向/少步数（噪声大），由 aoAccumulatePass 跨帧累积降噪。
+void RenderSystem::hbaoPass(const glm::mat4& view, const glm::mat4& projection)
 {
-    glBindFramebuffer(GL_FRAMEBUFFER, m_ssaoFBO);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_hbaoFBO);
     glClear(GL_COLOR_BUFFER_BIT);
-    m_ssaoShader.use();
+    m_hbaoShader.use();
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, m_depthTexture);   // 深度纹理，重建视图空间位置
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, m_gNormal);
     glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, m_noiseTexture);
-    // Send kernel + rotation
-    for (GLuint i = 0; i < 64; ++i)
-        m_ssaoShader.setVec3("samples[" + std::to_string(i) + "]", ssaoKernel[i]);
-    m_ssaoShader.setMat4("projection", projection);
-    m_ssaoShader.setMat4("view", view);
-    m_ssaoShader.setMat4("invProjection", glm::inverse(projection));
+    glBindTexture(GL_TEXTURE_2D, m_noiseTexture);   // 兼容保留
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, m_blueNoiseTex);   // HBAO 方向抖动源
+
+    m_hbaoShader.setInt("gDepth", 0);
+    m_hbaoShader.setInt("gNormal", 1);
+    m_hbaoShader.setInt("texNoise", 2);
+    m_hbaoShader.setInt("blueNoiseTex", 3);
+    m_hbaoShader.setMat4("projection", projection);
+    m_hbaoShader.setMat4("view", view);
+    m_hbaoShader.setMat4("invProjection", glm::inverse(projection));
+    m_hbaoShader.setVec2("screenSize", glm::vec2(m_screenWidth, m_screenHeight));
+
+    const RuntimeConfig& rc = RuntimeConfig::get();
+    m_hbaoShader.setInt("blueNoiseSize", m_blueNoiseSize);
+    m_hbaoShader.setInt("frameIndex", (int)m_frameIndex);
+    m_hbaoShader.setInt("uDirections", rc.aoDirections);
+    m_hbaoShader.setInt("uSteps", rc.aoSteps);
+    m_hbaoShader.setFloat("uRadius", rc.aoRadius);
+    m_hbaoShader.setFloat("uIntensity", rc.aoIntensity);
+    m_hbaoShader.setFloat("uBias", rc.aoBias);
+
     RenderQuad();
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-void RenderSystem::ssaoBlurPass()
+// AO 时域累积：重投影上一帧累积 + 邻域 clamp + 混合 → m_aoAccum[curr]。
+void RenderSystem::aoAccumulatePass(const glm::mat4& invViewProj, const glm::mat4& prevViewProj)
 {
-    glBindFramebuffer(GL_FRAMEBUFFER, m_ssaoBlurFBO);
+    int curr = m_aoAccumCurrIdx;
+    int prev = 1 - curr;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, m_aoAccumFBO[curr]);
+    glViewport(0, 0, m_screenWidth, m_screenHeight);
     glClear(GL_COLOR_BUFFER_BIT);
-    m_ssaoBlurShader.use();
+    glDisable(GL_DEPTH_TEST);
+
+    m_aoAccumShader.use();
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, m_ssaoColorBuffer);
+    glBindTexture(GL_TEXTURE_2D, m_hbaoColorBuffer);   // 当前帧单帧 HBAO
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, m_aoAccum[prev]);     // 历史
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, m_depthTexture);
+
+    m_aoAccumShader.setInt("aoCurr", 0);
+    m_aoAccumShader.setInt("aoHist", 1);
+    m_aoAccumShader.setInt("depthTex", 2);
+    m_aoAccumShader.setMat4("invViewProj", invViewProj);
+    m_aoAccumShader.setMat4("prevViewProj", prevViewProj);
+    m_aoAccumShader.setVec2("screenSize", glm::vec2(m_screenWidth, m_screenHeight));
+    m_aoAccumShader.setInt("frameIndex", m_aoAccumValid ? (int)m_frameIndex : 0);
+
+    RenderQuad();
+    // 关键：恢复深度测试。否则状态泄漏到随后的 sunShineShadowMap —— 深度测试关闭时
+    // OpenGL 不写深度缓冲（glDepthMask 不足以单独开启写入），阴影贴图渲染将得到一张
+    // 仍为清空值(1.0)的空深度图，PCSS 永远找不到 blocker，退化成"只有亮暗、没有阴影"。
+    glEnable(GL_DEPTH_TEST);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+// 累积后的 AO 再过一遍轻量空间 blur → m_hbaoColorBufferBlur（清理时域累积的残留颗粒）。
+void RenderSystem::hbaoBlurPass()
+{
+    glBindFramebuffer(GL_FRAMEBUFFER, m_hbaoBlurFBO);
+    glClear(GL_COLOR_BUFFER_BIT);
+    m_hbaoBlurShader.use();
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_aoAccum[m_aoAccumCurrIdx]);  // 累积后的 AO
     RenderQuad();
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
@@ -1249,6 +1396,11 @@ void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std
     // 渲染场景到深度贴图（仅深度，无颜色附件）
     glViewport(0, 0, SHADOW_WIDTH, SHADOW_HEIGHT);
     glBindFramebuffer(GL_FRAMEBUFFER, m_depthMapFBO);
+    // 生产者自保：深度图渲染必须 GL_DEPTH_TEST + glDepthMask 都开才会写深度。
+    // 显式开启，防止上游全屏 pass 泄漏的关闭状态让阴影贴图渲成空图
+    // （这正是 AO 重构曾引入的 regression 根因 —— 详见 CLAUDE.md「GL 状态约定」）。
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
     glClear(GL_DEPTH_BUFFER_BIT);
     glCullFace(GL_BACK);
     m_blockRenderer.bindArenaVBO(chunkManager.getArenaVBO());
@@ -1369,7 +1521,7 @@ void RenderSystem::lightingPass(const std::shared_ptr<Camera>camera
     glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_2D, m_gProperties);
     glActiveTexture(GL_TEXTURE4);
-    glBindTexture(GL_TEXTURE_2D, m_ssaoColorBufferBlur);
+    glBindTexture(GL_TEXTURE_2D, m_hbaoColorBufferBlur);
     glActiveTexture(GL_TEXTURE5);
     glBindTexture(GL_TEXTURE_2D, m_shadowAccum[m_shadowAccumCurrIdx]); // 时域累积后的阴影可见度
 
@@ -1381,16 +1533,26 @@ void RenderSystem::lightingPass(const std::shared_ptr<Camera>camera
     m_deferredLightingShader.setVec3("sunShinePos", lightPos);
     m_deferredLightingShader.setVec3("sunShineDir", lightDir);
 
-    // 环境光：白天偏白偏亮，夜晚偏冷蓝但仍保留足够基础亮度让方块能看清
-    glm::vec3 dayAmbient   = glm::vec3(0.44f, 0.44f, 0.44f);
-    glm::vec3 nightAmbient = glm::vec3(0.28f, 0.32f, 0.44f); // 提亮并加一点蓝调
-    glm::vec3 ambient = glm::mix(nightAmbient, dayAmbient, m_sunIntensity);
-    m_deferredLightingShader.setVec3("sunShineAmbient", ambient);
+    // ---- 光照能量分配（环境光 + 阳光两份，按昼夜分配，参考原版 MC）----
+    // 把直接光照拆成「始终保留的环境底光」+「随日照强度平滑增减的阳光」两份。
+    // 环境光份额夜晚/清晨大、正午小 → 未受阳光直射处也够亮；阳光份额夜晚=0、地平线平滑过渡。
+    const RuntimeConfig& rc = RuntimeConfig::get();
 
-    // 阳光 diffuse：按色温（m_sunDiffuseColor 已在 move_DirLight 计算）
-    // 乘以基础强度 0.8 作为功率
-    m_deferredLightingShader.setVec3("sunShineDiffuse", m_sunDiffuseColor * 0.8f);
-    m_deferredLightingShader.setFloat("sunShineIntensity", m_sunIntensity);
+    // 环境光权重：白天/夜晚两个底光级别按日照强度插值（都是「占比」，再乘总预算）
+    float ambientWeight = rc.lightBudget * glm::mix(rc.ambientNight, rc.ambientDay, m_sunIntensity);
+    // 阳光权重：正午满功率 sunStrength，乘 sunIntensity 平滑昼夜 + 地平线过渡（夜晚=0）
+    float sunWeight     = rc.lightBudget * rc.sunStrength * m_sunIntensity;
+
+    // 环境光颜色：白天近中性、夜晚偏冷蓝（色调随昼夜插值，亮度由 ambientWeight 控）
+    glm::vec3 dayAmbientColor   = glm::vec3(1.00f, 1.00f, 1.00f);
+    glm::vec3 nightAmbientColor = glm::vec3(0.64f, 0.73f, 1.00f); // 冷蓝调
+    glm::vec3 ambientColor = glm::mix(nightAmbientColor, dayAmbientColor, m_sunIntensity);
+    m_deferredLightingShader.setVec3("sunShineAmbient", ambientColor * ambientWeight);
+
+    // 阳光颜色：按色温（m_sunDiffuseColor 已在 move_DirLight 计算），亮度由 sunWeight 控
+    m_deferredLightingShader.setVec3("sunShineDiffuse", m_sunDiffuseColor * sunWeight);
+    // 注：sunIntensity 已折进 sunWeight，shader 内不再二次乘，避免重复衰减
+    m_deferredLightingShader.setFloat("sunShineIntensity", 1.0f);
 
     RenderQuad();
 

@@ -13,7 +13,7 @@ Shader::Shader(const std::initializer_list<
             shaderObjects.push_back(shader);
         }
         else {
-            for (GLuint s : shaderObjects) 
+            for (GLuint s : shaderObjects)
                 glDeleteShader(s);
             programID = 0;
             return;
@@ -67,6 +67,7 @@ GLuint Shader::createShader(GLenum type, const std::string& filePath) {
 
     std::string shaderSourceStr = readShaderSource(filePath);
     if (shaderSourceStr.empty()) {
+        std::cerr << "[SHADER ABORT] program build aborted at: " << filePath << std::endl;
         return 0;
     }
     const char* source = shaderSourceStr.c_str();
@@ -79,8 +80,8 @@ GLuint Shader::createShader(GLenum type, const std::string& filePath) {
     if (!success) {
         char info[512];
         glGetShaderInfoLog(shader, 512, NULL, info);
-        if (RuntimeConfig::get().verboseShaderLoading)
-            std::cerr << "Shader compile failed: " << info << std::endl;
+        // 调试：编译失败无条件打印 + 文件名，便于定位坏 shader
+        std::cerr << "[COMPILE FAIL] " << filePath << ": " << info << std::endl;
         glDeleteShader(shader);
         return 0;
     }
@@ -99,8 +100,8 @@ GLuint Shader::createProgram(std::vector<GLuint> shaders) {
     if (!success) {
         char info[512];
         glGetProgramInfoLog(programID, 512, NULL, info);
-        if (RuntimeConfig::get().verboseShaderLoading)
-            std::cerr << "Program link failed: " << info << std::endl;
+        // 调试：链接失败无条件打印（不再受 verboseShaderLoading 门控），便于定位坏 program
+        std::cerr << "[LINK FAIL] program " << programID << ": " << info << std::endl;
         glDeleteProgram(programID);
         return 0;
     }

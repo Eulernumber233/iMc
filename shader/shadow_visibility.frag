@@ -147,5 +147,30 @@ void main() {
     vec3 dirLightDir = normalize(-sunShineDir);
 
     vec4 fragPosLightSpace = lightSpaceMatrix * vec4(worldPos, 1.0);
+
+    // // ===== 调试开关 =====
+    // // DEBUG=1：直接显示阴影贴图在本片元投影处的深度（看贴图是否为空/投影是否对齐）
+    // //   全白(=1.0) → 阴影贴图是空的（几何没渲染进去）或投影落在框外
+    // //   有深度渐变 → 贴图有内容、投影对齐，问题在比较逻辑
+    // // DEBUG=2：显示 currentDepth（本片元在光源空间的深度），应与上面同范围
+    // // DEBUG=0：正常可见度
+    // const int DEBUG = 0;
+    // if (DEBUG == 1) {
+    //     vec3 pc = fragPosLightSpace.xyz / fragPosLightSpace.w;
+    //     pc = pc * 0.5 + 0.5;
+    //     if (pc.x < 0.0 || pc.x > 1.0 || pc.y < 0.0 || pc.y > 1.0 || pc.z < 0.0 || pc.z > 1.0) {
+    //         FragColor = 0.5;   // 灰 = 投影落在阴影贴图框外（关键线索！）
+    //         return;
+    //     }
+    //     FragColor = texture(shadowMap, pc.xy).r;  // 贴图深度
+    //     return;
+    // }
+    // if (DEBUG == 2) {
+    //     vec3 pc = fragPosLightSpace.xyz / fragPosLightSpace.w;
+    //     pc = pc * 0.5 + 0.5;
+    //     FragColor = pc.z;
+    //     return;
+    // }
+
     FragColor = ShadowVisibility(fragPosLightSpace, normal, dirLightDir, gl_FragCoord.xy);
 }

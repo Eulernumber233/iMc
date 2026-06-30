@@ -11,7 +11,7 @@ iMc 是一个用现代 OpenGL（4.6 core profile）和 C++17 编写的、受 Min
 - GPU 实例 arena（size-class 分配器）+ `glMultiDrawElementsIndirect`
 - 8 字节紧凑 `InstanceData`（`packed32 + blockType16 + textureLayer16`）；世界坐标在 shader 内由 `sectionBases[gl_DrawID]` 重建
 - 增量 VBO patch（`glMapBufferRange` + `UNSYNCHRONIZED`）—— 单次改方块只上传变化的面
-- 延迟渲染 + SSAO + 软阴影（PCSS+VSSM）+ 昼夜动态光照
+- 延迟渲染 + HBAO（蓝噪声 + 时域累积）+ 软阴影（PCSS+VSSM + TAA 降噪）+ 昼夜动态光照
 - 第一人称玩家控制、AABB 物理、地形生成、粒子、UI、第三人称玩家模型
 - **存档系统**：Minecraft Anvil 风格的 region 文件（`.mca`）+ LZ4 压缩 + 自动保存
 - **局域网联机**：基于 ENet 的 Host/Join 架构，玩家位置同步 + 区块数据同步
@@ -97,7 +97,7 @@ iMc 是一个用现代 OpenGL（4.6 core profile）和 C++17 编写的、受 Min
 
 - **RenderSystem**（`scr/render/RenderSystem.h/.cpp`）—— 延迟渲染管线：
   1. **G-Buffer pass**（position / normal / albedo / properties）—— 一次 `glMultiDrawElementsIndirect` 画所有可见 section
-  2. **SSAO pass** + blur
+  2. **HBAO pass**（单帧地平线角 AO）+ AO 时域累积 + blur
   3. **Shadow map pass**（定向光，PCSS+VSSM）—— 复用同一 MDI 命令缓冲 + 同一 SectionBases SSBO
   4. **延迟光照 pass**（写入 `m_lightingFBO`）
   5. blit 到 `m_compositeFBO`（带深度，支持后续正向渲染）
@@ -203,7 +203,7 @@ Minecraft Anvil 风格的区块持久化。目录结构：`saves/<worldName>/wor
 
 ### 着色器
 
-所有 GLSL 在 `shader/`。延迟管线用 `g_buffer.*`、`ssao.*`、`ssao_blur.*`、`shadow_mapping_depth.*`、`deferred_lighting.*`。正向 pass 用 `outline.*`、`mode.*`、`particle.*`、`ui.*`。
+所有 GLSL 在 `shader/`。延迟管线用 `g_buffer.*`、`hbao.*`（单帧 HBAO）、`ao_accumulate.frag`（AO 时域累积）、`hbao_blur.*`、`shadow_mapping_depth.*`、`shadow_visibility.frag` + `shadow_accumulate.frag`（PCSS + 阴影时域累积）、`deferred_lighting.*`、`taa_resolve.*`（最终画面 TAA）。正向 pass 用 `outline.*`、`mode.*`、`particle.*`、`ui.*`。
 
 - `g_buffer.vert` 和 `shadow_mapping_depth.vert` 是 `#version 460 core`。两者解包逐实例 `packed` 属性（x/y/z/face）并从 `binding=0` 的 SSBO 读 `sectionBases[gl_DrawID].xyz` 还原世界空间方块中心。其余着色器保持原版本。
 - `g_buffer.frag` 丢弃 `BLOCK_ERRER` 占位面 —— 这让 section 可以把复用/释放的面 slot 留在原地而不必急着 compact。`Section::removeFaceLocal` 把 slot 标 ERRER 并把索引压入 `m_freeSlots` 供 `addFaceLocal` 回收。
@@ -223,6 +223,23 @@ Minecraft Anvil 风格的区块持久化。目录结构：`saves/<worldName>/wor
 ### 帧序不变量
 
 `World::run` 每帧在 `renderSystem.render(...)` **之前**调 `m_chunkManager->update(camera)`。这是承重设计：`ChunkArena::patch` 用 `GL_MAP_UNSYNCHRONIZED_BIT`，假设 GPU 当前没在读被 patch 的 slot。因为重入 `update` 时上一帧的绘制保证已完成，故成立。**不要在两个绘制 pass 之间调 `ChunkManager::update`（或任何会到达 `uploadSection` 的东西）。**
+
+### GL 状态约定（改了就要恢复）
+
+OpenGL 状态是全局的、跨 pass 持续的。**任何一个 pass / 渲染函数若改动了全局 GL 开关，完成后必须把它恢复回进入时的状态**，绝不把改动的状态泄漏给下一个 pass。这条覆盖但不限于：
+
+- `glEnable/glDisable(GL_DEPTH_TEST)`、`glDepthMask`、`glDepthFunc`
+- `glEnable/glDisable(GL_CULL_FACE)`、`glCullFace`
+- `glEnable/glDisable(GL_BLEND)`、`glBlendFunc`
+- `glColorMask`、`glPolygonMode`、`glViewport`、`glClearColor` 等
+
+**为什么必须严格执行**（一次真实事故）：全屏 quad pass（SSAO/AO 累积/TAA/阴影累积）画前会 `glDisable(GL_DEPTH_TEST)`，因为全屏四边形不需要深度。曾有一个新增的 `aoAccumulatePass` 关了深度测试**却没恢复**，状态泄漏到紧随其后的 `sunShineShadowMap`。而 **OpenGL 在深度测试关闭时不写深度缓冲**（`glDepthMask(GL_TRUE)` 单独不够，必须 `GL_DEPTH_TEST` 也开着才会写深度）——于是阴影深度图 `glClear` 成 1.0 后几何一个深度都没写进去，得到一张空深度图，PCSS 永远找不到 blocker，整个场景退化成「只有亮暗、没有阴影」。这个 bug 隔着两个 pass、表现在完全无关的阴影系统上，极难定位。
+
+**落地规则**：
+
+1. **配对**：每个 `glDisable(GL_DEPTH_TEST)` 结尾配 `glEnable(GL_DEPTH_TEST)`；blend / cull / depthmask 同理。粒子等内部改 `glDepthMask(GL_FALSE)` 的渲染器，返回前自行恢复 `GL_TRUE`。
+2. **生产者自保**：依赖某状态才能正确工作的 pass，**进入时显式设置**自己需要的状态，不假设上游留对了。典型：写深度的 pass（geometryPass / 阴影深度 pass）进入时显式 `glEnable(GL_DEPTH_TEST)` + `glDepthMask(GL_TRUE)` 再 `glClear(GL_DEPTH_BUFFER_BIT)`——否则上游漏掉的关闭状态会让深度 clear/write 静默失效。
+3. 这两条是「双保险」：配对让状态不泄漏，生产者自保让即便泄漏也不致命。新增任何 pass 都按此办。
 
 ### 树内第三方代码
 

@@ -116,11 +116,18 @@ private:
     GLuint m_gPosition, m_gNormal, m_gAlbedo, m_gProperties;
     GLuint m_depthTexture = 0;               // G-Buffer深度纹理
 
-    // SSAO
-    GLuint m_ssaoFBO, m_ssaoBlurFBO;
-    GLuint m_ssaoColorBuffer, m_ssaoColorBufferBlur;
-    GLuint m_noiseTexture;
-    std::vector<glm::vec3> ssaoKernel;
+    // HBAO（阶段 2：地平线角 AO + 蓝噪声少样本 + 时域累积）
+    GLuint m_hbaoFBO, m_hbaoBlurFBO;
+    GLuint m_hbaoColorBuffer, m_hbaoColorBufferBlur;
+    GLuint m_noiseTexture;                 // 旧 SSAO 随机旋转噪声，HBAO 不用但兼容保留
+    std::vector<glm::vec3> ssaoKernel;     // 旧 SSAO 半球核，HBAO 不用但兼容保留
+
+    // ---- AO 时域累积 ----
+    // 单帧 HBAO（噪声大）→ 跨帧累积成干净结果。AO 纯几何恒定，可用很强历史权重。
+    GLuint m_aoAccumFBO[2] = { 0, 0 };
+    GLuint m_aoAccum[2]    = { 0, 0 };   // 累积 AO ping-pong（R16F）
+    int    m_aoAccumCurrIdx = 0;
+    bool   m_aoAccumValid   = false;
 
     // 阴影
     GLuint m_depthMapFBO;
@@ -181,41 +188,15 @@ private:
     // 太阳绕固定轴做圆周运动：在 YZ 平面内旋转（Y 为高度），X 固定
     // 这样 lightDir.y 的符号变化对应昼夜，且 up=(0,1,0) 的 lookAt 永远不会退化（除非正好与 Y 轴共线，
     // 由于 X 分量固定非零，始终能保证光方向与 up 的夹角不为零）
-    void move_DirLight(float deltaTime) {
-        static float time_now = 1.0f;
-        const float rotate_speed = 0.08f;   // 一个完整昼夜周期约 2π/0.2 ≈ 31 秒
-        time_now += deltaTime;
-        float angle = rotate_speed * time_now;
-
-        const float R = 100.0f;
-        // 在 YZ 平面旋转，X 固定 —— 形成东升西落的日照弧线
-        lightPos.x = 30.0f;                 // 固定非零 X 分量，避免 lookAt 退化
-        lightPos.y = R * sin(angle);
-        lightPos.z = R * cos(angle);
-        lightDir = glm::normalize(glm::vec3(0.0f) - lightPos);
-
-        // 高度角的正弦（>0 为白天，<0 为夜晚）
-        float sinElev = sin(angle);
-        // 地平线附近 ±0.1 弧度（约 ±5.7°）平滑过渡
-        m_sunIntensity = glm::smoothstep(-0.05f, 0.1f, sinElev);
-
-        // 色温：太阳越靠近地平线越暖
-        // sinElev ∈ [0.0, 0.35] → 暖色从 1 过渡到 0；更高时保持冷白
-        m_sunWarmth = 1.0f - glm::smoothstep(0.05f, 0.35f, sinElev);
-        // 冷白（中午）到暖橙（日出/日落）
-        glm::vec3 coolWhite(1.00f, 0.97f, 0.92f);
-        glm::vec3 warmOrange(1.00f, 0.55f, 0.25f);
-        m_sunDiffuseColor = glm::mix(coolWhite, warmOrange, m_sunWarmth);
-    }
-
+    void move_DirLight(float deltaTime);
     // 着色器
-    Shader m_ssaoShader{ {
-        { GL_VERTEX_SHADER,   "shader/ssao.vert" },
-        { GL_FRAGMENT_SHADER, "shader/ssao.frag" }
+    Shader m_hbaoShader{ {
+        { GL_VERTEX_SHADER,   "shader/hbao.vert" },
+        { GL_FRAGMENT_SHADER, "shader/hbao.frag" }
     } };
-    Shader m_ssaoBlurShader{ {
-        { GL_VERTEX_SHADER,   "shader/ssao_blur.vert" },
-        { GL_FRAGMENT_SHADER, "shader/ssao_blur.frag" }
+    Shader m_hbaoBlurShader{ {
+        { GL_VERTEX_SHADER,   "shader/hbao_blur.vert" },
+        { GL_FRAGMENT_SHADER, "shader/hbao_blur.frag" }
     } };
     Shader m_deferredLightingShader{ {
         { GL_VERTEX_SHADER,   "shader/deferred_lighting.vert" },
@@ -237,6 +218,11 @@ private:
     Shader m_shadowAccumShader{ {
         { GL_VERTEX_SHADER,   "shader/deferred_lighting.vert" },
         { GL_FRAGMENT_SHADER, "shader/shadow_accumulate.frag" }
+    } };
+    // AO 时域累积（复用 hbao 的全屏 quad 顶点着色器）
+    Shader m_aoAccumShader{ {
+        { GL_VERTEX_SHADER,   "shader/hbao.vert" },
+        { GL_FRAGMENT_SHADER, "shader/ao_accumulate.frag" }
     } };
 
     // 模型
@@ -280,6 +266,8 @@ private:
     void createBlueNoiseTexture();     // 程序生成蓝噪声纹理（阴影抖动源）
     bool createShadowVisTargets();     // 阴影可见度 + 时域累积 ping-pong 缓冲
     void destroyShadowVisTargets();
+    bool createAoAccumTargets();       // AO 时域累积 ping-pong 缓冲
+    void destroyAoAccumTargets();
     // TAA resolve：当前帧合成色 + 历史 → 时域累积，结果写入并显示
     void taaResolvePass(const glm::mat4& invViewProj, const glm::mat4& prevViewProj);
     // Halton(2,3) 亚像素抖动偏移（NDC 单位），按帧序号循环
@@ -289,8 +277,10 @@ private:
     void geometryPass(const ChunkManager& chunkManager,
         const glm::mat4& view,
         const glm::mat4& projection);
-    void ssaoPass(const glm::mat4& view, const glm::mat4& projection);
-    void ssaoBlurPass();
+    void hbaoPass(const glm::mat4& view, const glm::mat4& projection);
+    void hbaoBlurPass();
+    // AO 时域累积：重投影历史 + 邻域 clamp + 混合 → m_aoAccum[curr]
+    void aoAccumulatePass(const glm::mat4& invViewProj, const glm::mat4& prevViewProj);
     void sunShineShadowMap(const ChunkManager& chunkManager, const std::shared_ptr<Camera>camera,
         float& sunShine_near, float& sunShine_far, glm::mat4& lightSpaceMatrix);
     // 单帧 PCSS 可见度 → m_shadowVisCurr

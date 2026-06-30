@@ -231,6 +231,7 @@
     <None Include="PropertySheet.props" />
     <None Include="PropertySheet_debug.props" />
     <None Include="README.md" />
+    <None Include="shader\ao_accumulate.frag" />
     <None Include="shader\deferred_lighting.frag" />
     <None Include="shader\deferred_lighting.vert" />
     <None Include="shader\g_buffer.frag" />
@@ -244,12 +245,14 @@
     <None Include="shader\particle.comp" />
     <None Include="shader\particle.frag" />
     <None Include="shader\particle.vert" />
+    <None Include="shader\shadow_accumulate.frag" />
     <None Include="shader\shadow_mapping_depth.frag" />
     <None Include="shader\shadow_mapping_depth.vert" />
-    <None Include="shader\ssao.frag" />
-    <None Include="shader\ssao.vert" />
-    <None Include="shader\ssao_blur.frag" />
-    <None Include="shader\ssao_blur.vert" />
+    <None Include="shader\shadow_visibility.frag" />
+    <None Include="shader\hbao.frag" />
+    <None Include="shader\hbao.vert" />
+    <None Include="shader\hbao_blur.frag" />
+    <None Include="shader\hbao_blur.vert" />
     <None Include="shader\taa_resolve.frag" />
     <None Include="shader\taa_resolve.vert" />
     <None Include="shader\ui.frag" />
