@@ -13,6 +13,7 @@ iMc 是一个用现代 OpenGL（4.6 core profile）和 C++17 编写的、受 Min
 - 增量 VBO patch（`glMapBufferRange` + `UNSYNCHRONIZED`）—— 单次改方块只上传变化的面
 - 延迟渲染 + HBAO（蓝噪声 + 时域累积）+ 软阴影（PCSS+VSSM + TAA 降噪）+ 昼夜动态光照
 - 第一人称玩家控制、AABB 物理、地形生成、粒子、UI、第三人称玩家模型
+- **物品系统**：数据/行为分离（`ItemDefinition` + `ItemStack` + 无状态 `Item` 行为），方块物品渲染成真立方体（背包图标 / 掉落物 / 手持），掉落物邻近同类堆叠 + 厚度可视化，背包「光标携带」拖拽（长按脱离 / 拖出丢弃），手持物品复用手臂挥手动画，支持自定义 OBJ 模型物品（如望远镜）
 - **存档系统**：Minecraft Anvil 风格的 region 文件（`.mca`）+ LZ4 压缩 + 自动保存
 - **局域网联机**：基于 ENet 的 Host/Join 架构，玩家位置同步 + 区块数据同步
 - 逐 section 视锥/距离剔除；超出 `renderRadius + EVICT_MARGIN_CHUNKS` 的 GPU slot 驱逐
@@ -171,11 +172,34 @@ Minecraft Anvil 风格的区块持久化。目录结构：`saves/<worldName>/wor
 - **Collision**（`scr/collision/`）—— `AABB`（玩家碰撞）、`Ray`（方块拾取）、`PhysicsConstants.h`。
 - **Particle**（`scr/particle/`）—— GPU compute shader 粒子（`GPUParticleSystem`）、基于 ECS 的 CPU 粒子（`ECSParticleSystem`），由 `ParticleManager` 管理。
 - **Model**（`scr/mode/`）—— Assimp 模型加载（`Mesh`/`Model`），玩家模型 + 骨骼动画 + 皮肤（`PlayerModel`/`PlayerAnimator`/`SkinManager`）。
-- **UI**（`scr/UI/`）—— `UIManager`（单例）和 `UIHotbar`。
+- **UI**（`scr/UI/`）—— `UIManager`（单例）、`UIHotbar`（底部快捷栏）、`UIInventory`（E 键背包面板，原版 inventory.png 度量）、`UISlot`（自包含格子：图标 + 数量角标 + 耐久条）、`UINumber`（用 ascii.png 字形烘焙数量角标）。`UISlot::setContent` 的 `iconTexOverride` 参数让方块物品用等距立方体图标（见下方物品系统）。
 - **Shader**（`scr/Shader.h/.cpp`）—— 着色器程序加载。
 - **TextureMgr**（`scr/TextureMgr.h/.cpp`）—— 从 `assert/textures/` 加载纹理数组，由 `textures_config.json` 配置。
 - **RuntimeConfig**（`scr/RuntimeConfig.h/.cpp`）—— 单例，首次访问时加载 `assert/runtime_config.json`。改 JSON 即可调参，不必重编。当前字段见下。
 - **Profiler**（`scr/Profiler.h/.cpp`）—— 轻量 CPU 分析器。`PROFILE_SCOPE("name")` 计时一个块；`Profiler::frame()`（主循环每次调）在 RuntimeConfig 启用时每秒打印聚合的 top section。
+
+### 物品与掉落物系统（`scr/item/`、`scr/entity/`）
+
+**数据 / 行为分离**（类 UE5 DataAsset）：
+
+- **`ItemDefinition`**（`scr/item/ItemDefinition.h`）—— 物品静态数据资产：id / 显示名 / 图标 / 类别 / 最大堆叠 / 耐久 / 模型类型 / 对应方块类型 / 行为标识。`ItemModelType` 枚举 `EXTRUDED_2D`（挤出 2D 图标）/ `BLOCK_CUBE` / `CUSTOM_MODEL`（外部 OBJ）。运行时字段 `iconTexture`（平面图标）与 `guiIconTexture`（方块等距立方体图标，非方块 = 0）。`isBlockItem()` = `category==BLOCK && blockType!=AIR`。
+- **`ItemStack`**（`scr/item/ItemStack.h`）—— 背包每格 / 掉落物运行时内容：`def` 指针 + count + durability。`empty()` / `sameItem()` / `maxStack()`。
+- **`Item`**（`scr/Item.h`）—— 无状态行为对象，`ItemFactory` 按 `behavior` 字段绑定；对 `ItemStack` 操作（放置减 count、使用减耐久）。
+- **`ItemRegistry`**（`scr/item/ItemRegistry.h/.cpp`）—— 单例，加载 `assert/item_registry.json`（jsoncpp 0.5.0 老 API + 注释剥离）。调试模式（`debug_mode`）下只加载 `load_in_debug` 标记物品的图标 GL 纹理，避免全量 600+ 张。图标注册名带 `itemicon_` 前缀避免与方块纹理撞名。`forEachMutable` 供 RenderSystem 回填 `guiIconTexture`。加图标后跑 `python tools/gen_item_registry.py`（合并式，保留手工编辑）。
+
+**方块物品立方体渲染**（`scr/item/BlockItemModel.h/.cpp`）：为 `category==block` 的物品建居中单位立方体，**逐面纹理层走 `BlockFaceType::getTextureLayer`（与地形同源）**，`block_item.vert/frag` 采样方块纹理数组（`sampler2DArray`）。三处使用：
+
+1. **背包 / 快捷栏图标**：`RenderSystem::generateBlockIcons()` 在 `initialize()` 末尾用离屏 FBO **等距渲染**成 2D 图标纹理，回填 `guiIconTexture`，UISlot 用 `iconTexOverride` 优先取用。**注意**：FBO 原点在左下、UI 采样按纹理 row0=顶，两者 Y 相反，故 ortho 上下边要对调（`glm::ortho(l,r,top,bottom,...)`，top>bottom）令渲染竖直翻转抵消，否则图标上下颠倒。
+2. **掉落物**（世界空间）；3. **手持**（相机空间）。
+- `BlockItemModel::hasValidTextures` 兜底：`BlockFaceType` 里没注册纹理层的方块（如缺 sand 层）退回挤出 2D 图标，避免整块显示成错误纹理。
+- `BlockItemModelCache` 单例（VAO 不跨 GL 上下文，`initialize` 里 `clear()`）。
+- 自定义 OBJ 物品（`model_type:custom_model` + `model_path`，如 spyglass）：`RenderSystem::getItemModel` 按路径懒加载缓存 `Model`，用模型着色器 `mode.vert/frag` 渲染。
+
+**掉落物**（`scr/entity/DroppedItem.h`、`DroppedItemManager.h/.cpp`）—— 单机本地实体（**不联网同步**）：重力 + AABB 落地 + 旋转/浮动动画 + 靠近玩家自动拾取。**堆叠**：同类掉落物先相互吸引（`ATTRACT_RANGE`）聚拢，再 `mergeNearby` 合并（上限 = `maxStack`）；渲染按 count 分 1~5 视觉层，立方体在 x/z 抖动叠高、挤出卡片沿本地 z 铺开，形成厚度感。破坏方块掉落 / F 键丢弃 / 拖拽丢弃都生成掉落物。
+
+**背包「光标携带」拖拽**（`Player::m_cursorStack` + `World::updateInventory`）：鼠标本身作为一个物品格。长按某格 >0.18s → 该格整栈**脱离**到 `m_cursorStack`（**不占背包格**，源格清空 → 背包腾一格可继续吸附掉落物，故背包开时不再冻结掉落物 update）；光标图标（`UIInventory::m_cursorSlot`，含数量角标）随鼠标移动；释放落到目标格（放下 / 合并 / 交换）或**拖出面板外**（`panelContains` 判定）则丢弃到世界；关背包时 `returnCursorToInventory` 收尾（尽量塞回，塞不下丢出）。`Player` API：`pickUpToCursor` / `placeCursorToSlot` / `dropCursorStack` / `returnCursorToInventory`。
+
+**手持物品（第一人称）**：持物时**隐藏手臂**（否则重叠），物品复用手臂挥手动画——`PlayerModel::advanceHandSwing` 抽出挥手状态机返回 `HandSwing{pitch,roll,lift}`，**每帧只推进一次**（空手→`drawFirstPersonHand` 内部推进；持物→`RenderSystem::renderFirstPersonHand` 推进并把 `swingMat` 叠加到物品变换）。破坏方块 = 长按左键 → 持续挥。
 
 ### 运行时配置（`assert/runtime_config.json`）
 
@@ -203,7 +227,7 @@ Minecraft Anvil 风格的区块持久化。目录结构：`saves/<worldName>/wor
 
 ### 着色器
 
-所有 GLSL 在 `shader/`。延迟管线用 `g_buffer.*`、`hbao.*`（单帧 HBAO）、`ao_accumulate.frag`（AO 时域累积）、`hbao_blur.*`、`shadow_mapping_depth.*`、`shadow_visibility.frag` + `shadow_accumulate.frag`（PCSS + 阴影时域累积）、`deferred_lighting.*`、`taa_resolve.*`（最终画面 TAA）。正向 pass 用 `outline.*`、`mode.*`、`particle.*`、`ui.*`。
+所有 GLSL 在 `shader/`。延迟管线用 `g_buffer.*`、`hbao.*`（单帧 HBAO）、`ao_accumulate.frag`（AO 时域累积）、`hbao_blur.*`、`shadow_mapping_depth.*`、`shadow_visibility.frag` + `shadow_accumulate.frag`（PCSS + 阴影时域累积）、`deferred_lighting.*`、`taa_resolve.*`（最终画面 TAA）。正向 pass 用 `outline.*`、`mode.*`（3D 模型 / 玩家 / 手持 OBJ 物品）、`item.*`（挤出 2D 物品，alpha discard）、`block_item.*`（方块物品立方体，采样方块纹理数组 `sampler2DArray`）、`particle.*`、`ui.*`。
 
 - `g_buffer.vert` 和 `shadow_mapping_depth.vert` 是 `#version 460 core`。两者解包逐实例 `packed` 属性（x/y/z/face）并从 `binding=0` 的 SSBO 读 `sectionBases[gl_DrawID].xyz` 还原世界空间方块中心。其余着色器保持原版本。
 - `g_buffer.frag` 丢弃 `BLOCK_ERRER` 占位面 —— 这让 section 可以把复用/释放的面 slot 留在原地而不必急着 compact。`Section::removeFaceLocal` 把 slot 标 ERRER 并把索引压入 `m_freeSlots` 供 `addFaceLocal` 回收。
