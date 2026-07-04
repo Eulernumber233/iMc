@@ -246,6 +246,10 @@ int World::run() {
     // 初始化玩家
     m_player->initialize(renderSystem.getUIManager(), localSkinPath);
 
+    // 掉落物管理器（单机本地实体），注入给玩家用于 F 丢弃 / 破坏掉落
+    m_droppedItems = std::make_unique<DroppedItemManager>();
+    m_player->setDroppedItemManager(m_droppedItems.get());
+
     // 设置方块选择回调
     m_player->setOnBlockSelectedCallback([&renderSystem](const glm::ivec3& blockPos) {
         renderSystem.setSelectedBlock(blockPos);
@@ -314,6 +318,17 @@ int World::run() {
         // 更新区块管理器（根据玩家位置更新可见区块）
         m_chunkManager->update(camera);
 
+        // 更新掉落物（物理 + 拾取）。背包开启时仍继续，使「光标腾出一格后可继续吸附」
+        // 的交互（需求 4）成立，且与 MC 单机一致。
+        if (m_droppedItems) {
+            m_droppedItems->update(deltaTime, *m_chunkManager, *m_player);
+        }
+
+        // 背包交互（长按脱离到光标 / 光标图标跟随）
+        if (m_inventoryOpen) {
+            updateInventory(deltaTime);
+        }
+
         // 新世界：等待区块(0,0)生成后，计算出生点（柱顶最高非空气方块上方）
         if (!m_spawnFound && m_isNewWorld) {
             Chunk* spawnChunk = m_chunkManager->getChunkAnyState(glm::ivec2(0, 0));
@@ -347,7 +362,7 @@ int World::run() {
 
         // 渲染帧
         renderSystem.render(*m_chunkManager, view, projection, camera, deltaTime, m_player.get(),
-                            m_netManager.get());
+                            m_netManager.get(), m_droppedItems.get());
 
         {
             PROFILE_SCOPE("swapBuffers");
@@ -370,23 +385,151 @@ int World::run() {
     return 0;
 }
 
+// 背包开合：切换光标模式、UI 可见性、冻结/恢复玩家操作
+void World::toggleInventory() {
+    if (!m_player) return;
+    m_inventoryOpen = !m_inventoryOpen;
+    auto inv = m_player->getInventoryUI();
+    auto hb  = m_player->getHotbar();
+    if (m_inventoryOpen) {
+        m_player->clearInput();                   // 清掉按住的移动键，避免冻结期间持续生效
+        m_player->syncHotbarUI();                 // 打开时刷新面板数据
+        if (inv) inv->visible = true;
+        if (hb)  hb->visible = false;             // 面板自带 hotbar 行，隐藏底部 hotbar
+        if (m_renderSystem) {
+            if (auto ch = m_renderSystem->getUIManager().getComponent("crosshair"))
+                ch->visible = false;              // 背包开时隐藏准星
+        }
+        glfwSetInputMode(m_window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        glfwSetCursorPos(m_window, SCR_WIDTH * 0.5, SCR_HEIGHT * 0.5);
+    } else {
+        // 关背包：光标携带的物品尽量塞回背包，塞不下的丢到世界
+        m_player->returnCursorToInventory();
+        m_invPressSlot = -1; m_invDetached = false; m_invLmbHeld = false;
+        if (inv) { inv->setCursorStack(m_player->getCursorStack()); inv->visible = false; }
+        if (hb)  hb->visible = true;
+        if (m_renderSystem) {
+            if (auto ch = m_renderSystem->getUIManager().getComponent("crosshair"))
+                ch->visible = true;               // 恢复准星
+        }
+        glfwSetInputMode(m_window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        m_player->resetMouseLook();               // 避免视角跳变
+    }
+}
+
+// 背包每帧更新：长按计时 → 越过阈值把物品脱离到光标；同步光标图标内容 / 位置
+void World::updateInventory(float deltaTime) {
+    if (!m_inventoryOpen || !m_player) return;
+    auto inv = m_player->getInventoryUI();
+    if (!inv) return;
+
+    const float LONG_PRESS_SEC = 0.18f;
+
+    if (m_invLmbHeld && !m_invDetached && !m_player->hasCursorStack() &&
+        m_invPressSlot >= 0) {
+        m_invPressTime += deltaTime;
+        const auto& invData = m_player->getInventory();
+        bool slotHasItem = (m_invPressSlot < (int)invData.size()) &&
+                           !invData[m_invPressSlot].empty();
+        if (slotHasItem && m_invPressTime >= LONG_PRESS_SEC) {
+            m_player->pickUpToCursor(m_invPressSlot); // 脱离到光标（源格清空）
+            m_invDetached = true;
+        }
+    }
+
+    inv->setCursorStack(m_player->getCursorStack());
+    inv->updateCursorPos(m_lastMouseUI);
+}
+
 void World::processMouse(double xpos, double ypos) {
+    if (m_inventoryOpen) {
+        // 背包开：记录鼠标 UI 坐标（y 翻转），驱动光标携带图标跟随
+        m_lastMouseUI = glm::vec2((float)xpos, (float)(SCR_HEIGHT - ypos));
+        if (m_player) {
+            auto inv = m_player->getInventoryUI();
+            if (inv) inv->updateCursorPos(m_lastMouseUI);
+        }
+        return;
+    }
     if (m_player) {
         m_player->processMouseMovement(xpos, ypos);
     }
 }
 
 void World::processMouseButton(int button, int action) {
+    if (m_inventoryOpen) {
+        if (m_player && button == GLFW_MOUSE_BUTTON_LEFT) {
+            auto inv = m_player->getInventoryUI();
+            if (inv) {
+                double mx, my; glfwGetCursorPos(m_window, &mx, &my);
+                glm::vec2 ui((float)mx, (float)(SCR_HEIGHT - my));
+                m_lastMouseUI = ui;
+                int slot = inv->slotAt(ui);
+                if (action == GLFW_PRESS) {
+                    m_invLmbHeld = true;
+                    if (m_player->hasCursorStack()) {
+                        // 光标已携带物品：点击落下 / 拖出面板丢弃
+                        if (slot >= 0)                    m_player->placeCursorToSlot(slot);
+                        else if (!inv->panelContains(ui)) m_player->dropCursorStack();
+                        m_invPressSlot = -1; m_invDetached = false;
+                    } else {
+                        // 光标空：记录按压格，等待长按脱离（或快速点击时在释放里即时拿取）
+                        m_invPressSlot = slot;
+                        m_invPressTime = 0.0f;
+                        m_invDetached  = false;
+                    }
+                } else if (action == GLFW_RELEASE) {
+                    m_invLmbHeld = false;
+                    if (m_invDetached && m_player->hasCursorStack()) {
+                        // 本次长按已脱离到光标：释放时落下 / 拖出丢弃 / 面板内空处放回源格
+                        if (slot >= 0)                    m_player->placeCursorToSlot(slot);
+                        else if (!inv->panelContains(ui)) m_player->dropCursorStack();
+                        else if (m_invPressSlot >= 0)     m_player->placeCursorToSlot(m_invPressSlot);
+                    } else if (!m_player->hasCursorStack() && m_invPressSlot >= 0 &&
+                               m_invPressSlot == slot) {
+                        // 快速点击（未达长按阈值）：即时把整栈拿到光标，持续携带
+                        m_player->pickUpToCursor(m_invPressSlot);
+                    }
+                    m_invPressSlot = -1; m_invDetached = false;
+                }
+                inv->setCursorStack(m_player->getCursorStack());
+                inv->updateCursorPos(ui);
+            }
+        }
+        return;
+    }
     if (m_player) {
         m_player->processMouseButton(button, action);
     }
 }
 
 void World::processKey(int key, int action) {
-    // 全局按键处理
+    // ESC：背包开着则先关背包，否则退出
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
+        if (m_inventoryOpen) { toggleInventory(); return; }
         glfwSetWindowShouldClose(m_window, GLFW_TRUE);
+        return;
     }
+    // E：普通模式下开合背包（观察者模式 E 用于调速，保持原行为）
+    if (key == GLFW_KEY_E && action == GLFW_PRESS && m_player &&
+        m_player->getMoveMode() == Player::MoveMode::Normal) {
+        toggleInventory();
+        return;
+    }
+    // 背包开启时：F 丢弃鼠标悬停格的一个物品；其余按键冻结（不转发给玩家）
+    if (m_inventoryOpen) {
+        if (key == GLFW_KEY_F && action == GLFW_PRESS && m_player) {
+            auto inv = m_player->getInventoryUI();
+            if (inv) {
+                double mx, my; glfwGetCursorPos(m_window, &mx, &my);
+                int slot = inv->slotAt(glm::vec2((float)mx, (float)(SCR_HEIGHT - my)));
+                if (slot >= 0) m_player->dropFromSlot(slot, 1);
+            }
+        }
+        return;
+    }
+
+    // 全局按键处理
     if (key == GLFW_KEY_G && action == GLFW_PRESS) {
         if (m_renderSystem) {
             m_renderSystem->toggleWeather();

@@ -60,6 +60,11 @@ public:
     // 第一人称手部 按 handConfig 构建相机空间 model 矩阵，
     void drawFirstPersonHand(Shader& shader, bool leftMousePressed, float deltaTime);
 
+    // 本帧挥手量（弧度 / 方块）。手持物品时复用它，让物品与手臂共享同一挥手动画。
+    struct HandSwing { float pitch = 0.0f; float roll = 0.0f; float lift = 0.0f; };
+    // 推进挥手状态机并返回本帧挥手量。每帧只应调用一次（手臂或手持物品二选一驱动）。
+    HandSwing advanceHandSwing(bool leftMousePressed, float deltaTime);
+
     // 第一人称手部参数（可直接读写调整）
     FirstPersonHandConfig handConfig;
 

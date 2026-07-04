@@ -25,6 +25,11 @@ public:
     bool verboseTextureLoading = false;   // 输出纹理加载详情日志
     bool verboseShaderLoading = false;    // 输出着色器编译详情日志
 
+    // 调试模式：为 true 时物品注册表只加载标记了 load_in_debug 的物品图标，
+    // 避免每次启动都加载 assert/minecraft/textures/item 下的全量图标（600+ 张）。
+    // 正式发布时置 false 加载全量资源。
+    bool debugMode = true;
+
     // 各向异性过滤等级（方块纹理数组）。去远处地形闪烁的核心手段。
     // <=0 或缺省 = 取硬件支持的最大值（通常 16）；填具体值则取 min(该值, 硬件最大)。
     float anisotropy = 0.0f;

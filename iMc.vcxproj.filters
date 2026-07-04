@@ -126,7 +126,31 @@
     <ClCompile Include="scr\UI\UIHotbar.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="scr\UI\UINumber.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\UI\UISlot.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\UI\UIInventory.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="scr\Item.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\item\ItemRegistry.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\item\ItemFactory.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\item\ItemModel.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\item\BlockItemModel.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\entity\DroppedItemManager.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="scr\RuntimeConfig.cpp">
@@ -275,7 +299,40 @@
     <ClInclude Include="scr\UI\UIHotbar.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="scr\UI\UINumber.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\UI\UISlot.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\UI\UIInventory.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
     <ClInclude Include="scr\Item.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\item\ItemDefinition.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\item\ItemStack.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\item\ItemRegistry.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\item\ItemFactory.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\item\ItemModel.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\item\BlockItemModel.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\entity\DroppedItem.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\entity\DroppedItemManager.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="scr\RuntimeConfig.h">
@@ -330,6 +387,8 @@
     <None Include="shader\shadow_mapping_depth.frag" />
     <None Include="shader\mode.frag" />
     <None Include="shader\mode.vert" />
+    <None Include="shader\block_item.frag" />
+    <None Include="shader\block_item.vert" />
     <None Include="shader\particle.vert" />
     <None Include="shader\particle.frag" />
     <None Include="shader\particle.comp" />

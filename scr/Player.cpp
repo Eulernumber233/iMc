@@ -3,6 +3,8 @@
 #include "save/ChunkSaveManager.h"
 #include "render/RenderSystem.h"
 #include "UI/UIManager.h"
+#include "item/ItemRegistry.h"
+#include "entity/DroppedItemManager.h"
 #include "collision/PhysicsConstants.h"
 #include "collision/AABB.h"
 #include <GLFW/glfw3.h>
@@ -48,22 +50,25 @@ void Player::initialize(UIManager& uiManager, const std::string& skinPath) {
     // 初始化物品栏
     initHotbarItems();
 
-    // 创建UI热栏（像素完美，参照原版 MC 度量）
-    m_hotbar = std::make_shared<UIHotbar>("hotbar", 10);
+    // 创建UI热栏（像素完美，参照原版 MC 度量），9 格对齐原版
+    m_hotbar = std::make_shared<UIHotbar>("hotbar", HOTBAR_SIZE);
     m_hotbar->setGuiScaleForScreen(SCR_WIDTH, SCR_HEIGHT);
     m_hotbar->anchor = glm::vec2(0.5f, 0.0f);
     m_hotbar->setPosition(SCR_WIDTH * 0.5f, static_cast<float>(2 * m_hotbar->getGuiScale()));
     m_hotbar->zIndex = 50;
 
-    // 设置物品图标
-    for (int i = 0; i < m_hotbarItems.size() && i < 10; ++i) {
-        if (m_hotbarItems[i] == nullptr) {
-            m_hotbar->setSlotItem(i, "");
-        }
-        else m_hotbar->setSlotItem(i, m_hotbarItems[i]->getIconTextureName());
-    }
+    // 背包界面（默认隐藏，E 键由 World 切换）
+    m_inventoryUI = std::make_shared<UIInventory>("inventory_screen");
+    m_inventoryUI->setScreenSize(SCR_WIDTH, SCR_HEIGHT);
+    m_inventoryUI->visible = false;
+    m_inventoryUI->zIndex = 60; // 高于 hotbar(50)
+
+    // 同步 hotbar + 背包面板图标 / 数量 / 耐久
+    syncHotbarUI();
+
     // 注册到UI管理器
     m_uiManager->addComponent(m_hotbar);
+    m_uiManager->addComponent(m_inventoryUI);
 
     // 创建并加载玩家模型
     m_model = std::make_unique<PlayerModel>();
@@ -615,13 +620,16 @@ void Player::processKey(int key, int action) {
         }
     }
 
-    // 数字键选择物品栏（两种模式通用）
+    // 数字键选择物品栏（两种模式通用），1-9 对应 hotbar 槽 0-8
     if (action == GLFW_PRESS) {
         if (key >= GLFW_KEY_1 && key <= GLFW_KEY_9) {
             setSelectedSlot(key - GLFW_KEY_1);
-        } else if (key == GLFW_KEY_0) {
-            setSelectedSlot(9);
         }
+    }
+
+    // F：丢弃当前选中格一个物品（背包界面开启时由 World 路由到悬停格）
+    if (key == GLFW_KEY_F && action == GLFW_PRESS) {
+        dropFromSlot(-1, 1);
     }
 }
 
@@ -662,6 +670,20 @@ void Player::handleBlockInteraction(ChunkManager& chunkManager) {
     }
 }
 
+// 方块类型 → 破坏掉落的物品 id（原版风格）。返回 nullptr 表示不掉落。
+// 注意：这些 id 需要在 item_registry.json 中存在且调试模式下已加载（load_in_debug）。
+static const char* dropItemIdForBlock(BlockType t) {
+    switch (t) {
+    case BLOCK_STONE:  return "stone";
+    case BLOCK_DIRT:   return "dirt";
+    case BLOCK_GRASS:  return "dirt";     // 草方块破坏掉泥土（原版行为）
+    case BLOCK_SAND:   return "sand";
+    case BLOCK_WOOD:   return "oak_log";
+    case BLOCK_LEAVES: return nullptr;    // 树叶暂不掉落
+    default:           return nullptr;
+    }
+}
+
 bool Player::tryBreakBlock(ChunkManager& chunkManager) {
     if (!m_selection.hasSelected || m_selection.blockState.type() == BLOCK_AIR) {
         return false;
@@ -669,15 +691,27 @@ bool Player::tryBreakBlock(ChunkManager& chunkManager) {
 
     PlacementContext ctx{ m_selection.blockPos, m_selection.hitFace, m_camera->Front };
 
-    // 获取当前选中的物品
-    auto selectedItem = getSelectedItem();
-    if (selectedItem && selectedItem->onLeftClick(ctx, &chunkManager)) {
+    // 获取当前选中的物品栈
+    ItemStack* selected = getSelectedStack();
+    if (selected && !selected->empty() && selected->def && selected->def->behaviorObj
+        && selected->def->behaviorObj->onLeftClick(*selected, ctx, &chunkManager)) {
         // 物品处理了左键点击（如工具加速破坏）
         return true;
     }
 
     // 默认破坏行为：写入空气
+    BlockType broken = m_selection.blockState.type();
     chunkManager.setBlock(m_selection.blockPos, BlockState(BLOCK_AIR));
+
+    // 破坏掉落：按方块类型映射到掉落物 id（原版风格：草→泥土等），在原位生成掉落物
+    if (m_droppedItems) {
+        const char* dropId = dropItemIdForBlock(broken);
+        const ItemDefinition* def = dropId ? ItemRegistry::instance().get(dropId) : nullptr;
+        if (def) {
+            glm::vec3 c = glm::vec3(m_selection.blockPos) + glm::vec3(0.5f);
+            m_droppedItems->spawn(ItemStack(def, 1), c, glm::vec3(0.0f, 1.0f, 0.0f));
+        }
+    }
     return true;
 }
 
@@ -691,12 +725,14 @@ bool Player::tryPlaceBlock(ChunkManager& chunkManager) {
         return false; // 位置已被占用
     }
 
-    // 获取当前选中的物品。adjacentPos = 放置位置；hitFace 是玩家点中的那一面，
+    // 获取当前选中的物品栈。adjacentPos = 放置位置；hitFace 是玩家点中的那一面，
     // 带轴方块（如原木）据此决定 orient。
-    auto selectedItem = getSelectedItem();
-    if (selectedItem) {
+    ItemStack* selected = getSelectedStack();
+    if (selected && !selected->empty() && selected->def && selected->def->behaviorObj) {
         PlacementContext ctx{ placePos, m_selection.hitFace, m_camera->Front };
-        return selectedItem->onRightClick(ctx, &chunkManager);
+        bool consumed = selected->def->behaviorObj->onRightClick(*selected, ctx, &chunkManager);
+        if (consumed) syncHotbarUI(); // 数量可能变化，刷新角标
+        return consumed;
     }
 
     return false;
@@ -705,22 +741,162 @@ bool Player::tryPlaceBlock(ChunkManager& chunkManager) {
 // ==================== 物品栏管理 ====================
 
 void Player::initHotbarItems() {
-    // 清空现有物品
-    m_hotbarItems.clear();
-    m_hotbarItems.resize(10, nullptr);
+    // 36 格背包（slot 0-8 = hotbar）
+    m_inventory.assign(INVENTORY_SIZE, ItemStack{});
     // 添加默认物品
     initDefaultItems();
 }
 
-std::shared_ptr<Item> Player::getSelectedItem() const {
+ItemStack* Player::getSelectedStack() {
     if (!m_hotbar) return nullptr;
-
-    int selectedSlot = m_hotbar->getSelectedSlot();
-    if (selectedSlot >= 0 && selectedSlot < m_hotbarItems.size()) {
-        return m_hotbarItems[selectedSlot];
-    }
-
+    int slot = m_hotbar->getSelectedSlot();
+    if (slot >= 0 && slot < (int)m_inventory.size()) return &m_inventory[slot];
     return nullptr;
+}
+
+void Player::syncHotbarUI() {
+    if (!m_hotbar) return;
+    for (int i = 0; i < HOTBAR_SIZE; ++i) {
+        const ItemStack& st = m_inventory[i];
+        if (st.empty() || !st.def) {
+            m_hotbar->setSlot(i, "", 0, -1.0f);
+        } else {
+            float durRatio = (st.def->hasDurability && st.def->maxDurability > 0)
+                ? (float)st.durability / (float)st.def->maxDurability
+                : -1.0f;
+            m_hotbar->setSlot(i, st.def->iconName, st.count, durRatio, st.def->guiIconTexture);
+        }
+    }
+    // 背包面板与 hotbar 共用同一 m_inventory 数据，一并刷新
+    if (m_inventoryUI) m_inventoryUI->syncFrom(m_inventory);
+}
+
+void Player::moveStack(int src, int dst) {
+    int n = (int)m_inventory.size();
+    if (src < 0 || src >= n || dst < 0 || dst >= n || src == dst) return;
+    ItemStack& a = m_inventory[src];
+    ItemStack& b = m_inventory[dst];
+    if (a.empty()) return;
+
+    if (b.empty()) {
+        // 目标空 → 整栈移动
+        b = a;
+        a.clear();
+    } else if (a.sameItem(b)) {
+        // 同类合并到 dst，余量留 src
+        int space = b.maxStack() - b.count;
+        int move = std::min(space, a.count);
+        b.count += move;
+        a.count -= move;
+        if (a.count <= 0) a.clear();
+    } else {
+        // 不同 → 交换
+        std::swap(a, b);
+    }
+    syncHotbarUI();
+}
+
+void Player::dropFromSlot(int slot, int count) {
+    if (!m_droppedItems) return;
+    if (slot < 0) slot = getSelectedSlot();
+    if (slot < 0 || slot >= (int)m_inventory.size()) return;
+    ItemStack& st = m_inventory[slot];
+    if (st.empty() || !st.def) return;
+
+    int n = std::min(count, st.count);
+    if (n <= 0) return;
+
+    // 沿视线在眼前抛出
+    glm::vec3 eye = m_position + (m_isCrouching ? m_cameraOffsetCrouching : m_cameraOffsetStanding);
+    glm::vec3 dir = glm::normalize(m_camera->Front);
+    glm::vec3 pos = eye + dir * 0.4f;
+    glm::vec3 vel = dir * 4.0f + glm::vec3(0.0f, 1.5f, 0.0f);
+
+    ItemStack dropped(st.def, n);
+    dropped.durability = st.durability;
+    m_droppedItems->spawn(dropped, pos, vel);
+
+    st.count -= n;
+    if (st.count <= 0) st.clear();
+    syncHotbarUI();
+}
+
+void Player::pickUpToCursor(int slot) {
+    if (!m_cursorStack.empty()) return;                 // 光标已占用
+    if (slot < 0 || slot >= (int)m_inventory.size()) return;
+    ItemStack& st = m_inventory[slot];
+    if (st.empty()) return;
+    m_cursorStack = st;      // 整栈拿到光标
+    st.clear();              // 源格清空（背包腾出一格）
+    syncHotbarUI();
+}
+
+void Player::placeCursorToSlot(int slot) {
+    if (m_cursorStack.empty()) return;
+    if (slot < 0 || slot >= (int)m_inventory.size()) return;
+    ItemStack& dst = m_inventory[slot];
+    if (dst.empty()) {
+        dst = m_cursorStack;
+        m_cursorStack.clear();
+    } else if (dst.sameItem(m_cursorStack)) {
+        int space = dst.maxStack() - dst.count;
+        int move = std::min(space, m_cursorStack.count);
+        dst.count += move;
+        m_cursorStack.count -= move;
+        if (m_cursorStack.count <= 0) m_cursorStack.clear();
+    } else {
+        std::swap(dst, m_cursorStack); // 异类交换，光标改持原格物品
+    }
+    syncHotbarUI();
+}
+
+void Player::dropCursorStack() {
+    if (m_cursorStack.empty()) return;
+    if (m_droppedItems) {
+        glm::vec3 eye = m_position + (m_isCrouching ? m_cameraOffsetCrouching : m_cameraOffsetStanding);
+        glm::vec3 dir = glm::normalize(m_camera->Front);
+        glm::vec3 pos = eye + dir * 0.4f;
+        glm::vec3 vel = dir * 4.0f + glm::vec3(0.0f, 1.5f, 0.0f);
+        m_droppedItems->spawn(m_cursorStack, pos, vel);
+    }
+    m_cursorStack.clear();
+    syncHotbarUI();
+}
+
+void Player::returnCursorToInventory() {
+    if (m_cursorStack.empty()) return;
+    addToInventory(m_cursorStack);   // 就地减少
+    if (!m_cursorStack.empty())      // 塞不下的丢到世界
+        dropCursorStack();
+    else
+        m_cursorStack.clear();
+    syncHotbarUI();
+}
+
+bool Player::addToInventory(ItemStack& stack) {
+    if (stack.empty() || !stack.def) return true;
+    // 1) 先合并进同类未满栈
+    for (auto& slot : m_inventory) {
+        if (stack.count <= 0) break;
+        if (!slot.empty() && slot.sameItem(stack) && slot.count < slot.maxStack()) {
+            int space = slot.maxStack() - slot.count;
+            int move = std::min(space, stack.count);
+            slot.count += move;
+            stack.count -= move;
+        }
+    }
+    // 2) 再填空格
+    for (auto& slot : m_inventory) {
+        if (stack.count <= 0) break;
+        if (slot.empty()) {
+            int move = std::min(stack.def->maxStack, stack.count);
+            slot = ItemStack(stack.def, move);
+            slot.durability = stack.durability;
+            stack.count -= move;
+        }
+    }
+    syncHotbarUI();
+    return stack.count <= 0;
 }
 
 int Player::getSelectedSlot() const {
@@ -775,13 +951,20 @@ void Player::updateBlockSelection(ChunkManager& chunkManager, RenderSystem& rend
 // ==================== 默认物品初始化 ====================
 
 void Player::initDefaultItems() {
-    m_hotbarItems[0] = std::make_shared<BlockItem>(BLOCK_STONE, "Stone", "Stone");
-    // 槽位1: 桦木原木（使用BLOCK_WOOD类型）
-    m_hotbarItems[1] = std::make_shared<BlockItem>(BLOCK_WOOD, "Birch Log", "Birch_Log");
-    // 槽位2: 圆石（使用BLOCK_STONE类型，但纹理不同）
-    m_hotbarItems[2] = std::make_shared<BlockItem>(BLOCK_STONE, "Cobblestone", "Cobblestone");
-    // 槽位3: 橡木木板（使用BLOCK_WOOD类型）
-    m_hotbarItems[3] = std::make_shared<BlockItem>(BLOCK_WOOD, "Oak Planks", "Oak_Planks");
-    // 槽位4: 望远镜
-    m_hotbarItems[4] = std::make_shared<SpyglassItem>("Spyglass", "spyglass");
+    const ItemRegistry& reg = ItemRegistry::instance();
+    // 按 id 从注册表取定义组装物品栈。调试模式下这些 id 都标了 load_in_debug。
+    auto give = [&](int slot, const std::string& id, int count) {
+        if (slot < 0 || slot >= (int)m_inventory.size()) return;
+        const ItemDefinition* def = reg.get(id);
+        if (def) m_inventory[slot] = ItemStack(def, count);
+    };
+    give(0, "stone", 64);
+    give(1, "oak_log", 32);
+    give(2, "dirt", 64);
+    give(3, "sand", 16);
+    give(4, "spyglass", 1);
+    give(5, "diamond_sword", 1);
+    give(6, "apple", 5);
+    give(7, "diamond", 12);
+    give(8, "stick", 1);   // 数量 1 不显示角标
 }

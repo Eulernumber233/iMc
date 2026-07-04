@@ -58,7 +58,20 @@
       "Bash(msbuild \"e:\\\\opengl\\\\iMc\\\\iMc.vcxproj\" /t:Build /p:Configuration=Debug /p:Platform=x64 /m)",
       "PowerShell(& \"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"e:\\\\opengl\\\\iMc\\\\iMc.vcxproj\" /t:Build /p:Configuration=Debug /p:Platform=x64 /m 2>&1)",
       "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"e:\\\\opengl\\\\iMc\\\\iMc.vcxproj\" /t:Build /p:Configuration=Debug /p:Platform=x64 /m 2>&1)",
-      "Bash(msbuild iMc.vcxproj /p:Configuration=Debug /p:Platform=x64 /t:Build /m /v:minimal)"
+      "Bash(msbuild iMc.vcxproj /p:Configuration=Debug /p:Platform=x64 /t:Build /m /v:minimal)",
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /t:Build /p:Configuration=Debug /p:Platform=x64 /m /nologo /clp:ErrorsOnly /v:minimal 2>&1 | Select-Object -Last 40)",
+      "Bash(timeout 10 ./x64/Debug/iMc.exe)",
+      "Bash(echo \"exit=$?\")",
+      "Read(//e/opengl/iMc/**)",
+      "Bash(xargs -r stat -c '%y %n')",
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /t:Build /p:Configuration=Debug /p:Platform=x64 /m /nologo /clp:ErrorsOnly /v:minimal 2>&1 | Select-Object -Last 15; \"BUILD DONE\")",
+      "Bash(timeout 9 ./x64/Debug/iMc.exe)",
+      "Bash(xargs -r stat -c '%y  %n')",
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /t:Build /p:Configuration=Debug /p:Platform=x64 /m /nologo /clp:ErrorsOnly /v:minimal 2>&1 | Select-Object -Last 10; \"BUILD DONE\".)",
+      "Bash(timeout 8 ./x64/Debug/iMc.exe)",
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /t:Rebuild /p:Configuration=Debug /p:Platform=x64 /m /nologo /clp:ErrorsOnly /v:minimal 2>&1 | Select-Object -Last 8; \"REBUILD DONE\")",
+      "PowerShell($msb = Get-Command msbuild -ErrorAction SilentlyContinue; if \\($msb\\) { $msb.Source } else { \"no-msbuild-in-PATH\" }; $vs = Get-ChildItem \"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1; if \\($vs\\) { $vs.FullName } else { \"no-vs2022\" })",
+      "Bash(python -c ' *)"
     ],
     "additionalDirectories": [
       "e:\\opengl\\iMc\\scr"

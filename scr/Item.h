@@ -1,7 +1,9 @@
 ﻿#pragma once
 #include "chunk/BlockType.h"
 #include <string>
-#include <memory>
+
+// 前向声明：物品栈（运行时每格内容，见 item/ItemStack.h）
+struct ItemStack;
 
 // 放置 / 交互上下文。
 //   adjacentPos  ：要交互的目标格子（右键放置时是相邻空气格的世界坐标；
@@ -16,67 +18,48 @@ struct PlacementContext {
     glm::vec3  playerForward;
 };
 
-// 物品基类
+// ── 物品行为基类（无状态）─────────────────────────────────────────
+// 数据（名称 / 图标 / 堆叠 / 耐久 / 关联方块）已迁到 ItemDefinition（数据资产）；
+// Item 只负责"行为"。每个 ItemDefinition 由 ItemFactory 绑定一个共享的无状态
+// Item 行为对象；行为方法收 ItemStack&，可修改其 count / durability（放置减 1、
+// 使用减耐久等）。
 class Item {
 public:
     virtual ~Item() = default;
 
-    // 获取物品显示名称
-    virtual std::string getName() const = 0;
+    // 右键点击行为。stack 为发起交互的物品栈（可被修改）。
+    // 返回值：是否消耗了这次点击（放置方块返回 true，望远镜观察返回 false）。
+    virtual bool onRightClick(ItemStack& stack, const PlacementContext& ctx,
+                              class ChunkManager* chunkManager) = 0;
 
-    // 获取物品图标纹理名称（用于UI显示）
-    virtual std::string getIconTextureName() const = 0;
-
-    // 右键点击行为
-    // 返回值：是否消耗了这次点击（例如放置方块返回true，望远镜观察返回false）
-    virtual bool onRightClick(const PlacementContext& ctx, class ChunkManager* chunkManager) = 0;
-
-    // 左键点击行为（破坏方块） - 默认返回false，表示不改变默认破坏行为
-    // 可以用于工具类物品（如斧头加速破坏），但普通物品不需要
-    virtual bool onLeftClick(const PlacementContext& ctx, class ChunkManager* chunkManager) { (void)ctx; (void)chunkManager; return false; }
-
-    // 是否为方块物品
-    virtual bool isBlockItem() const { return false; }
-
-    // 如果是方块物品，获取对应的方块类型
-    virtual BlockType getBlockType() const { return BLOCK_AIR; }
+    // 左键点击行为（默认返回 false，表示不改变默认破坏行为）。
+    virtual bool onLeftClick(ItemStack& stack, const PlacementContext& ctx,
+                             class ChunkManager* chunkManager) {
+        (void)stack; (void)ctx; (void)chunkManager; return false;
+    }
 };
 
-// 方块物品类
+// 方块物品行为：右键在相邻空气格放置对应方块，成功后消耗一个。
+// 方块类型从 stack.def->blockType 读取（不再自持状态）。
 class BlockItem : public Item {
-private:
-    BlockType m_blockType;
-    std::string m_name;
-    std::string m_iconTextureName;
-
 public:
-    BlockItem(BlockType blockType, const std::string& name, const std::string& iconTextureName)
-        : m_blockType(blockType), m_name(name), m_iconTextureName(iconTextureName) {}
-
-    std::string getName() const override { return m_name; }
-    std::string getIconTextureName() const override { return m_iconTextureName; }
-
-    bool onRightClick(const PlacementContext& ctx, class ChunkManager* chunkManager) override;
-
-    bool isBlockItem() const override { return true; }
-    BlockType getBlockType() const override { return m_blockType; }
+    bool onRightClick(ItemStack& stack, const PlacementContext& ctx,
+                      class ChunkManager* chunkManager) override;
 };
 
-// 望远镜物品类
+// 望远镜物品行为（预留）
 class SpyglassItem : public Item {
-private:
-    std::string m_name;
-    std::string m_iconTextureName;
-
 public:
-    SpyglassItem(const std::string& name, const std::string& iconTextureName)
-        : m_name(name), m_iconTextureName(iconTextureName) {}
-
-    std::string getName() const override { return m_name; }
-    std::string getIconTextureName() const override { return m_iconTextureName; }
-
-    bool onRightClick(const PlacementContext& ctx, class ChunkManager* chunkManager) override;
-
-    // 望远镜使用接口（预留）
+    bool onRightClick(ItemStack& stack, const PlacementContext& ctx,
+                      class ChunkManager* chunkManager) override;
     void useSpyglass();
+};
+
+// 通用物品行为：右键 / 左键都不做事（材料、暂无功能的物品）
+class GenericItem : public Item {
+public:
+    bool onRightClick(ItemStack& stack, const PlacementContext& ctx,
+                      class ChunkManager* chunkManager) override {
+        (void)stack; (void)ctx; (void)chunkManager; return false;
+    }
 };

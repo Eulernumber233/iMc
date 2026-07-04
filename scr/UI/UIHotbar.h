@@ -1,5 +1,6 @@
 ﻿#pragma once
 #include "UIManager.h"
+#include "UISlot.h"
 
 // 物品栏：参照原版 Minecraft 的像素度量
 //   槽位格距 SLOT_PITCH = 20（原版 GUI 单位）
@@ -9,7 +10,7 @@
 // 图标与选中框都相对"逻辑槽位中心"定位，不跟随背景贴图的像素偏移。
 class UIHotbar : public UIContainer {
 public:
-    UIHotbar(const std::string& id, int slotCount = 10);
+    UIHotbar(const std::string& id, int slotCount = 9);
     ~UIHotbar();
 
     void setSelectedSlot(int slot);
@@ -17,6 +18,12 @@ public:
 
     void setSlotItem(int slot, const std::string& textureName);
     void clearSlotItem(int slot);
+
+    // 完整设置一格：图标名（空 = 清空）、数量（>1 显示角标）、
+    // 耐久比例（[0,1] 显示耐久条，<0 隐藏）。
+    // iconTexOverride != 0 时优先用该 GL 纹理（方块物品的等距立方体图标）。
+    void setSlot(int slot, const std::string& textureName, int count, float durabilityRatio,
+                 GLuint iconTexOverride = 0);
 
     void scroll(float yoffset);
 
@@ -55,7 +62,7 @@ private:
     std::string m_selectionTexture = "hotbar_selection";
 
     std::vector<std::shared_ptr<UIImage>> m_slotBackgrounds;
-    std::vector<std::shared_ptr<UIImage>> m_slotIcons;
+    std::vector<std::shared_ptr<UISlot>>  m_slots;   // 图标/数量/耐久自包含
     std::shared_ptr<UIImage> m_selection; // 单独的高亮叠层
 
     void initChildren();

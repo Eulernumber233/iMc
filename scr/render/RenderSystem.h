@@ -4,6 +4,7 @@
 #include "../chunk/BlockType.h"
 #include <unordered_map>
 #include <vector>
+#include <memory>
 #include <glm/glm.hpp>
 #include "../Shader.h"
 #include "BlockOutlineRenderer.h"
@@ -15,6 +16,7 @@
 
 class Player;
 class NetManager;
+class DroppedItemManager;
 
 struct FaceVertex {
     glm::vec3 position;
@@ -74,7 +76,8 @@ public:
         std::shared_ptr<Camera> camera,
         float deltaTime,
         Player* player = nullptr,
-        NetManager* netManager = nullptr);
+        NetManager* netManager = nullptr,
+        DroppedItemManager* droppedItems = nullptr);
 
     void setSelectedBlock(const glm::ivec3& blockPos) {
         m_selectedBlockPos = blockPos;
@@ -239,6 +242,16 @@ private:
         { GL_VERTEX_SHADER,   "shader/mode.vert" },
         { GL_FRAGMENT_SHADER, "shader/mode.frag" }
     } };
+    // 挤出物品模型（掉落物 / 手持）：alpha discard 出轮廓
+    Shader m_itemShader{ {
+        { GL_VERTEX_SHADER,   "shader/item.vert" },
+        { GL_FRAGMENT_SHADER, "shader/item.frag" }
+    } };
+    // 方块物品立方体（掉落物 / 手持 / UI 图标）：采样方块纹理数组
+    Shader m_blockItemShader{ {
+        { GL_VERTEX_SHADER,   "shader/block_item.vert" },
+        { GL_FRAGMENT_SHADER, "shader/block_item.frag" }
+    } };
     Shader m_taaShader{ {
         { GL_VERTEX_SHADER,   "shader/taa_resolve.vert" },
         { GL_FRAGMENT_SHADER, "shader/taa_resolve.frag" }
@@ -336,6 +349,16 @@ private:
         const glm::mat4& view, const glm::mat4& projection);
     void renderOutlines(const glm::mat4& view, const glm::mat4& projection);
     void renderUI();
+    // 掉落物：用挤出模型 / 方块立方体 + item 着色器在世界空间绘制
+    void renderDroppedItems(const glm::mat4& view, const glm::mat4& projection,
+        DroppedItemManager* items);
+
+    // 为所有方块物品离屏渲染等距立方体 UI 图标，回填 ItemDefinition::guiIconTexture。
+    // 需在方块纹理数组 + BlockFaceType 映射 + ItemRegistry 就绪后调用（initialize 末尾）。
+    void generateBlockIcons();
+    GLuint m_blockTextureArray = 0;             // 方块纹理数组（generateBlockIcons / 掉落物立方体用）
+    std::vector<GLuint> m_blockIconTextures;    // 生成的 UI 图标纹理（析构时释放）
+
     void renderModel(const std::shared_ptr<Camera>camera,
         const glm::mat4& view, const glm::mat4& projection, Player* player);
     // 第一人称手部模型：常驻镜头右下角，点击左键挥一下、长按循环挥。
@@ -355,4 +378,8 @@ private:
     std::unordered_map<std::string, GLuint> m_skinTextures;
     GLuint loadSkinTexture(const std::string& skinName);
     void loadAllSkinTextures();
+
+    // 物品自定义 OBJ 模型缓存（modelPath → Model），按需懒加载（如望远镜）
+    std::unordered_map<std::string, std::unique_ptr<Model>> m_itemModels;
+    Model* getItemModel(const std::string& path);
 };

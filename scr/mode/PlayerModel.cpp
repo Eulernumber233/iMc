@@ -448,17 +448,14 @@ void PlayerModel::drawPosed(Shader& shader, const glm::vec3& worldPos, const Pla
     glBindVertexArray(0);
 }
 
-void PlayerModel::drawFirstPersonHand(Shader& shader, bool leftMousePressed, float deltaTime) {
-    const PartMesh& arm = m_parts[RIGHT_ARM];
-    if (arm.VAO == 0) return;
+PlayerModel::HandSwing PlayerModel::advanceHandSwing(bool leftMousePressed, float deltaTime) {
     const FirstPersonHandConfig& c = handConfig;
-
     // 挥手状态推进：左键按下即开始；到达 1 时若仍按住则无缝循环，否则结束
     if (leftMousePressed && !m_handSwinging) {
         m_handSwinging = true;
         m_handSwingProgress = 0.0f;
     }
-    float swingPitch = 0.0f, swingRoll = 0.0f, swingLift = 0.0f;
+    HandSwing sw;
     if (m_handSwinging) {
         m_handSwingProgress += deltaTime / c.swingDuration;
         if (m_handSwingProgress >= 1.0f) {
@@ -473,11 +470,21 @@ void PlayerModel::drawFirstPersonHand(Shader& shader, bool leftMousePressed, flo
             float p = m_handSwingProgress;                             // 0..1
             float bump  = std::sin(p * glm::pi<float>());              // 0..1..0 对称
             float front = std::sin(std::sqrt(p) * glm::pi<float>());   // 前重（起手更快）
-            swingPitch = -bump  * glm::radians(c.swingPitchAmp);
-            swingRoll  =  front * glm::radians(c.swingRollAmp);
-            swingLift  =  bump  * c.swingLift;
+            sw.pitch = -bump  * glm::radians(c.swingPitchAmp);
+            sw.roll  =  front * glm::radians(c.swingRollAmp);
+            sw.lift  =  bump  * c.swingLift;
         }
     }
+    return sw;
+}
+
+void PlayerModel::drawFirstPersonHand(Shader& shader, bool leftMousePressed, float deltaTime) {
+    const PartMesh& arm = m_parts[RIGHT_ARM];
+    if (arm.VAO == 0) return;
+    const FirstPersonHandConfig& c = handConfig;
+
+    HandSwing sw = advanceHandSwing(leftMousePressed, deltaTime);
+    float swingPitch = sw.pitch, swingRoll = sw.roll, swingLift = sw.lift;
 
     // 相机空间 model 矩阵（旋转绕肩部 y=0 展开，天然像手臂挥动）
     glm::mat4 m(1.0f);

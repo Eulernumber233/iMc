@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "Shader.h"
 #include "Camera.h"
 #include "TextureMgr.h"
@@ -6,6 +6,7 @@
 #include "render/RenderSystem.h"
 #include "chunk/ChunkManager.h"
 #include "generate/TerrainGenerator.h"
+#include "entity/DroppedItemManager.h"
 #include <memory>
 #include <sstream>
 
@@ -80,6 +81,24 @@ private:
 
     // 区块管理器
     std::shared_ptr<ChunkManager> m_chunkManager;
+
+    // 掉落物管理器（单机本地实体）
+    std::unique_ptr<DroppedItemManager> m_droppedItems;
+
+    // 背包界面开合状态（E 键）。开时解锁光标、鼠标事件路由到背包拖拽、冻结玩家操作。
+    bool m_inventoryOpen = false;
+    void toggleInventory();
+
+    // ── 背包「光标携带」交互（长按拖拽 / 丢弃）────────────────────
+    // 鼠标本身作为一个物品格：长按某格达阈值后，该格物品脱离背包附到光标上
+    // （源格清空），光标图标随鼠标移动并显示数量；释放时落到目标格 / 拖出面板丢弃。
+    // 每帧调用，累计长按计时并在越过阈值时触发脱离。
+    void updateInventory(float deltaTime);
+    int   m_invPressSlot = -1;      // 当前按住起始格（<0 无）
+    float m_invPressTime = 0.0f;    // 已按住时长（秒）
+    bool  m_invDetached  = false;   // 本次按压是否已把物品脱离到光标
+    bool  m_invLmbHeld   = false;   // 左键是否处于按下状态
+    glm::vec2 m_lastMouseUI = glm::vec2(0.0f); // 最近一次鼠标 UI 坐标（光标定位用）
 
     // 输入处理函数
     void processMouse(double xpos, double ypos);

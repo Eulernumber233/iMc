@@ -12,6 +12,11 @@
 #include "../net/NetManager.h"
 #include "../collision/PhysicsConstants.h"
 #include "../RuntimeConfig.h"
+#include "../item/ItemModel.h"
+#include "../item/ItemDefinition.h"
+#include "../item/BlockItemModel.h"
+#include "../item/ItemRegistry.h"
+#include "../entity/DroppedItemManager.h"
 #include <random>
 #include <cmath>
 #include <vector>
@@ -218,9 +223,17 @@ RenderSystem::~RenderSystem() {
         if (tex) glDeleteTextures(1, &tex);
     }
     m_skinTextures.clear();
+
+    for (GLuint tex : m_blockIconTextures) {
+        if (tex) glDeleteTextures(1, &tex);
+    }
+    m_blockIconTextures.clear();
 }
 
 bool RenderSystem::initialize() {
+    // 挤出物品模型缓存清空：VAO 不跨 GL 上下文共享，新窗口需在新上下文按需重建
+    ItemModelCache::instance().clear();
+
     // 初始化方块渲染器
     if (!m_blockRenderer.initialize()) {
         std::cerr << "Failed to initialize BlockRenderer!" << std::endl;
@@ -228,7 +241,8 @@ bool RenderSystem::initialize() {
     }
     // 从 TextureMgr 获取纹理数组并设置给 BlockRenderer
     auto texMgr = TextureMgr::GetInstance();
-    m_blockRenderer.setTextureArray(texMgr->GetTextureArray());
+    m_blockTextureArray = texMgr->GetTextureArray();
+    m_blockRenderer.setTextureArray(m_blockTextureArray);
     // 上传"端面纹理层"查表给 g_buffer shader（带轴方块如原木横躺时朝向主轴的两面用它）。
     // 仅需上传一次：BlockFaceType 已在 World::run 启动早期调用 init_type_map 填好。
     m_blockRenderer.uploadEndLayerLookup();
@@ -396,7 +410,94 @@ bool RenderSystem::initialize() {
     m_taaShader.setInt("depthTex", 2);
     m_taaShader.setVec2("screenSize", glm::vec2(m_screenWidth, m_screenHeight));
 
+    // 方块物品立方体：缓存清空（VAO 不跨上下文）+ 生成等距 UI 图标
+    BlockItemModelCache::instance().clear();
+    generateBlockIcons();
+
     return true;
+}
+
+// 为每个方块物品离屏渲染一张等距立方体图标（UI 用），回填 guiIconTexture。
+void RenderSystem::generateBlockIcons() {
+    if (m_blockTextureArray == 0) return;
+
+    const int ICON = 96; // 图标纹理边长（像素）
+
+    // 离屏 FBO：颜色纹理（每个物品各一张）+ 共享深度 renderbuffer
+    GLuint fbo = 0, depthRbo = 0;
+    glGenFramebuffers(1, &fbo);
+    glGenRenderbuffers(1, &depthRbo);
+    glBindRenderbuffer(GL_RENDERBUFFER, depthRbo);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, ICON, ICON);
+
+    // 等距投影 + 视图：正交，稍微旋转让顶面 + 两个侧面可见（MC GUI 风格）
+    // 注意：FBO 原点在左下，而 UI 采样图标时按「纹理 row0 = 顶部」，两者 Y 相反。
+    // 故这里把 ortho 的上下边对调（top/bottom 交换）令渲染结果竖直翻转，抵消差异，
+    // 使背包里的方块图标正立。
+    glm::mat4 proj = glm::ortho(-0.72f, 0.72f, 0.72f, -0.72f, -4.0f, 4.0f);
+    glm::mat4 view(1.0f);
+    glm::mat4 rot = glm::rotate(glm::mat4(1.0f), glm::radians(30.0f), glm::vec3(1, 0, 0))
+                  * glm::rotate(glm::mat4(1.0f), glm::radians(-45.0f), glm::vec3(0, 1, 0));
+    glm::vec3 iconLightDir = glm::normalize(glm::vec3(-0.4f, -0.9f, -0.3f));
+
+    // 保存并设置 GL 状态
+    GLint prevFbo = 0, prevViewport[4];
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFbo);
+    glGetIntegerv(GL_VIEWPORT, prevViewport);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glViewport(0, 0, ICON, ICON);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depthRbo);
+
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+    glDisable(GL_CULL_FACE); // 立方体两面写入，避免绕序问题
+
+    m_blockItemShader.use();
+    m_blockItemShader.setMat4("projection", proj);
+    m_blockItemShader.setMat4("view", view);
+    m_blockItemShader.setMat4("model", rot);
+    m_blockItemShader.setVec3("lightDir", iconLightDir);
+    m_blockItemShader.setInt("blockTextures", 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, m_blockTextureArray);
+
+    ItemRegistry::instance().forEachMutable([&](ItemDefinition& def) {
+        if (!def.isBlockItem() || !BlockItemModel::hasValidTextures(def.blockType)) return;
+        const BlockItemModel* cube = BlockItemModelCache::instance().get(def.blockType);
+        if (!cube) return;
+
+        GLuint tex = 0;
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, ICON, ICON, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, m_blockTextureArray);
+        cube->draw();
+
+        def.guiIconTexture = tex;
+        m_blockIconTextures.push_back(tex);
+    });
+
+    // 还原
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFbo);
+    glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+    glEnable(GL_CULL_FACE);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+
+    glDeleteRenderbuffers(1, &depthRbo);
+    glDeleteFramebuffers(1, &fbo);
 }
 
 
@@ -457,23 +558,9 @@ void RenderSystem::createSampleUI() {
 
     // 添加UI组件
     m_uiManager.addComponent(crosshair);
-    //m_uiManager.addComponent(crosshair2);
-    //m_uiManager.addComponent(inventory);
 
-    // 创建物品栏（像素完美，参照原版 MC 度量）
-    auto hotbar = std::make_shared<UIHotbar>("hotbar", 10);
-    hotbar->setGuiScaleForScreen(m_screenWidth, m_screenHeight);
-    hotbar->anchor = glm::vec2(0.5f, 0.0f);         // 水平居中、底部对齐
-    // 距屏幕底 2 个逻辑像素（等同原版 MC 的 hotbar 底距）
-    hotbar->setPosition(m_screenWidth * 0.5f, static_cast<float>(2 * hotbar->getGuiScale()));
-    hotbar->zIndex = 50;
-    // 设置一些示例物品
-    hotbar->setSlotItem(0, "Stone");
-    hotbar->setSlotItem(1, "Birch_Log");
-    hotbar->setSlotItem(2, "Cobblestone");
-    hotbar->setSlotItem(3, "Oak_Planks");
-    hotbar->setSlotItem(4, "spyglass");
-    m_uiManager.addComponent(hotbar);
+    // 注：hotbar 由 Player::initialize 创建并按 m_inventory 同步（同 id "hotbar"），
+    // 这里不再创建示例 hotbar，避免重复与数据不一致。
 }
 // 添加UI渲染方法
 void RenderSystem::renderUI() {
@@ -1035,7 +1122,8 @@ void RenderSystem::render(const ChunkManager& chunkManager,
     std::shared_ptr<Camera> camera,
     float deltaTime,
     Player* player,
-    NetManager* netManager
+    NetManager* netManager,
+    DroppedItemManager* droppedItems
 ) {
 
     PROFILE_SCOPE("RenderSystem::render");
@@ -1128,6 +1216,12 @@ void RenderSystem::render(const ChunkManager& chunkManager,
     if (netManager) {
         PROFILE_SCOPE("render.remotePlayers");
         renderRemotePlayers(netManager, view, geoProj, camera);
+    }
+
+    // 掉落物（挤出模型）
+    if (droppedItems) {
+        PROFILE_SCOPE("render.droppedItems");
+        renderDroppedItems(view, geoProj, droppedItems);
     }
 
     // 6.2 渲染粒子（半透明，深度测试开启，深度写入关闭）
@@ -1680,6 +1774,111 @@ void RenderSystem::lightingPass(const std::shared_ptr<Camera>camera
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+void RenderSystem::renderDroppedItems(const glm::mat4& view, const glm::mat4& projection,
+    DroppedItemManager* items)
+{
+    if (!items || items->count() == 0) return;
+
+    // 生产者自保：显式开深度测试/写；挤出模型两面可见 → 关背面剔除；无 blend（alpha discard）
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_CULL_FACE);
+
+    // 清理延迟渲染残留的纹理绑定
+    for (int i = 0; i < 6; i++) {
+        glActiveTexture(GL_TEXTURE0 + i);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+    glActiveTexture(GL_TEXTURE0);
+
+    // 堆叠可见层数：数量越多，视觉上叠得越厚（MC 风格阈值），上限 5 层。
+    auto stackLayers = [](int count) {
+        int n = 1;
+        if (count > 1)  ++n;
+        if (count > 15) ++n;
+        if (count > 31) ++n;
+        if (count > 47) ++n;
+        return n;
+    };
+    // 每个副本的确定性小偏移（避免用 rand，保证稳定不闪烁）
+    auto layerOffset = [](int k) {
+        float a = std::sin((float)k * 12.9898f) * 43758.5453f;
+        float b = std::sin((float)k * 78.233f)  * 12345.6789f;
+        a -= std::floor(a); b -= std::floor(b);
+        return glm::vec2(a - 0.5f, b - 0.5f); // ∈ [-0.5, 0.5]
+    };
+
+    // 先画方块立方体（block_item 着色器 + 纹理数组），再画挤出模型（item 着色器）——
+    // 各自只切一次 shader / 纹理绑定。
+    bool blockShaderReady = false, extrudeShaderReady = false;
+
+    for (const auto& it : items->items()) {
+        const ItemDefinition* def = it.stack.def;
+        if (!def) continue;
+
+        float bob = 0.08f * std::sin(it.bob * 2.0f);
+        int layers = stackLayers(it.stack.count);
+
+        if (def->isBlockItem() && m_blockTextureArray != 0 &&
+            BlockItemModel::hasValidTextures(def->blockType)) {
+            const BlockItemModel* cube = BlockItemModelCache::instance().get(def->blockType);
+            if (!cube) continue;
+            if (!blockShaderReady) {
+                m_blockItemShader.use();
+                m_blockItemShader.setMat4("view", view);
+                m_blockItemShader.setMat4("projection", projection);
+                m_blockItemShader.setVec3("lightDir", lightDir);
+                m_blockItemShader.setInt("blockTextures", 0);
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D_ARRAY, m_blockTextureArray);
+                blockShaderReady = true;
+            }
+            for (int k = 0; k < layers; ++k) {
+                glm::vec2 off = layerOffset(k);
+                glm::vec3 local(off.x * 0.16f, k * 0.09f, off.y * 0.16f);
+                glm::mat4 m(1.0f);
+                m = glm::translate(m, it.pos + glm::vec3(0.0f, 0.22f + bob, 0.0f));
+                m = glm::rotate(m, it.spin, glm::vec3(0.0f, 1.0f, 0.0f));
+                m = glm::translate(m, local);
+                m = glm::scale(m, glm::vec3(0.4f));
+                m_blockItemShader.setMat4("model", m);
+                cube->draw();
+            }
+        } else {
+            if (def->iconTexture == 0 || def->iconPath.empty()) continue;
+            const ItemModel* model = ItemModelCache::instance().get(def->id, def->iconPath);
+            if (!model) continue;
+            if (!extrudeShaderReady) {
+                m_itemShader.use();
+                m_itemShader.setMat4("view", view);
+                m_itemShader.setMat4("projection", projection);
+                m_itemShader.setVec3("lightDir", lightDir);
+                m_itemShader.setInt("texture_diffuse1", 0);
+                extrudeShaderReady = true;
+            }
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, def->iconTexture);
+            for (int k = 0; k < layers; ++k) {
+                glm::vec2 off = layerOffset(k);
+                // 挤出卡片沿本地 z（厚度轴）铺开，形成多张叠加的层次感
+                float zc = (layers > 1) ? ((float)k - (layers - 1) * 0.5f) : 0.0f;
+                glm::vec3 local(off.x * 0.06f, off.y * 0.04f, zc * 0.12f);
+                glm::mat4 m(1.0f);
+                m = glm::translate(m, it.pos + glm::vec3(0.0f, 0.22f + bob, 0.0f));
+                m = glm::rotate(m, it.spin, glm::vec3(0.0f, 1.0f, 0.0f));
+                m = glm::translate(m, local);
+                m = glm::scale(m, glm::vec3(0.5f));
+                m_itemShader.setMat4("model", m);
+                model->draw();
+            }
+        }
+    }
+
+    // 恢复背面剔除（进入本函数前为开启状态）
+    glEnable(GL_CULL_FACE);
+    glBindVertexArray(0);
+}
+
 void RenderSystem::renderModel(const std::shared_ptr<Camera> camera,
     const glm::mat4& view, const glm::mat4& projection, Player* player)
 {
@@ -1736,14 +1935,124 @@ void RenderSystem::renderFirstPersonHand(Player* player, float deltaTime)
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
 
-    m_modeShader.use();
-    m_modeShader.setMat4("projection", handProj);
-    m_modeShader.setMat4("view", handView);
-    m_modeShader.setVec3("viewPos", glm::vec3(0.0f));
-    m_modeShader.setVec3("light.direction", lightDir);
+    // 手持物品：把当前选中格物品的模型放在手部位置，并复用手臂挥手动画。
+    // 手持物品时隐藏手臂本身（否则手臂与物品重叠）；空手时才画手臂。
+    ItemStack* held = player->getSelectedStack();
+    bool holdingItem = (held && !held->empty() && held->def);
 
-    // 摆放/挥手/model 矩阵均由模型内部按 handConfig 完成（点击一次、长按循环）
-    model->drawFirstPersonHand(m_modeShader, player->isLeftMousePressed(), deltaTime);
+    // 挥手量：每帧只推进一次。空手 → drawFirstPersonHand 内部推进；持物 → 这里推进。
+    PlayerModel::HandSwing sw;
+    if (holdingItem) {
+        sw = model->advanceHandSwing(player->isLeftMousePressed(), deltaTime);
+    } else {
+        m_modeShader.use();
+        m_modeShader.setMat4("projection", handProj);
+        m_modeShader.setMat4("view", handView);
+        m_modeShader.setVec3("viewPos", glm::vec3(0.0f));
+        m_modeShader.setVec3("light.direction", lightDir);
+        // 摆放/挥手/model 矩阵均由模型内部按 handConfig 完成（点击一次、长按循环）
+        model->drawFirstPersonHand(m_modeShader, player->isLeftMousePressed(), deltaTime);
+    }
+
+    if (!holdingItem) return;
+
+    // 挥手矩阵（相机空间，绕镜头原点做弧线摆动 + 上抬），叠加到物品基础摆放上，
+    // 使物品与手臂共享同一挥手动画（破坏方块时长按左键即持续挥）。
+    glm::mat4 swingMat(1.0f);
+    swingMat = glm::translate(swingMat, glm::vec3(0.0f, sw.lift, 0.0f));
+    swingMat = glm::rotate(swingMat, sw.pitch, glm::vec3(1, 0, 0));
+    swingMat = glm::rotate(swingMat, sw.roll,  glm::vec3(0, 0, 1));
+
+    const ItemDefinition* def = held->def;
+
+    if (def->modelType == ItemModelType::CUSTOM_MODEL && !def->modelPath.empty()) {
+        // 自定义 OBJ 模型（如望远镜）：复用模型着色器 mode.vert/frag
+        Model* im = getItemModel(def->modelPath);
+        if (im) {
+            glEnable(GL_CULL_FACE);
+            glCullFace(GL_BACK);
+            m_modeShader.use();
+            m_modeShader.setMat4("projection", handProj);
+            m_modeShader.setMat4("view", handView);
+            m_modeShader.setVec3("viewPos", glm::vec3(0.0f));
+            m_modeShader.setVec3("light.direction", glm::vec3(0.3f, -0.6f, -0.7f));
+
+            glm::mat4 m(1.0f);
+            m = glm::translate(m, glm::vec3(0.42f, -0.45f, -0.85f));
+            m = glm::rotate(m, glm::radians(-15.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+            m = glm::rotate(m, glm::radians(5.0f),   glm::vec3(1.0f, 0.0f, 0.0f));
+            m = glm::scale(m, glm::vec3(0.65f));
+            m_modeShader.setMat4("model", swingMat * m);
+
+            im->Draw(m_modeShader);
+            glBindVertexArray(0);
+        }
+    } else if (def->isBlockItem() && m_blockTextureArray != 0 &&
+               BlockItemModel::hasValidTextures(def->blockType)) {
+        // 方块物品：立方体（block_item 着色器 + 纹理数组）
+        const BlockItemModel* cube = BlockItemModelCache::instance().get(def->blockType);
+        if (cube) {
+            glDisable(GL_CULL_FACE);
+            m_blockItemShader.use();
+            m_blockItemShader.setMat4("projection", handProj);
+            m_blockItemShader.setMat4("view", handView);
+            m_blockItemShader.setVec3("lightDir", glm::vec3(0.3f, -0.6f, -0.7f));
+            m_blockItemShader.setInt("blockTextures", 0);
+
+            glm::mat4 m(1.0f);
+            m = glm::translate(m, glm::vec3(0.55f, -0.55f, -1.0f));
+            m = glm::rotate(m, glm::radians(35.0f),  glm::vec3(0.0f, 1.0f, 0.0f));
+            m = glm::rotate(m, glm::radians(25.0f),  glm::vec3(1.0f, 0.0f, 0.0f));
+            m = glm::scale(m, glm::vec3(0.55f));
+            m_blockItemShader.setMat4("model", swingMat * m);
+
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D_ARRAY, m_blockTextureArray);
+            cube->draw();
+
+            glEnable(GL_CULL_FACE);
+            glBindVertexArray(0);
+        }
+    } else if (def->iconTexture != 0 && !def->iconPath.empty()) {
+        const ItemModel* im = ItemModelCache::instance().get(def->id, def->iconPath);
+        if (im) {
+            glDisable(GL_CULL_FACE); // 挤出模型两面可见
+            m_itemShader.use();
+            m_itemShader.setMat4("projection", handProj);
+            m_itemShader.setMat4("view", handView);
+            m_itemShader.setVec3("lightDir", glm::vec3(0.3f, -0.6f, -0.7f)); // 相机空间固定光
+            m_itemShader.setInt("texture_diffuse1", 0);
+
+            glm::mat4 m(1.0f);
+            m = glm::translate(m, glm::vec3(0.55f, -0.55f, -1.0f));
+            m = glm::rotate(m, glm::radians(20.0f),  glm::vec3(0.0f, 1.0f, 0.0f));
+            m = glm::rotate(m, glm::radians(-10.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+            m = glm::scale(m, glm::vec3(0.7f));
+            m_itemShader.setMat4("model", swingMat * m);
+
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, def->iconTexture);
+            im->draw();
+
+            glEnable(GL_CULL_FACE); // 恢复
+            glBindVertexArray(0);
+        }
+    }
+}
+
+// 按 OBJ 路径懒加载 + 缓存物品模型（VAO 属当前 GL 上下文，随 RenderSystem 生命周期）
+Model* RenderSystem::getItemModel(const std::string& path) {
+    auto it = m_itemModels.find(path);
+    if (it != m_itemModels.end()) return it->second.get();
+    std::unique_ptr<Model> m;
+    try {
+        m = std::make_unique<Model>(path.c_str());
+    } catch (...) {
+        m = nullptr;
+    }
+    Model* raw = m.get();
+    m_itemModels.emplace(path, std::move(m));
+    return raw;
 }
 
 void RenderSystem::renderRemotePlayers(NetManager* netManager,

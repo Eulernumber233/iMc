@@ -1,7 +1,9 @@
 ﻿#pragma once
 #include "Camera.h"
 #include "Item.h"
+#include "item/ItemStack.h"
 #include "UI/UIHotbar.h"
+#include "UI/UIInventory.h"
 #include "UI/UIManager.h"
 #include "collision/AABB.h"
 #include "collision/PhysicsConstants.h"
@@ -15,6 +17,7 @@
 // 前向声明
 class ChunkManager;
 class RenderSystem;
+class DroppedItemManager;
 struct PlayerSaveData;
 
 // 玩家类 - 集成摄像机、物品栏、输入管理和物理系统
@@ -60,6 +63,17 @@ public:
     // 左键是否处于按下状态（供第一人称手部挥动：点击一次、长按循环）
     bool isLeftMousePressed() const { return m_leftMousePressed; }
 
+    // 重置鼠标视角首帧标记（背包关闭、光标模式切换后调用，避免视角跳变）
+    void resetMouseLook() { m_firstMouse = true; m_leftMousePressed = false; m_rightMousePressed = false; }
+
+    // 清空所有移动/鼠标输入状态（打开背包时调用，避免按住的键在冻结期间持续生效）
+    void clearInput() {
+        m_moveInput = {};
+        m_spectatorInput = {};
+        m_leftMousePressed = false;
+        m_rightMousePressed = false;
+    }
+
     // 玩家物理属性访问
     glm::vec3 getPosition() const { return m_position; }  // 玩家碰撞箱中心
     glm::vec3 getVelocity() const { return m_velocity; }
@@ -81,10 +95,49 @@ public:
     AABB getAABB() const;
 
     // 物品栏管理
+    // 背包共 36 格：slot 0-8 = hotbar，9-35 = 主背包。
+    static constexpr int HOTBAR_SIZE    = 9;
+    static constexpr int INVENTORY_SIZE = 36;
+
     void initHotbarItems();
-    std::shared_ptr<Item> getSelectedItem() const;
-    int getSelectedSlot() const;
+    int  getSelectedSlot() const;
     void setSelectedSlot(int slot);
+
+    // 背包访问（供背包界面同步 / 掉落物拾取）
+    std::vector<ItemStack>& getInventory() { return m_inventory; }
+    const std::vector<ItemStack>& getInventory() const { return m_inventory; }
+
+    // 当前 hotbar 选中格的物品栈（可能为空栈）。返回指针便于就地修改 / 判空。
+    ItemStack* getSelectedStack();
+
+    // 把 hotbar（slot 0-8）同步到 UIHotbar 显示（图标 / 数量 / 耐久）
+    void syncHotbarUI();
+
+    // 背包整理：把 src 格移动 / 合并 / 交换到 dst 格。合并时余量留 src。
+    void moveStack(int src, int dst);
+
+    // 尝试把一个物品栈加入背包（先合并同类，再填空格）。stack 会被就地减少，
+    // 返回是否被完全吸收（count 归零）。
+    bool addToInventory(ItemStack& stack);
+
+    // 掉落物管理器（World 注入），供 F 丢弃 / 破坏方块掉落生成实体
+    void setDroppedItemManager(DroppedItemManager* mgr) { m_droppedItems = mgr; }
+    // 从指定槽丢出 count 个（沿视线抛出）。slot<0 用当前选中格。
+    void dropFromSlot(int slot, int count);
+
+    // ── 光标携带栈（背包拖拽：鼠标本身作为一个物品格）────────────
+    // 长按脱离到光标的物品栈。非空时它「不占背包格」，故背包可空出该格继续吸附掉落物。
+    ItemStack& getCursorStack() { return m_cursorStack; }
+    const ItemStack& getCursorStack() const { return m_cursorStack; }
+    bool hasCursorStack() const { return !m_cursorStack.empty(); }
+    // 把某格整栈拿到光标（光标须为空、该格须有物品）。源格清空。
+    void pickUpToCursor(int slot);
+    // 把光标栈落到某格：空格→放下；同类→合并（余量留光标）；异类→交换。
+    void placeCursorToSlot(int slot);
+    // 把光标栈作为掉落物丢到世界（沿视线抛出），清空光标。
+    void dropCursorStack();
+    // 关背包时收尾：光标栈尽量塞回背包，塞不下的丢到世界。
+    void returnCursorToInventory();
 
     // 方块交互
     bool tryBreakBlock(ChunkManager& chunkManager);
@@ -120,6 +173,8 @@ public:
 
     // 获取UI热栏
     std::shared_ptr<UIHotbar> getHotbar() const { return m_hotbar; }
+    // 获取背包界面（E 键开合，World 驱动可见性 + 拖拽）
+    std::shared_ptr<UIInventory> getInventoryUI() const { return m_inventoryUI; }
 
     // 移动模式
     enum class MoveMode { Normal, Spectator };
@@ -188,9 +243,12 @@ private:
     float m_airAccel = PhysicsConstants::AIR_ACCEL;                // 空中加速度 (m/s²)
     float m_airDecel = PhysicsConstants::AIR_DECEL;                // 空中减速度 (m/s²)
 
-    // 物品栏
-    std::vector<std::shared_ptr<Item>> m_hotbarItems;
+    // 物品栏（36 格，slot 0-8 = hotbar）
+    std::vector<ItemStack> m_inventory;
+    ItemStack m_cursorStack;   // 光标携带栈（不占背包格）
     std::shared_ptr<UIHotbar> m_hotbar;
+    std::shared_ptr<UIInventory> m_inventoryUI;
+    DroppedItemManager* m_droppedItems = nullptr;
 
     // 输入状态
     bool m_leftMousePressed = false;
@@ -225,7 +283,7 @@ private:
     // 动作冷却
     float m_lastBreakTime = 0.0f;
     float m_lastPlaceTime = 0.0f;
-    const float ACTION_COOLDOWN = 0.25f;
+    const float ACTION_COOLDOWN = 0.25f; // 左键动画挥手间隔（秒）也是最小破坏间隔，右键放置也用同一间隔
 
     // 速度控制
     // 三速系统相关变量

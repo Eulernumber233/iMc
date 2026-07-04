@@ -1,4 +1,6 @@
 ﻿#include "Item.h"
+#include "item/ItemStack.h"
+#include "item/ItemDefinition.h"
 #include "chunk/ChunkManager.h"
 
 // 把击中面映射到放置方块的 orient。
@@ -9,8 +11,12 @@ static uint8_t orientFromHitFace(BlockFace face) {
     return static_cast<uint8_t>(face);
 }
 
-bool BlockItem::onRightClick(const PlacementContext& ctx, class ChunkManager* chunkManager) {
-    if (!chunkManager) return false;
+bool BlockItem::onRightClick(ItemStack& stack, const PlacementContext& ctx,
+                             class ChunkManager* chunkManager) {
+    if (!chunkManager || stack.empty() || !stack.def) return false;
+
+    BlockType blockType = stack.def->blockType;
+    if (blockType == BLOCK_AIR) return false;
 
     // 检查目标位置是否是空气
     BlockState blockAtPlace = chunkManager->getBlockAt(ctx.adjacentPos);
@@ -18,15 +24,20 @@ bool BlockItem::onRightClick(const PlacementContext& ctx, class ChunkManager* ch
         return false; // 位置非空气，不放置
     }
 
-    uint8_t orient = GetBlockProperties(m_blockType).hasAxis
+    uint8_t orient = GetBlockProperties(blockType).hasAxis
         ? orientFromHitFace(ctx.hitFace)
         : ORIENT_NONE;
-    chunkManager->setBlock(ctx.adjacentPos, BlockState(m_blockType, orient));
+    chunkManager->setBlock(ctx.adjacentPos, BlockState(blockType, orient));
+
+    // 放置成功消耗一个
+    stack.count--;
+    if (stack.count <= 0) stack.clear();
     return true;
 }
 
-bool SpyglassItem::onRightClick(const PlacementContext& ctx, class ChunkManager* chunkManager) {
-    (void)ctx; (void)chunkManager;
+bool SpyglassItem::onRightClick(ItemStack& stack, const PlacementContext& ctx,
+                                class ChunkManager* chunkManager) {
+    (void)stack; (void)ctx; (void)chunkManager;
     // 望远镜使用 - 预留接口
     useSpyglass();
     return false;

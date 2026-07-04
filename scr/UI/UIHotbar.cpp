@@ -15,12 +15,12 @@ UIHotbar::~UIHotbar() = default;
 
 void UIHotbar::initChildren() {
     m_slotBackgrounds.clear();
-    m_slotIcons.clear();
+    m_slots.clear();
 
     // 渲染顺序（UIContainer 按添加顺序画）：
     //   1) 所有槽位背景
-    //   2) 选中高亮（压在物品图标之下，避免遮住图标）
-    //   3) 所有物品图标（最上层）
+    //   2) 选中高亮（压在物品格之下，避免遮住图标）
+    //   3) 所有物品格（图标 + 数量 + 耐久，自包含）
     for (int i = 0; i < m_slotCount; ++i) {
         auto bg = std::make_shared<UIImage>(id + "_bg_" + std::to_string(i));
         bg->loadTextureByTextureName(m_borderTexture);
@@ -35,11 +35,10 @@ void UIHotbar::initChildren() {
     addComponent(m_selection);
 
     for (int i = 0; i < m_slotCount; ++i) {
-        auto icon = std::make_shared<UIImage>(id + "_icon_" + std::to_string(i));
-        icon->zIndex = 3;
-        icon->visible = false;
-        m_slotIcons.push_back(icon);
-        addComponent(icon);
+        auto slot = std::make_shared<UISlot>(id + "_slot_" + std::to_string(i));
+        slot->zIndex = 3;
+        m_slots.push_back(slot);
+        addComponent(slot);
     }
 }
 
@@ -76,8 +75,9 @@ void UIHotbar::layout() {
             (cx - bgDx) - bgW * 0.5f,
             (cy - bgDy) - bgH * 0.5f);
 
-        m_slotIcons[i]->setSize(iconPx, iconPx);
-        m_slotIcons[i]->setPosition(cx - iconPx * 0.5f, cy - iconPx * 0.5f);
+        // 物品格容器摆在图标 16x16 的左下角，内部自管图标/数量/耐久
+        m_slots[i]->setPosition(cx - iconPx * 0.5f, cy - iconPx * 0.5f);
+        m_slots[i]->configure(iconPx, s);
     }
 
     if (m_selection) {
@@ -110,18 +110,18 @@ void UIHotbar::setSelectedSlot(int slot) {
 }
 
 void UIHotbar::setSlotItem(int slot, const std::string& textureName) {
-    if (slot < 0 || slot >= m_slotCount) return;
-    if (textureName.empty()) {
-        clearSlotItem(slot);
-        return;
-    }
-    m_slotIcons[slot]->loadTextureByTextureName(textureName);
-    m_slotIcons[slot]->visible = true;
+    setSlot(slot, textureName, 1, -1.0f);
 }
 
 void UIHotbar::clearSlotItem(int slot) {
-    if (slot < 0 || slot >= m_slotCount) return;
-    m_slotIcons[slot]->visible = false;
+    if (slot < 0 || slot >= (int)m_slots.size()) return;
+    m_slots[slot]->clear();
+}
+
+void UIHotbar::setSlot(int slot, const std::string& textureName, int count, float durabilityRatio,
+                       GLuint iconTexOverride) {
+    if (slot < 0 || slot >= (int)m_slots.size()) return;
+    m_slots[slot]->setContent(textureName, count, durabilityRatio, iconTexOverride);
 }
 
 void UIHotbar::scroll(float yoffset) {

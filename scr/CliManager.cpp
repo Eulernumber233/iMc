@@ -1,8 +1,9 @@
-#include "CliManager.h"
+﻿#include "CliManager.h"
 #include "save/ChunkSaveManager.h"
 #include "Data.h"
 #include "RuntimeConfig.h"
 #include "TextureMgr.h"
+#include "item/ItemRegistry.h"
 #include <iostream>
 #include <random>
 #include <unordered_set>
@@ -149,6 +150,9 @@ bool CliManager::initPersistentContext() {
     if (RuntimeConfig::get().verboseTextureLoading)
         std::cout << "[CliManager] Textures loaded into persistent GL context" << std::endl;
 
+    // 加载物品注册表（图标 GL 纹理进持久上下文，随窗口共享）。调试模式下只加载
+    // load_in_debug 标记的少量物品，避免每次启动加载全量 600+ 张图标。
+    ItemRegistry::instance().load();
     return true;
 }
 

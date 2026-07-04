@@ -104,8 +104,13 @@
     "verbose_texture_loading": false,
     //   输出纹理加载详情日志（每次启动时输出纹理加载信息，可关闭以减少干扰）
 
-    "verbose_shader_loading": false
+    "verbose_shader_loading": false,
     //   输出着色器编译日志（编译成功/失败消息，可关闭以减少干扰）
+
+    "debug_mode": true
+    //   调试模式：true 时物品注册表只加载标记 load_in_debug 的物品图标，
+    //   避免每次启动加载 assert/minecraft/textures/item 下全量 600+ 张图标。
+    //   正式发布置 false 加载全量物品资源。
 }
 
 

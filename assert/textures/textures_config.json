@@ -144,6 +144,12 @@
             "is_srgb": false
         },
         {
+            "name": "inventory_gui",
+            "path": "../minecraft/textures/gui/container/inventory.png",
+            "category": "ui",
+            "is_srgb": false
+        },
+        {
             "name": "hotbar_offhand_left",
             "path": "UI/hotbar_offhand_left.png",
             "category": "ui",
