@@ -57,6 +57,9 @@ public:
     // 是否应渲染自身模型（第一人称下一般不渲染）
     bool shouldRenderOwnModel() const { return m_thirdPerson; }
 
+    // 左键是否处于按下状态（供第一人称手部挥动：点击一次、长按循环）
+    bool isLeftMousePressed() const { return m_leftMousePressed; }
+
     // 玩家物理属性访问
     glm::vec3 getPosition() const { return m_position; }  // 玩家碰撞箱中心
     glm::vec3 getVelocity() const { return m_velocity; }

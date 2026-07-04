@@ -338,6 +338,10 @@ private:
     void renderUI();
     void renderModel(const std::shared_ptr<Camera>camera,
         const glm::mat4& view, const glm::mat4& projection, Player* player);
+    // 第一人称手部模型：常驻镜头右下角，点击左键挥一下、长按循环挥。
+    // 在 TAA/合成之后、UI 之前画到默认帧缓冲（避免时域拖影，且被准星/物品栏覆盖）。
+    // 所有可调参数硬编码在该函数体顶部的「可调参数」块里。
+    void renderFirstPersonHand(Player* player, float deltaTime);
     void renderModel_test(const std::shared_ptr<Camera> camera,
         const glm::mat4& view, const glm::mat4& projection);
     void renderRemotePlayers(NetManager* netManager,

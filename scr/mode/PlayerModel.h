@@ -5,10 +5,25 @@
 #include <vector>
 #include <string>
 
-// Minecraft 人物模型（Steve wide 版本）
-// 由6个长方体部件组成：头、身体、左臂、右臂、左腿、右腿
-// 每个部件有独立的 VAO/VBO/EBO，支持独立变换（为后续动画预留）
+// 人物模型由6个长方体部件组成：头、身体、左臂、右臂、左腿、右腿
+// 每个部件有独立的 VAO/VBO/EBO，支持独立变换
 // 使用 mode.vert / mode.frag 着色器
+
+// 第一人称手部摆放/挥手参数（相机空间：+X 右、+Y 上、-Z 屏幕里/前方；单位=方块）
+struct FirstPersonHandConfig {
+    // 手相对镜头的偏移：X 越大越靠右，Y 越负越靠下，Z 越负越靠前（离镜头越远）
+    glm::vec3 offset = glm::vec3(0.24f, -0.54f, -0.1f);
+    // 手臂三轴旋转（度）
+    float pitch = 118.0f;   // 绕 X：把下垂的手臂掰向屏幕里（最主要，决定前伸角度）
+    float yaw   = 18.0f;    // 绕 Y：手臂朝准星方向内偏
+    float roll  = -25.0f;   // 绕 Z：手臂外翻
+    float scale = 0.70f;    // 整体缩放（右臂原始约 0.25×0.75×0.25 方块，1.0=原大）
+    // ---- 挥手动画 ----
+    float swingDuration = 0.28f;  // 一次挥手时长（秒），越小越快
+    float swingPitchAmp = 55.0f;  // 挥手前后摆幅（度）
+    float swingRollAmp  = 20.0f;  // 挥手外翻摆幅（度）
+    float swingLift     = 0.10f;  // 挥手时手部上抬幅度（方块）
+};
 
 class PlayerModel {
 public:
@@ -42,6 +57,12 @@ public:
     // 使用外部纹理绘制（overrideTexture 替换 m_skinTexture，几何体复用）
     void drawPosed(Shader& shader, const glm::vec3& worldPos, const PlayerPose& pose, GLuint overrideTexture);
 
+    // 第一人称手部 按 handConfig 构建相机空间 model 矩阵，
+    void drawFirstPersonHand(Shader& shader, bool leftMousePressed, float deltaTime);
+
+    // 第一人称手部参数（可直接读写调整）
+    FirstPersonHandConfig handConfig;
+
     // 获取皮肤纹理 ID
     GLuint getTextureID() const { return m_skinTexture; }
 
@@ -61,6 +82,11 @@ private:
 
     PartMesh m_parts[PART_COUNT];
     GLuint m_skinTexture = 0;
+
+    // 第一人称手部挥动状态：m_handSwinging 期间 m_handSwingProgress 从 0 推进到 1；
+    // 到 1 时若左键仍按住则减 1 循环，否则结束。点击一次 => 完整挥一下，长按 => 持续挥。
+    bool  m_handSwinging = false;
+    float m_handSwingProgress = 0.0f;
 
     // 顶点结构（PlayerModel 专用，避免与全局 Vertex 冲突）
     struct PlayerVertex {

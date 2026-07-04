@@ -1,6 +1,8 @@
 ﻿#include "PlayerModel.h"
 #include "../stb_image.h"
 #include <iostream>
+#include <cmath>
+#include <glm/gtc/constants.hpp>
 
 // Minecraft 皮肤纹理尺寸
 static constexpr float TEX_W = 64.0f;
@@ -443,6 +445,55 @@ void PlayerModel::drawPosed(Shader& shader, const glm::vec3& worldPos, const Pla
         glBindVertexArray(m_parts[i].VAO);
         glDrawElements(GL_TRIANGLES, m_parts[i].indexCount, GL_UNSIGNED_INT, 0);
     }
+    glBindVertexArray(0);
+}
+
+void PlayerModel::drawFirstPersonHand(Shader& shader, bool leftMousePressed, float deltaTime) {
+    const PartMesh& arm = m_parts[RIGHT_ARM];
+    if (arm.VAO == 0) return;
+    const FirstPersonHandConfig& c = handConfig;
+
+    // 挥手状态推进：左键按下即开始；到达 1 时若仍按住则无缝循环，否则结束
+    if (leftMousePressed && !m_handSwinging) {
+        m_handSwinging = true;
+        m_handSwingProgress = 0.0f;
+    }
+    float swingPitch = 0.0f, swingRoll = 0.0f, swingLift = 0.0f;
+    if (m_handSwinging) {
+        m_handSwingProgress += deltaTime / c.swingDuration;
+        if (m_handSwingProgress >= 1.0f) {
+            if (leftMousePressed) {
+                m_handSwingProgress -= 1.0f;   // 长按 => 循环
+            } else {
+                m_handSwinging = false;
+                m_handSwingProgress = 0.0f;
+            }
+        }
+        if (m_handSwinging) {
+            float p = m_handSwingProgress;                             // 0..1
+            float bump  = std::sin(p * glm::pi<float>());              // 0..1..0 对称
+            float front = std::sin(std::sqrt(p) * glm::pi<float>());   // 前重（起手更快）
+            swingPitch = -bump  * glm::radians(c.swingPitchAmp);
+            swingRoll  =  front * glm::radians(c.swingRollAmp);
+            swingLift  =  bump  * c.swingLift;
+        }
+    }
+
+    // 相机空间 model 矩阵（旋转绕肩部 y=0 展开，天然像手臂挥动）
+    glm::mat4 m(1.0f);
+    m = glm::translate(m, c.offset + glm::vec3(0.0f, swingLift, 0.0f));
+    m = glm::rotate(m, glm::radians(c.roll) + swingRoll,   glm::vec3(0, 0, 1));
+    m = glm::rotate(m, glm::radians(c.yaw),                glm::vec3(0, 1, 0));
+    m = glm::rotate(m, glm::radians(c.pitch) + swingPitch, glm::vec3(1, 0, 0));
+    m = glm::scale(m, glm::vec3(c.scale));
+
+    // 绑定玩家皮肤纹理（右臂 UV 已烘进网格）+ 绘制
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_skinTexture);
+    shader.setInt("texture_diffuse1", 0);
+    shader.setMat4("model", m);
+    glBindVertexArray(arm.VAO);
+    glDrawElements(GL_TRIANGLES, arm.indexCount, GL_UNSIGNED_INT, 0);
     glBindVertexArray(0);
 }
 

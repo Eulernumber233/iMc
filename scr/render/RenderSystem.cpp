@@ -1164,6 +1164,9 @@ void RenderSystem::render(const ChunkManager& chunkManager,
             GL_COLOR_BUFFER_BIT, GL_LINEAR);
     }
 
+    // 8.5 第一人称手部：TAA/合成之后画到默认帧缓冲（避免时域拖影），UI 之前画（被准星/物品栏覆盖）
+    renderFirstPersonHand(player, deltaTime);
+
     // 9. UI 在 TAA 之后、直接画到默认帧缓冲——绝不让准星/物品栏被时域累积模糊或拖影
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, m_screenWidth, m_screenHeight);
@@ -1706,6 +1709,41 @@ void RenderSystem::renderModel(const std::shared_ptr<Camera> camera,
 
     // 使用动画姿态绘制
     model->drawPosed(m_modeShader, player->getModelFootPosition(), player->getPose());
+}
+
+void RenderSystem::renderFirstPersonHand(Player* player, float deltaTime)
+{
+    if (!player) return;
+    // 第三人称下不画第一人称手（此时画的是完整玩家模型）
+    if (player->isThirdPerson()) return;
+    PlayerModel* model = player->getModel();
+    if (!model) return;
+
+    // 手部专用透视 + 单位 view（相机空间：+X 右、+Y 上、-Z 前）。
+    // FOV 与世界视野解耦，改世界 FOV 不影响手的观感；近裁 0.01 保证不被裁掉。
+    const float kHandFovDeg = 70.0f;
+    float aspect = (m_screenHeight > 0) ? (float)m_screenWidth / (float)m_screenHeight : 1.0f;
+    glm::mat4 handProj = glm::perspective(glm::radians(kHandFovDeg), aspect, 0.01f, 10.0f);
+    glm::mat4 handView = glm::mat4(1.0f);
+
+    // 画到默认帧缓冲（TAA 之后）。清一次深度让手永远在最前，同时自身面正确遮挡。
+    // 生产者自保：显式开深度测试/写、设回 BACK 面剔除，不假设上游 GL 状态。
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, m_screenWidth, m_screenHeight);
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+
+    m_modeShader.use();
+    m_modeShader.setMat4("projection", handProj);
+    m_modeShader.setMat4("view", handView);
+    m_modeShader.setVec3("viewPos", glm::vec3(0.0f));
+    m_modeShader.setVec3("light.direction", lightDir);
+
+    // 摆放/挥手/model 矩阵均由模型内部按 handConfig 完成（点击一次、长按循环）
+    model->drawFirstPersonHand(m_modeShader, player->isLeftMousePressed(), deltaTime);
 }
 
 void RenderSystem::renderRemotePlayers(NetManager* netManager,
