@@ -80,6 +80,7 @@ void RuntimeConfig::loadFrom(const std::string& path) {
     if (root.isMember("profile_detailed")) profileDetailed = root["profile_detailed"].asBool();
     if (root.isMember("verbose_texture_loading")) verboseTextureLoading = root["verbose_texture_loading"].asBool();
     if (root.isMember("verbose_shader_loading")) verboseShaderLoading = root["verbose_shader_loading"].asBool();
+    if (root.isMember("force_recompile_shaders")) forceRecompileShaders = root["force_recompile_shaders"].asBool();
     if (root.isMember("debug_mode")) debugMode = root["debug_mode"].asBool();
     if (root.isMember("auto_save_interval_sec")) autoSaveIntervalSec = root["auto_save_interval_sec"].asInt();
     if (root.isMember("retain_margin_chunks")) retainMarginChunks = root["retain_margin_chunks"].asInt();

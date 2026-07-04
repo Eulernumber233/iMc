@@ -107,6 +107,11 @@
     "verbose_shader_loading": false,
     //   输出着色器编译日志（编译成功/失败消息，可关闭以减少干扰）
 
+    "force_recompile_shaders": false,
+    //   强制重新编译着色器：true 则忽略并删除磁盘缓存(cache/shaders/*.bin)，从源码重编后
+    //   重写缓存。改了着色器源码后置 true 跑一次即可（缓存键只哈希文件名、不哈希内容）。
+    //   命令行 --rebuild-shaders / --no-rebuild-shaders 优先级高于此字段。
+
     "debug_mode": true
     //   调试模式：true 时物品注册表只加载标记 load_in_debug 的物品图标，
     //   避免每次启动加载 assert/minecraft/textures/item 下全量 600+ 张图标。

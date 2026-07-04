@@ -369,3 +369,6 @@ FodyWeavers.xsd
 saves/
 
 docs/
+
+# 着色器 program binary 缓存
+cache/

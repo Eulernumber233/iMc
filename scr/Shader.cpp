@@ -1,10 +1,33 @@
 ﻿#include "Shader.h"
 #include "RuntimeConfig.h"
+#include <filesystem>
+#include <cstdint>
+#include <cstdio>
+
+// 命令行覆盖，默认 -1（未设置，由 runtime_config.json 决定）
+int Shader::s_forceRecompileOverride = -1;
 
 Shader::Shader(const std::initializer_list<
     std::pair<GLenum, const char*>>& shaders)
 {
-   std::vector<GLuint> shaderObjects;
+    // 缓存文件名由各着色器路径拼接哈希得到
+    std::string cachePath = cachePathFor(shaders);
+
+    // 是否强制重编：命令行显式设置优先，否则读配置
+    bool forceRecompile = (s_forceRecompileOverride >= 0)
+        ? (s_forceRecompileOverride != 0)
+        : RuntimeConfig::get().forceRecompileShaders;
+
+    if (forceRecompile) {
+        // 强制重编：删掉旧缓存，直接走源码编译分支
+        std::error_code ec;
+        std::filesystem::remove(cachePath, ec);
+    } else if (loadProgramBinary(cachePath)) {
+        // 命中磁盘缓存且校验通过，programID 已就绪，跳过编译链接
+        return;
+    }
+    // 未命中 / 强制重编 / 加载失败：从源码编译链接
+    std::vector<GLuint> shaderObjects;
     for (const auto& pair : shaders) {
         GLenum type = pair.first;
         const char* path = pair.second;
@@ -20,6 +43,11 @@ Shader::Shader(const std::initializer_list<
         }
     }
     programID = createProgram(shaderObjects);
+
+    // 编译链接成功则写回磁盘缓存，供下次直接加载
+    if (programID != 0) {
+        saveProgramBinary(cachePath);
+    }
 }
 Shader::~Shader()
 {
@@ -94,6 +122,8 @@ GLuint Shader::createProgram(std::vector<GLuint> shaders) {
     for (auto shader : shaders) {
         glAttachShader(programID, shader);
     }
+    // 提示驱动保留可取回的二进制，否则部分驱动 glGetProgramBinary 会失败/返回 0 长度
+    glProgramParameteri(programID, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
     glLinkProgram(programID);
     GLint success;
     glGetProgramiv(programID, GL_LINK_STATUS, &success);
@@ -118,6 +148,121 @@ GLuint Shader::createProgram(std::vector<GLuint> shaders) {
 
 
 
+
+// ============================================================================
+// Program Binary 磁盘缓存
+// ============================================================================
+
+// 当前驱动/GPU 签名：program binary 是驱动+GPU 专属的，换驱动/换卡后旧缓存不可用。
+// 把签名写进缓存文件头，加载时比对，不一致即视为失效并回退源码编译。
+static std::string driverSignature() {
+    auto q = [](GLenum e) -> std::string {
+        const GLubyte* p = glGetString(e);
+        return p ? std::string(reinterpret_cast<const char*>(p)) : std::string();
+    };
+    return q(GL_VENDOR) + "|" + q(GL_RENDERER) + "|" + q(GL_VERSION);
+}
+
+// 缓存文件名 = 各着色器路径拼接后的 FNV-1a 64 位哈希。
+// 注意：只哈希“文件名”，不哈希文件内容 —— 改了着色器源码但不改名，缓存键不变，
+// 需用 --rebuild-shaders 强制重编（见类注释）。
+std::string Shader::cachePathFor(const std::initializer_list<
+    std::pair<GLenum, const char*>>& shaders) const
+{
+    uint64_t h = 1469598103934665603ull;  // FNV offset basis
+    for (const auto& p : shaders) {
+        for (const char* s = p.second; s && *s; ++s) {
+            h ^= static_cast<unsigned char>(*s);
+            h *= 1099511628211ull;         // FNV prime
+        }
+        h ^= static_cast<unsigned char>('|'); // 分隔符，避免不同拼接产生同哈希
+        h *= 1099511628211ull;
+    }
+    char name[24];
+    std::snprintf(name, sizeof(name), "%016llx", static_cast<unsigned long long>(h));
+    return std::string("cache/shaders/") + name + ".bin";
+}
+
+// 缓存文件格式：magic(4) | sigLen(4) | sig | format(4) | blobLen(4) | blob
+static const uint32_t kShaderCacheMagic = 0x31435349u; // "ISC1"
+
+bool Shader::loadProgramBinary(const std::string& path)
+{
+    // 驱动是否支持 program binary
+    GLint numFormats = 0;
+    glGetIntegerv(GL_NUM_PROGRAM_BINARY_FORMATS, &numFormats);
+    if (numFormats == 0) return false;
+
+    std::ifstream f(path, std::ios::binary);
+    if (!f.good()) return false;
+
+    uint32_t magic = 0, sigLen = 0, format = 0, blobLen = 0;
+    f.read(reinterpret_cast<char*>(&magic), 4);
+    if (!f.good() || magic != kShaderCacheMagic) return false;
+
+    f.read(reinterpret_cast<char*>(&sigLen), 4);
+    if (!f.good() || sigLen > 4096) return false;
+    std::string sig(sigLen, '\0');
+    f.read(sig.data(), sigLen);
+    if (!f.good() || sig != driverSignature()) return false;  // 驱动/GPU 变更 → 失效
+
+    f.read(reinterpret_cast<char*>(&format), 4);
+    f.read(reinterpret_cast<char*>(&blobLen), 4);
+    if (!f.good() || blobLen == 0) return false;
+
+    std::vector<char> blob(blobLen);
+    f.read(blob.data(), blobLen);
+    if (!f.good()) return false;
+
+    GLuint prog = glCreateProgram();
+    glProgramBinary(prog, static_cast<GLenum>(format), blob.data(),
+                    static_cast<GLsizei>(blobLen));
+    GLint ok = GL_FALSE;
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        // 二进制被驱动拒绝（版本/GPU 微差异）→ 回退源码编译
+        glDeleteProgram(prog);
+        return false;
+    }
+    programID = prog;
+    if (RuntimeConfig::get().verboseShaderLoading)
+        std::cout << "Shader loaded from cache: " << path << std::endl;
+    return true;
+}
+
+void Shader::saveProgramBinary(const std::string& path) const
+{
+    GLint numFormats = 0;
+    glGetIntegerv(GL_NUM_PROGRAM_BINARY_FORMATS, &numFormats);
+    if (numFormats == 0) return;  // 驱动不支持则不缓存
+
+    GLint length = 0;
+    glGetProgramiv(programID, GL_PROGRAM_BINARY_LENGTH, &length);
+    if (length <= 0) return;
+
+    std::vector<char> blob(length);
+    GLenum format = 0;
+    GLsizei written = 0;
+    glGetProgramBinary(programID, length, &written, &format, blob.data());
+    if (written <= 0) return;
+
+    std::error_code ec;
+    std::filesystem::create_directories("cache/shaders", ec);
+
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (!f.good()) return;
+
+    std::string sig = driverSignature();
+    uint32_t sigLen = static_cast<uint32_t>(sig.size());
+    uint32_t fmt = static_cast<uint32_t>(format);
+    uint32_t blen = static_cast<uint32_t>(written);
+    f.write(reinterpret_cast<const char*>(&kShaderCacheMagic), 4);
+    f.write(reinterpret_cast<const char*>(&sigLen), 4);
+    f.write(sig.data(), sigLen);
+    f.write(reinterpret_cast<const char*>(&fmt), 4);
+    f.write(reinterpret_cast<const char*>(&blen), 4);
+    f.write(blob.data(), written);
+}
 
 void Shader::setBool(const std::string& name, bool value) const
 {

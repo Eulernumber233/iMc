@@ -1,3 +1,7 @@
+## 语言
+
+代码注释与提交信息使用简体中文。请遵循此约定。
+
 # CLAUDE.md
 
 本文件为 Claude Code (claude.ai/code) 在本仓库工作时提供指引。
@@ -272,6 +276,4 @@ OpenGL 状态是全局的、跨 pass 持续的。**任何一个 pass / 渲染函
 - `scr/entt/` —— EnTT ECS 库（header-only，粒子系统用）
 - `scr/stb_image.h` / `scr/std_image.cpp` —— stb_image 纹理加载
 
-## 语言
 
-代码注释与提交信息使用简体中文。请遵循此约定。

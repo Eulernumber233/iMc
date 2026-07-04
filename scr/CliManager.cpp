@@ -2,6 +2,7 @@
 #include "save/ChunkSaveManager.h"
 #include "Data.h"
 #include "RuntimeConfig.h"
+#include "Shader.h"
 #include "TextureMgr.h"
 #include "item/ItemRegistry.h"
 #include <iostream>
@@ -79,6 +80,12 @@ void CliManager::parseCmdline(int argc, char* argv[]) {
                 m_cmdline.winPosX = std::atoi(argv[++i]);
                 m_cmdline.winPosY = std::atoi(argv[++i]);
             }
+        } else if (arg == "--rebuild-shaders") {
+            // 强制重编着色器：忽略并删除磁盘缓存，从源码重编后重写缓存（覆盖配置文件）
+            Shader::setForceRecompile(true);
+        } else if (arg == "--no-rebuild-shaders") {
+            // 强制走磁盘缓存查找（覆盖配置文件里的 force_recompile_shaders=true）
+            Shader::setForceRecompile(false);
         }
     }
 }

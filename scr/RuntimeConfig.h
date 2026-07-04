@@ -25,6 +25,11 @@ public:
     bool verboseTextureLoading = false;   // 输出纹理加载详情日志
     bool verboseShaderLoading = false;    // 输出着色器编译详情日志
 
+    // 强制重新编译着色器：true 则忽略并删除磁盘缓存(cache/shaders/*.bin)，从源码重编后重写缓存。
+    // 改了着色器源码后置 true 跑一次即可（缓存键只哈希文件名、不哈希内容）。
+    // 注意：命令行 --rebuild-shaders / --no-rebuild-shaders 优先级高于此字段。
+    bool forceRecompileShaders = false;
+
     // 调试模式：为 true 时物品注册表只加载标记了 load_in_debug 的物品图标，
     // 避免每次启动都加载 assert/minecraft/textures/item 下的全量图标（600+ 张）。
     // 正式发布时置 false 加载全量资源。
