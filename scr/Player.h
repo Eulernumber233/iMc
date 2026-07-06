@@ -60,6 +60,10 @@ public:
     // 是否应渲染自身模型（第一人称下一般不渲染）
     bool shouldRenderOwnModel() const { return m_thirdPerson; }
 
+    // 走路镜头抖动的当前最终幅度 / 相位（供 RenderSystem 让第一人称手持物同步抖动）
+    float getViewBobAmp() const { return m_bobAmpFinal; }
+    float getViewBobPhase() const { return m_bobPhase; }
+
     // 左键是否处于按下状态（供第一人称手部挥动：点击一次、长按循环）
     bool isLeftMousePressed() const { return m_leftMousePressed; }
 
@@ -210,6 +214,14 @@ private:
     bool m_thirdPerson = false;
     float m_thirdPersonDistance = 4.0f; // 第三人称相机距离玩家的距离（方块）
 
+    // 走路镜头抖动（view bobbing）：仅本地第一人称，只叠加到相机、不改 m_position，
+    // 故网络对端看不到。m_bobPhase 按走过距离推进（步频同步），m_bobAmount 平滑强度，
+    // m_bobAmpFinal 是叠加了 scale/奔跑倍率后的最终幅度（供第一人称手持物同步抖动）。
+    glm::vec3 m_viewBobOffset = glm::vec3(0.0f);
+    float m_bobPhase   = 0.0f;
+    float m_bobAmount  = 0.0f;
+    float m_bobAmpFinal = 0.0f;
+
     // 玩家物理属性
     glm::vec3 m_position;      // 玩家碰撞箱中心（世界坐标）
     glm::vec3 m_velocity;      // 当前速度
@@ -316,6 +328,8 @@ private:
     void updateCameraPosition();
     void clampVelocity();
     void updateSpectator(float deltaTime);
+    // 走路镜头抖动：每帧推进相位/强度并刷新 m_viewBobOffset（内部会调 updateCameraPosition）
+    void updateViewBob(float deltaTime);
 
     // 碰撞检测 - 分轴移动+碰撞解算
     void getAllCollisions(ChunkManager& chunkManager, std::vector<CollisionResult>& collisions) const;

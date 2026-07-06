@@ -182,6 +182,7 @@
     <ClInclude Include="scr\Camera.h" />
     <ClInclude Include="scr\chunk\BlockBox.h" />
     <ClInclude Include="scr\enet\enet.h" />
+    <ClInclude Include="scr\item\HeldDisplayRegistry.h" />
     <ClInclude Include="scr\RuntimeConfig.h" />
     <ClInclude Include="scr\Profiler.h" />
     <ClInclude Include="scr\chunk\BlockType.h" />
@@ -246,6 +247,7 @@
   <ItemGroup>
     <None Include=".gitattributes" />
     <None Include=".gitignore" />
+    <None Include="assert\held_display.json" />
     <None Include="assert\item_registry.json" />
     <None Include="assert\runtime_config.json" />
     <None Include="PropertySheet.props" />

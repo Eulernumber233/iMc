@@ -62,6 +62,10 @@ struct PlayerAnimConfig {
     float bodyTrackRateIdle = 3.0f;     // 静止时缓慢跟随（允许头先转）
     float movingSpeedThreshold = 0.1f;  // 判定"移动"的速度阈值
     float headMaxYaw = glm::radians(75.0f); // 头相对身体最大扭转角
+    // 头部俯仰映射：把相机 pitch 的 ±90° 线性映射到头部旋转的 ±headMaxPitchDeg。
+    // 相机能看到 ±90°，但头骨直接转到 90° 会很怪（下巴贴胸 / 后仰过头），
+    // 这里压缩到 70°，让抬头/低头看起来自然。本地与联机远端共用（都走 update()）。
+    float headMaxPitchDeg = 70.0f;
 
     // ---- 下蹲姿态 ----
     float crouchRootDip = 0.15f;         // rootOffset.y 下沉（方块单位）

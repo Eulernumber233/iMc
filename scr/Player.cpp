@@ -7,9 +7,12 @@
 #include "entity/DroppedItemManager.h"
 #include "collision/PhysicsConstants.h"
 #include "collision/AABB.h"
+#include "RuntimeConfig.h"
 #include <GLFW/glfw3.h>
+#include <glm/gtc/constants.hpp>
 #include <iostream>
 #include <algorithm>
+#include <cmath>
 
 // ==================== 构造函数和初始化 ====================
 
@@ -257,11 +260,10 @@ void Player::moveAxis(int axis, float displacement, ChunkManager& chunkManager) 
                             m_velocity.y = 0.0f;
                         }
                     } else {
+                        // 撞墙/磕碰：只清零该轴速度（速度自然骤降），但保持奔跑状态。
+                        // 只要不松开 W，m_isRunning 就一直为真，物理层会重新逐渐加速回
+                        // 奔跑最大速度（退出奔跑仅由「松开 W / 下蹲 / 按 S 后退」触发）。
                         m_velocity[axis] = 0.0f;
-                        // MC风格：撞墙停止跑步
-                        if (m_isRunning) {
-                            m_isRunning = false;
-                        }
                     }
                 }
                 next_block:;
@@ -277,11 +279,61 @@ void Player::updateCameraPosition() {
     glm::vec3 eyePos = m_position + cameraOffset;
     if (m_thirdPerson) {
         // 第三人称：相机沿当前 Front 反方向退后 m_thirdPersonDistance
-        // 不做碰撞检测，允许穿墙（简单实现）
+        // 不做碰撞检测，允许穿墙（简单实现）。第三人称不叠加走路抖动（同原版 MC）
         m_camera->Position = eyePos - m_camera->Front * m_thirdPersonDistance;
     } else {
-        m_camera->Position = eyePos;
+        // 第一人称：叠加走路镜头抖动（仅本地视觉，不影响 m_position / 网络同步）
+        m_camera->Position = eyePos + m_viewBobOffset;
     }
+}
+
+// ==================== 走路镜头抖动（view bobbing）====================
+// 仅本地第一人称：模拟走路时头部前后左右上下的轻微晃动。只写 m_viewBobOffset
+// 叠加到相机，绝不改 m_position，故网络对端完全看不到。
+void Player::updateViewBob(float deltaTime) {
+    const RuntimeConfig& cfg = RuntimeConfig::get();
+
+    float horizSpeed = glm::length(glm::vec2(m_velocity.x, m_velocity.z));
+
+    // 目标强度：仅普通模式 + 着地 + 第一人称 + 开关开启，且确有水平移动时才抖
+    float target = 0.0f;
+    if (cfg.viewBobEnabled && !m_thirdPerson && m_moveMode == MoveMode::Normal
+        && m_onGround && horizSpeed > 0.15f) {
+        target = std::min(1.0f, horizSpeed / std::max(m_walkSpeed, 0.001f));
+    }
+    // 平滑强度，避免起步/停步/腾空时突变（约 0.08s 收敛）
+    float k = std::min(1.0f, deltaTime * 12.0f);
+    m_bobAmount += (target - m_bobAmount) * k;
+
+    // 相位按走过的距离推进（步频与移动速度同步）
+    constexpr float BOB_FREQ = 1.4f;   // 每米推进的相位（弧度/米）
+    m_bobPhase += horizSpeed * deltaTime * BOB_FREQ;
+    if (m_bobPhase > glm::two_pi<float>()) m_bobPhase -= glm::two_pi<float>();
+
+    // 奔跑增强 + 总比例
+    float runMul = m_isRunning ? cfg.viewBobRunScale : 1.0f;
+    float amp = m_bobAmount * cfg.viewBobScale * runMul;
+    m_bobAmpFinal = amp;   // 暴露给第一人称手持物，使其与镜头同步抖动
+
+    // 基础振幅（米）：垂直上下 / 左右横摆 / 前后轻微
+    constexpr float AMP_VERT = 0.055f;
+    constexpr float AMP_LAT  = 0.050f;
+    constexpr float AMP_FWD  = 0.022f;
+
+    // 垂直每步一次（双脚 → 2× 频率），左右每个步幅一次（1× 频率），前后随垂直同频
+    float vert = std::sin(m_bobPhase * 2.0f) * AMP_VERT * amp;
+    float lat  = std::sin(m_bobPhase)        * AMP_LAT  * amp;
+    float fwd  = std::cos(m_bobPhase * 2.0f) * AMP_FWD  * amp;
+
+    // 前向取水平分量（去掉俯仰），保证前后抖动始终在水平面上
+    glm::vec3 flatFront(m_camera->Front.x, 0.0f, m_camera->Front.z);
+    if (glm::length(flatFront) > 1e-4f) flatFront = glm::normalize(flatFront);
+
+    m_viewBobOffset = m_camera->WorldUp * vert
+                    + m_camera->Right   * lat
+                    + flatFront         * fwd;
+
+    updateCameraPosition();
 }
 
 glm::vec3 Player::getModelFootPosition() const {
@@ -426,12 +478,26 @@ void Player::updatePhysics(float deltaTime, ChunkManager& chunkManager) {
     clampVelocity();
 
     // ---- 5. 分轴移动 + 碰撞解算 ----
+    // 记录上一帧是否着地（本帧重置前）：用于"贴地探测"稳定 onGround
+    bool wasGrounded = m_onGround;
     // 重置地面状态，碰撞检测会重新设置
     m_onGround = false;
 
     float dx = m_velocity.x * deltaTime;
     float dy = m_velocity.y * deltaTime;
     float dz = m_velocity.z * deltaTime;
+
+    // 贴地探测：修复静止/行走时 onGround 在高帧率下的抖动。
+    // 落地碰撞会把玩家推到地面上方 PHYSICS_BIAS(0.001m) 处；而每帧重力下坠量约
+    // g·dt²，在高帧率下（>~140FPS，vsync 关闭时几乎总是如此）小于这个 0.001m 间隙，
+    // 于是玩家悬在间隙上方永远探测不到地面 → m_onGround 在 true/false 间反复抖动，
+    // 带动落地动画与镜头/模型抖动。这里在"上一帧着地且未上升"时，强制至少下探
+    // GROUND_STICK 距离，保证每帧都能与地面碰撞、稳定判定着地。悬崖边最多瞬时下坠
+    // GROUND_STICK（几厘米），可忽略。
+    if (wasGrounded && m_velocity.y <= 0.0f) {
+        constexpr float GROUND_STICK = 0.02f;  // 固定下探距离（米），须 > 落地 BIAS 间隙
+        dy = std::min(dy, -GROUND_STICK);
+    }
 
     // Y轴优先（重力/着地），然后水平轴
     moveAxis(1, dy, chunkManager);
@@ -514,6 +580,9 @@ void Player::update(float deltaTime, ChunkManager& chunkManager, RenderSystem& r
     animIn.cameraYaw = m_camera->Yaw;
     animIn.cameraPitch = m_camera->Pitch;
     m_animator.update(deltaTime, animIn);
+
+    // ---- 走路镜头抖动（仅本地第一人称，最后叠加到相机）----
+    updateViewBob(deltaTime);
 }
 
 // ==================== 输入处理 ====================

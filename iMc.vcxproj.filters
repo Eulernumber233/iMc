@@ -362,6 +362,9 @@
     <ClInclude Include="scr\chunk\BlockBox.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="scr\item\HeldDisplayRegistry.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="shader\deferred_lighting.vert" />
@@ -398,6 +401,10 @@
     <None Include="shader\shadow_visibility.frag" />
     <None Include="shader\shadow_accumulate.frag" />
     <None Include="shader\ao_accumulate.frag" />
+    <None Include="assert\item_registry.json" />
+    <None Include="shader\item.frag" />
+    <None Include="shader\item.vert" />
+    <None Include="assert\held_display.json" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="assert\textures\block\birch_log.png">

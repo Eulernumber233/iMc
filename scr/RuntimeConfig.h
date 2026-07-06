@@ -84,6 +84,17 @@ public:
     // o/p 键运行时可调（可负=时间倒流），此处是初值。
     float timeScale = 0.2f;
 
+    // ---- 走路镜头抖动（view bobbing）----
+    // 仅本地第一人称生效（第三人称不加，同原版 MC）；只改相机、不改玩家实际位置，
+    // 故网络对端看不到。奔跑时更强。调 viewBobScale 即可整体加减，0 = 关闭。
+    bool  viewBobEnabled  = true;   // 总开关
+    float viewBobScale    = 1.0f;   // 幅度总比例（调试旋钮，0=无抖动）
+    float viewBobRunScale = 1.6f;   // 奔跑时的额外幅度倍率
+
+    // 启动时禁用输入法(IME)：解除游戏窗口与 IME 上下文的关联，避免进入游戏后
+    // 输入法切到拼音吞掉 WASD、需先按一次 Shift 才能移动。默认开启。
+    bool disableIme = true;
+
     // 温存/落盘半径余量：chunk 离开渲染半径后，在 renderRadius + retainMarginChunks 内
     // 仍保留在内存（不渲染、不卸载、不落盘），形成"温存区"吸收边界抖动；
     // 超出此半径才真正落盘 + 卸载。调大 = 更省磁盘 IO/地形重生成，但占更多内存。
@@ -92,4 +103,6 @@ public:
 private:
     RuntimeConfig() = default;
     void loadFrom(const std::string& path);
+    // 内部可变单例：get() 返回它的 const 引用；热重载回调用它就地重读 JSON。
+    static RuntimeConfig& mutableInstance();
 };

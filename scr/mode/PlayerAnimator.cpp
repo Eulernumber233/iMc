@@ -43,7 +43,8 @@ void PlayerAnimator::update(float deltaTime, const Input& in) {
     // ---- 2. 头部相对身体偏转 ----
     float headRelYaw = angleDiff(targetBodyYaw, m_bodyYawRad);
     m_pose.headYaw = std::clamp(headRelYaw, -c.headMaxYaw, c.headMaxYaw);
-    m_pose.headPitch = -glm::radians(in.cameraPitch);
+    // 相机 pitch(±90°) 线性映射到头部旋转(±headMaxPitchDeg)，避免抬头/低头时头骨转过头
+    m_pose.headPitch = -glm::radians(in.cameraPitch * (c.headMaxPitchDeg / 90.0f));
 
     // ---- 3. 步态频率：由绝对水平速度驱动 ----
     float horizSpeed = glm::length(in.horizontalVelocity);

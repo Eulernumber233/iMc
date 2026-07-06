@@ -12,6 +12,10 @@
 
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
+#define GLFW_EXPOSE_NATIVE_WIN32
+#include <GLFW/glfw3native.h>
+#include <imm.h>
+#pragma comment(lib, "imm32.lib")
 #include "stb_image.h"
 
 namespace {
@@ -203,6 +207,17 @@ GLFWwindow* CliManager::createWindow() {
     if (m_winPosX >= 0 && m_winPosY >= 0) {
         glfwSetWindowPos(window, m_winPosX, m_winPosY);
     }
+
+    // 禁用输入法(IME)：进入游戏后中文输入法常自动切到拼音，吞掉 WASD，
+    // 必须先按一次 Shift 切回英文才能操控角色。这里解除游戏窗口与 IME 上下文的
+    // 关联，让键盘输入直达游戏，免去每次手动切换。
+    if (RuntimeConfig::get().disableIme) {
+        HWND hwnd = glfwGetWin32Window(window);
+        if (hwnd) {
+            ImmAssociateContext(hwnd, NULL);
+        }
+    }
+
     return window;
 }
 

@@ -1,6 +1,6 @@
 ## 语言
 
-代码注释与提交信息使用简体中文。请遵循此约定。
+我正在学习中文，请使用中文和我交流，我在编写项目的同时可以学习到中文的交流技巧。代码注释与提交信息使用简体中文。请遵循此约定。
 
 # CLAUDE.md
 
@@ -62,6 +62,8 @@ iMc 是一个用现代 OpenGL（4.6 core profile）和 C++17 编写的、受 Min
   - **退出**：保存玩家状态 + `chunkManager->saveAllDirtyChunks()` + 关存档。
 
 - **Player**（`scr/Player.h/.cpp`）—— 整合相机、物理、移动（行走/奔跑/下蹲/观察者模式）、物品栏（hotbar）、方块交互（raycast 放置/破坏）、AABB 碰撞。三段速移动 + 双击冲刺。`getSaveData()` / `loadSaveData(PlayerSaveData)` 做存档；`getPosition()` / `setPosition()` 供网络同步（传送）。第三人称由 `toggleThirdPerson()`（F3）切换。
+  - **走路镜头抖动**（`updateViewBob`）：仅本地第一人称叠加到相机（`m_viewBobOffset`，不改 `m_position`，故网络对端看不到；第三人称不加，同原版 MC）。相位按水平位移推进（步频同步），垂直 2× 频率、左右 1× 频率、前后随垂直同频；奔跑更强。参数 `view_bob_enabled/scale/run_scale`。
+  - **贴地探测**（`updatePhysics`）：落地碰撞把玩家推到地面上方 `PHYSICS_BIAS`(0.001m)，而高帧率下每帧重力下坠量 g·dt² 小于此间隙 → 玩家悬空、`m_onGround` 反复 true/false 抖动（带动落地动画/镜头/模型抖动）。修复：上一帧着地且未上升时强制至少下探 `GROUND_STICK`(0.02m)，保证每帧稳定碰到地面。
 
 - **ChunkManager**（`scr/chunk/ChunkManager.h/.cpp`）—— 区块生命周期编排。**两阶段任务管线**（注意：与旧的 "build + 异步 stitch" 设计不同，已重构为下列两阶段）：
   - **Task 1（`JOB_BUILD`）**：worker 上跑 `TerrainGenerator::fillChunkBuffer`（或从磁盘 / 网络拿数据）填一个临时整 chunk buffer，再切片成 **16 个 section `BlockBox`**（`ChunkBoxes`），**不含任何 mesh**。结果进 `m_pendingBlockData`，主线程消化后存入 `m_blockReady`（`BlockReadyEntry`，持有 `ChunkBoxes` + 4-bit `neighborBlockReady` 标记哪些邻居方向已就绪）。
@@ -219,6 +221,10 @@ Minecraft Anvil 风格的区块持久化。目录结构：`saves/<worldName>/wor
 | `profile_detailed` | false | 开启 cullPass/可见性的细粒度计时+计数（`rdc.cull.*` / `vis.*`）；关闭时这些热路径插桩完全绕过（零开销） |
 | `verbose_texture_loading` | false | 输出纹理加载详情 |
 | `verbose_shader_loading` | false | 输出着色器编译详情 |
+| `view_bob_enabled` | true | 走路镜头抖动总开关（仅本地第一人称，第三人称不加，同原版 MC；只改相机不改玩家位置，网络对端看不到） |
+| `view_bob_scale` | 1.0 | 镜头抖动幅度总比例（调试旋钮），0=关 |
+| `view_bob_run_scale` | 1.6 | 奔跑时镜头抖动的额外幅度倍率 |
+| `disable_ime` | true | 启动时禁用输入法(IME)：解除窗口与 IME 关联，避免进游戏后输入法切拼音吞掉 WASD、要先按 Shift 才能移动 |
 
 ### 关键常量
 

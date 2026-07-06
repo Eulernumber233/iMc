@@ -1937,7 +1937,24 @@ void RenderSystem::renderFirstPersonHand(Player* player, float deltaTime)
     const float kHandFovDeg = 70.0f;
     float aspect = (m_screenHeight > 0) ? (float)m_screenWidth / (float)m_screenHeight : 1.0f;
     glm::mat4 handProj = glm::perspective(glm::radians(kHandFovDeg), aspect, 0.01f, 10.0f);
+
+    // 走路镜头抖动同步到手/物品：相机 bob 让世界晃，但手画在相机空间(view=单位阵)会
+    // 显得纹丝不动、很怪。这里在相机空间给手叠加一份配套的 bob（平移 + 轻微旋转），
+    // 与镜头 bob 同相位、同强度，看起来手随步伐自然摆动。空手与持物共用（都乘 handView）。
     glm::mat4 handView = glm::mat4(1.0f);
+    {
+        float amp = player->getViewBobAmp();
+        if (amp > 1e-4f) {
+            float p = player->getViewBobPhase();
+            float bx = std::sin(p) * 0.030f * amp;                 // 左右
+            float by = -std::abs(std::sin(p * 2.0f)) * 0.026f * amp; // 每步下沉
+            float rz = std::sin(p) * glm::radians(2.5f) * amp;      // 随左右轻微滚转
+            float rx = std::abs(std::sin(p * 2.0f)) * glm::radians(2.0f) * amp; // 随下沉轻微俯仰
+            handView = glm::translate(handView, glm::vec3(bx, by, 0.0f));
+            handView = glm::rotate(handView, rz, glm::vec3(0, 0, 1));
+            handView = glm::rotate(handView, rx, glm::vec3(1, 0, 0));
+        }
+    }
 
     // 画到默认帧缓冲（TAA 之后）。清一次深度让手永远在最前，同时自身面正确遮挡。
     // 生产者自保：显式开深度测试/写、设回 BACK 面剔除，不假设上游 GL 状态。

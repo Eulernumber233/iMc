@@ -1,4 +1,5 @@
 ﻿#include "RuntimeConfig.h"
+#include "HotReload.h"
 #include <json/json.h>
 #include <fstream>
 #include <sstream>
@@ -40,14 +41,26 @@ static std::string stripJsonComments(const std::string& src) {
     return out;
 }
 
-const RuntimeConfig& RuntimeConfig::get() {
+RuntimeConfig& RuntimeConfig::mutableInstance() {
     static RuntimeConfig cfg;
+    return cfg;
+}
+
+const RuntimeConfig& RuntimeConfig::get() {
     static bool loaded = false;
     if (!loaded) {
-        cfg.loadFrom("assert/runtime_config.json");
-        loaded = true;
+        loaded = true;   // 先置位，避免热重载回调里再进 get() 时重复注册
+        const char* path = "assert/runtime_config.json";
+        mutableInstance().loadFrom(path);
+        // 注册热重载：保存 runtime_config.json 后自动重读。注意——只有「每帧读取」
+        // 的字段（view_bob / 光照 / 阴影 / AO / 时间比例 等）会即时生效；render_radius /
+        // worker_threads / csm_shadow_size 这类只在启动/初始化时消费一次的字段，
+        // 热重载会更新内存值但要等下次进世界才生效。
+        HotReload::instance().watch(path, [path] {
+            mutableInstance().loadFrom(path);
+        });
     }
-    return cfg;
+    return mutableInstance();
 }
 
 void RuntimeConfig::loadFrom(const std::string& path) {
@@ -103,6 +116,10 @@ void RuntimeConfig::loadFrom(const std::string& path) {
     if (root.isMember("ambient_night")) ambientNight = (float)root["ambient_night"].asDouble();
     if (root.isMember("sun_strength")) sunStrength = (float)root["sun_strength"].asDouble();
     if (root.isMember("time_scale")) timeScale = (float)root["time_scale"].asDouble();
+    if (root.isMember("view_bob_enabled")) viewBobEnabled = root["view_bob_enabled"].asBool();
+    if (root.isMember("view_bob_scale")) viewBobScale = (float)root["view_bob_scale"].asDouble();
+    if (root.isMember("view_bob_run_scale")) viewBobRunScale = (float)root["view_bob_run_scale"].asDouble();
+    if (root.isMember("disable_ime")) disableIme = root["disable_ime"].asBool();
 
     std::cout << "[RuntimeConfig] loaded from " << path
               << " | render_radius=" << renderRadius

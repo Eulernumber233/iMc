@@ -77,7 +77,13 @@
       "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Debug /p:Platform=x64 /m /nologo /clp:ErrorsOnly /v:minimal)",
       "PowerShell(Get-Process *)",
       "PowerShell(Stop-Process *)",
-      "PowerShell(Get-CimInstance *)"
+      "PowerShell(Get-CimInstance *)",
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /t:Build /p:Configuration=Debug /p:Platform=x64 /m /v:minimal /nologo 2>&1 | Select-Object -Last 40)",
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /t:Build /p:Configuration=Debug /p:Platform=x64 /m /v:minimal /nologo 2>&1 | Select-String -Pattern \"error|错误|LNK[0-9]|无法|生成成功|Build succeeded|已成功生成\" | Select-Object -First 40; Write-Output \"EXITCODE=$LASTEXITCODE\")",
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /t:Build /p:Configuration=Debug /p:Platform=x64 /m /v:minimal /nologo 2>&1 | Select-String -Pattern \"error|错误|LNK[0-9]{4}|无法打开\" | Select-Object -First 30; Write-Output \"EXITCODE=$LASTEXITCODE\")",
+      "PowerShell($p = \"E:\\\\opengl\\\\iMc\\\\scr\\\\HotReload.h\"; $text = [System.IO.File]::ReadAllText\\($p\\); $text = $text -replace \"`r`n\",\"`n\" -replace \"`n\",\"`r`n\"; $enc = New-Object System.Text.UTF8Encoding\\($true\\); [System.IO.File]::WriteAllText\\($p, $text, $enc\\); Write-Output \"converted to CRLF + UTF-8 BOM\")",
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /t:Build /p:Configuration=Debug /p:Platform=x64 /v:minimal /nologo 2>&1 | Select-String -Pattern \"error|错误|LNK[0-9]{4}|无法打开\" | Select-Object -First 30; Write-Output \"EXITCODE=$LASTEXITCODE\")",
+      "PowerShell($p = \"E:\\\\opengl\\\\iMc\\\\scr\\\\HotReload.h\"; $text = [System.IO.File]::ReadAllText\\($p\\); $text = $text -replace \"`r`n\",\"`n\" -replace \"`n\",\"`r`n\"; $enc = New-Object System.Text.UTF8Encoding\\($true\\); [System.IO.File]::WriteAllText\\($p, $text, $enc\\); Write-Output \"converted\")"
     ],
     "additionalDirectories": [
       "e:\\opengl\\iMc\\scr"

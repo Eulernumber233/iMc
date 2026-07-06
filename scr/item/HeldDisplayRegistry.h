@@ -1,6 +1,7 @@
 ﻿#pragma once
 #include "ItemDefinition.h"
 #include "../mode/PlayerModel.h"   // FirstPersonHandConfig
+#include "../HotReload.h"
 #include <json/json.h>
 #include <fstream>
 #include <sstream>
@@ -51,11 +52,22 @@ public:
         return m_arm;
     }
 
+    // 供热重载：重新读 held_display.json。resolve() 返回的引用不跨帧持有
+    // （renderFirstPersonHand 每帧重新 resolve），且 poll 在帧首、渲染前执行，
+    // 故重建 m_profiles 不会造成渲染时悬挂引用。
+    void reload() { load(); }
+
 private:
     HeldDisplayRegistry() = default;
 
     void ensure() {
-        if (!m_loaded) { m_loaded = true; load(); }
+        if (!m_loaded) {
+            m_loaded = true;
+            load();
+            // 注册热重载：保存 held_display.json 后自动重读并即时生效
+            HotReload::instance().watch("assert/held_display.json",
+                [] { HeldDisplayRegistry::instance().reload(); });
+        }
     }
 
     // 内置预设（JSON 缺失/缺档时兜底），与旧硬编码一致。
@@ -116,6 +128,11 @@ private:
     }
 
     void load(const std::string& path = "assert/held_display.json") {
+        // 重置状态：热重载时清掉上一份，避免 JSON 里删掉的档案/覆盖残留在内存里
+        m_profiles.clear();
+        m_itemProfile.clear();
+        for (auto& s : m_defaultProfile) s.clear();
+        m_arm = FirstPersonHandConfig{};   // 手臂参数回默认，再由 parseArm 覆盖
         fillBuiltin();
 
         std::ifstream ifs(path);

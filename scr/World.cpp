@@ -7,6 +7,7 @@
 #include "mode/SkinManager.h"
 #include "save/ChunkSaveManager.h"
 #include "RuntimeConfig.h"
+#include "HotReload.h"
 #include "Profiler.h"
 #include "net/NetManager.h"
 #include "item/ItemRegistry.h"
@@ -312,6 +313,10 @@ int World::run() {
         if (deltaTime > 0.1f) {
             deltaTime = 0.1f; // 最大100ms
         }
+
+        // 热重载：帧首检查被监视的配置文件（held_display.json / runtime_config.json）
+        // 是否被改动，改了就自动重读（内部按 0.25s 节流）。这样调参不必重启。
+        HotReload::instance().poll();
 
         // o/p 长按调太阳速度（持续按住每帧轮询，越按越快）
         updateSunSpeedKeys(deltaTime);
