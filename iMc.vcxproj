@@ -177,9 +177,28 @@
     <ClCompile Include="scr\net\NetSerializeWorker.cpp" />
     <ClCompile Include="scr\net\NetTransport.cpp" />
     <ClCompile Include="scr\World.cpp" />
+    <ClCompile Include="scr\DebugUI.cpp" />
+    <ClCompile Include="scr\imgui\imgui.cpp" />
+    <ClCompile Include="scr\imgui\imgui_draw.cpp" />
+    <ClCompile Include="scr\imgui\imgui_tables.cpp" />
+    <ClCompile Include="scr\imgui\imgui_widgets.cpp" />
+    <ClCompile Include="scr\imgui\imgui_demo.cpp" />
+    <ClCompile Include="scr\imgui\imgui_impl_glfw.cpp" />
+    <ClCompile Include="scr\imgui\imgui_impl_opengl3.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="scr\Camera.h" />
+    <ClInclude Include="scr\DebugUI.h" />
+    <ClInclude Include="scr\HotReload.h" />
+    <ClInclude Include="scr\imgui\imconfig.h" />
+    <ClInclude Include="scr\imgui\imgui.h" />
+    <ClInclude Include="scr\imgui\imgui_internal.h" />
+    <ClInclude Include="scr\imgui\imstb_rectpack.h" />
+    <ClInclude Include="scr\imgui\imstb_textedit.h" />
+    <ClInclude Include="scr\imgui\imstb_truetype.h" />
+    <ClInclude Include="scr\imgui\imgui_impl_glfw.h" />
+    <ClInclude Include="scr\imgui\imgui_impl_opengl3.h" />
+    <ClInclude Include="scr\imgui\imgui_impl_opengl3_loader.h" />
     <ClInclude Include="scr\chunk\BlockBox.h" />
     <ClInclude Include="scr\enet\enet.h" />
     <ClInclude Include="scr\item\HeldDisplayRegistry.h" />

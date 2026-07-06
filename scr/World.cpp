@@ -8,6 +8,7 @@
 #include "save/ChunkSaveManager.h"
 #include "RuntimeConfig.h"
 #include "HotReload.h"
+#include "DebugUI.h"
 #include "Profiler.h"
 #include "net/NetManager.h"
 #include "item/ItemRegistry.h"
@@ -117,6 +118,11 @@ int World::run() {
         std::cerr << "Failed to initialize render system" << std::endl;
         return -1;
     }
+
+    // 初始化调试面板（ImGui）。此时 GL 上下文 current、GLFW 回调已在构造函数注册，
+    // ImGui 会安装链式回调接住并转发它们。
+    m_debugUI = std::make_unique<DebugUI>();
+    m_debugUI->init(m_window);
 
     // 设置光照参数
     renderSystem.setLightDirection(glm::normalize(glm::vec3(0.5f, 1.0f, 0.3f)));
@@ -458,6 +464,15 @@ int World::run() {
         renderSystem.render(*m_chunkManager, view, projection, camera, deltaTime, m_player.get(),
                             m_netManager.get(), m_droppedItems.get());
 
+        // 调试面板（F1）：场景渲染之后、上屏之前叠加绘制。隐藏时内部直接返回（近零开销）。
+        if (m_debugUI) {
+            ItemStack* held = m_player ? m_player->getSelectedStack() : nullptr;
+            const ItemDefinition* heldDef = (held && !held->empty()) ? held->def : nullptr;
+            int fbw = 0, fbh = 0;
+            glfwGetFramebufferSize(m_window, &fbw, &fbh);
+            m_debugUI->draw(heldDef, fbw, fbh);
+        }
+
         {
             PROFILE_SCOPE("swapBuffers");
             glfwSwapBuffers(m_window);
@@ -466,6 +481,12 @@ int World::run() {
 
         // 每秒打印一次 profiler（如 RuntimeConfig 启用）
         Profiler::frame();
+    }
+
+    // 关闭调试面板：必须在窗口 / GL 上下文销毁前（删除 ImGui 的 GL 对象）
+    if (m_debugUI) {
+        m_debugUI->shutdown();
+        m_debugUI.reset();
     }
 
     // 退出保存
@@ -550,6 +571,8 @@ void World::updateInventory(float deltaTime) {
 }
 
 void World::processMouse(double xpos, double ypos) {
+    // 调试面板可见：不转动视角（ImGui 通过链式回调仍收到鼠标位置用于操作面板）
+    if (m_debugUI && m_debugUI->isVisible()) return;
     if (m_inventoryOpen) {
         // 背包开：记录鼠标 UI 坐标（y 翻转），驱动光标携带图标跟随
         m_lastMouseUI = glm::vec2((float)xpos, (float)(SCR_HEIGHT - ypos));
@@ -565,6 +588,8 @@ void World::processMouse(double xpos, double ypos) {
 }
 
 void World::processMouseButton(int button, int action) {
+    // 调试面板可见：点击交给 ImGui（链式回调），不触发游戏破坏/放置
+    if (m_debugUI && m_debugUI->isVisible()) return;
     if (m_inventoryOpen) {
         if (m_player && button == GLFW_MOUSE_BUTTON_LEFT) {
             auto inv = m_player->getInventoryUI();
@@ -612,6 +637,19 @@ void World::processMouseButton(int button, int action) {
 }
 
 void World::processKey(int key, int action) {
+    // F1：开合调试面板。可见时释放光标操作面板；关闭时若背包也没开则重新锁定光标，
+    // 并重置鼠标视角首帧标记避免视角跳变。
+    if (key == GLFW_KEY_F1 && action == GLFW_PRESS) {
+        if (m_debugUI) {
+            m_debugUI->toggle(m_window, !m_inventoryOpen);
+            if (!m_debugUI->isVisible() && m_player) m_player->resetMouseLook();
+        }
+        return;
+    }
+    // 调试面板可见时，键盘不转发给游戏（ImGui 仍通过链式回调收到输入，可在面板里打字）。
+    // 仅放行 F1（上面已处理）。
+    if (m_debugUI && m_debugUI->isVisible()) return;
+
     // ESC：背包开着则先关背包，否则退出
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
         if (m_inventoryOpen) { toggleInventory(); return; }
@@ -959,6 +997,8 @@ void World::printTimeFlowSpeed() {
 }
 
 void World::processMouseScroll(double xoffset, double yoffset) {
+    // 调试面板可见：滚轮交给 ImGui，不切换 hotbar
+    if (m_debugUI && m_debugUI->isVisible()) return;
     if (m_player) {
         m_player->processMouseScroll(xoffset, yoffset);
     }

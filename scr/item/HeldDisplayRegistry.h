@@ -52,6 +52,30 @@ public:
         return m_arm;
     }
 
+    // ── 供调试面板（ImGui）实时改参数 ────────────────────────────
+    // 返回可变引用/指针，指向稳定存储；改了立即被 RenderSystem 读到、即时生效。
+    FirstPersonHandConfig& armMutable() {
+        ensure();
+        return m_arm;
+    }
+    // 与 resolve 同样的优先级解析，但返回可变指针（永不为空：兜底到内置预设）。
+    HeldItemDisplay* resolveMutable(const ItemDefinition& def) {
+        ensure();
+        const std::string* prof = nullptr;
+        auto it = m_itemProfile.find(def.id);
+        if (it != m_itemProfile.end()) {
+            prof = &it->second;
+        } else {
+            const std::string& d = m_defaultProfile[(int)def.modelType];
+            if (!d.empty()) prof = &d;
+        }
+        if (prof) {
+            auto pit = m_profiles.find(*prof);
+            if (pit != m_profiles.end()) return &pit->second;
+        }
+        return &m_builtin[(int)def.modelType];
+    }
+
     // 供热重载：重新读 held_display.json。resolve() 返回的引用不跨帧持有
     // （renderFirstPersonHand 每帧重新 resolve），且 poll 在帧首、渲染前执行，
     // 故重建 m_profiles 不会造成渲染时悬挂引用。

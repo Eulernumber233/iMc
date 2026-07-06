@@ -14,6 +14,7 @@
 
 class ChunkSaveManager;
 class NetManager;
+class DebugUI;
 
 enum class NetMode : uint8_t {
     None,   // 单机
@@ -75,6 +76,10 @@ private:
 
     // 渲染系统
     RenderSystem* m_renderSystem = nullptr;
+
+    // 调试面板（ImGui，F1 开合）。unique_ptr<不完整类型> 需在定义了 ~World 的 .cpp 里
+    // 包含 DebugUI.h（World.cpp 已包含）。
+    std::unique_ptr<DebugUI> m_debugUI;
 
     // ---- 时间控制（o/p 调时间比例，固定灵敏度）----
     void updateSunSpeedKeys(float deltaTime);    // 主循环每帧轮询 o/p 持续按住状态
