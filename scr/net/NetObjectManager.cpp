@@ -25,19 +25,8 @@ void NetObjectManager::collectDirty(std::vector<NetMessage>& outReliable,
         // 按可靠性分流：同一个对象的脏属性，可靠和不可靠各打包为一条消息
         MemoryStream relStream;
         MemoryStream unrelStream;
-
-        for (uint16_t propId : obj->getDirtyProps()) {
-            auto* prop = obj->getProperty(propId);
-            if (!prop) continue;
-
-            if (prop->reliability == NetReliability::Reliable) {
-                relStream.writePod(propId);
-                prop->serialize(obj, prop->offset, relStream);
-            } else {
-                unrelStream.writePod(propId);
-                prop->serialize(obj, prop->offset, unrelStream);
-            }
-        }
+        // 服务端广播：跳过 NO_REBROADCAST 属性（如整背包只上报不外发）
+        obj->serializeDirtySplit(relStream, unrelStream, /*skipNoRebroadcast=*/true);
 
         if (relStream.size() > 0) {
             outReliable.push_back(NetMessage::propertySync(obj->getNetId(), relStream));

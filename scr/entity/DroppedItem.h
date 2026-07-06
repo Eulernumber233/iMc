@@ -14,4 +14,5 @@ struct DroppedItem {
     float bob = 0.0f;          // 上下浮动相位
     float pickupDelay = 0.5f;  // 抛出后不可拾取的时间
     bool  onGround = false;
+    uint16_t netId = 0;        // 网络 id（服务端分配；0 = 单机/未联网）
 };

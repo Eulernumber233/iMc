@@ -16,7 +16,7 @@ struct FirstPersonHandConfig {
     // 手臂三轴旋转（度）
     float pitch = 118.0f;   // 绕 X：把下垂的手臂掰向屏幕里（最主要，决定前伸角度）
     float yaw   = 18.0f;    // 绕 Y：手臂朝准星方向内偏
-    float roll  = -25.0f;   // 绕 Z：手臂外翻
+    float roll  = -35.0f;   // 绕 Z：手臂外翻
     float scale = 0.70f;    // 整体缩放（右臂原始约 0.25×0.75×0.25 方块，1.0=原大）
     // ---- 挥手动画 ----
     float swingDuration = 0.28f;  // 一次挥手时长（秒），越小越快
@@ -60,10 +60,21 @@ public:
     // 第一人称手部 按 handConfig 构建相机空间 model 矩阵，
     void drawFirstPersonHand(Shader& shader, bool leftMousePressed, float deltaTime);
 
+    // 右手「握持点」的世界矩阵：复刻 drawPosed 里 RIGHT_ARM 的骨骼变换（含走路摆臂 /
+    // 挥手），原点落在手掌（臂底偏前），坐标轴同臂局部（-Y 朝手、+Z 朝前）。
+    // 第三人称 / 远程玩家把手持物乘到此矩阵后即自动跟随手臂动画。
+    glm::mat4 rightHandMatrix(const glm::vec3& worldPos, const PlayerPose& pose) const;
+
     // 本帧挥手量（弧度 / 方块）。手持物品时复用它，让物品与手臂共享同一挥手动画。
     struct HandSwing { float pitch = 0.0f; float roll = 0.0f; float lift = 0.0f; };
     // 推进挥手状态机并返回本帧挥手量。每帧只应调用一次（手臂或手持物品二选一驱动）。
     HandSwing advanceHandSwing(bool leftMousePressed, float deltaTime);
+
+    // 一次性触发第一人称挥手（右键放置 / 交互复用左键那套挥手动画）。
+    // 若正在挥手则忽略（不打断当前这一下）；advanceHandSwing 会自然推进并结束它。
+    void triggerHandSwing() {
+        if (!m_handSwinging) { m_handSwinging = true; m_handSwingProgress = 0.0f; }
+    }
 
     // 第一人称手部参数（可直接读写调整）
     FirstPersonHandConfig handConfig;

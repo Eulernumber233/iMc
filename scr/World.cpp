@@ -9,6 +9,7 @@
 #include "RuntimeConfig.h"
 #include "Profiler.h"
 #include "net/NetManager.h"
+#include "item/ItemRegistry.h"
 #include <iomanip>
 #include <iostream>
 #include <thread>
@@ -16,6 +17,8 @@
 #include <string>
 #include <cstdio>
 #include <cmath>
+#include <fstream>
+#include <cctype>
 
 World::World(GLFWwindow* window_, const std::string& worldName,
              uint64_t seed, bool isNewWorld, NetMode netMode)
@@ -85,6 +88,15 @@ bool World::setupNetworking(NetMode mode, uint16_t port,
 }
 
 World::~World() {
+    // 先显式销毁 NetManager，再让其余成员按声明逆序析构。
+    // 关键：NetManager 析构会走 leave() → persistPlayerInventory → savePlayerInventoryFile，
+    // 后者要访问 m_saveManager。而成员按声明逆序析构时 m_saveManager 比 m_netManager 先销毁，
+    // 若留给默认析构就会在 m_saveManager 已释放后访问它（use-after-free / 读取访问冲突）。
+    // 在析构函数体里 reset()——此刻所有成员都还活着——保证 m_saveManager 仍有效。
+    // 正常退出时 run() 已调用过 leave()（m_connected=false），这里再 reset 只是幂等兜底；
+    // 崩溃回菜单等异常路径下，这里才真正完成断网 + 持久化。
+    if (m_netManager) m_netManager.reset();
+
     // 清理资源
     if (m_renderSystem) {
         // 注意：RenderSystem是在栈上创建的，不需要手动删除
@@ -149,6 +161,25 @@ int World::run() {
                 m_netManager->requestBlockChange(
                     worldPos.x, worldPos.y, worldPos.z, state.bits);
             });
+
+        // 世界时间同步（需求 3）：
+        //  Host —— 权威在本地 RenderSystem，注册 handler 应用客户端发来的 WORLD_CMD；
+        //          每帧把 RenderSystem 时间镜像进 WorldState 复制给客户端。
+        //  Join —— 时间由网络驱动，RenderSystem 不本地推进；890opl 键改发 WORLD_CMD。
+        if (m_netMode == NetMode::Host) {
+            m_netManager->setWorldCmdHandler(
+                [this](WorldCmdType t, float p) { applyTimeCommand(t, p); });
+            // 背包持久化（需求 2）：按玩家名存独立文件 saves/<world>/players/<name>.inv
+            m_netManager->setPlayerPersistCallbacks(
+                [this](const std::string& name, const InventoryData& inv) {
+                    savePlayerInventoryFile(name, inv);
+                },
+                [this](const std::string& name, InventoryData& out) {
+                    return loadPlayerInventoryFile(name, out);
+                });
+        } else if (m_netMode == NetMode::Join) {
+            m_renderSystem->setTimeExternallyDriven(true);
+        }
 
         // 服务端：处理在初始化期间连接的客户端（着色器编译等耗时操作
         // 可能持续数秒，客户端在此期间发送 JOIN_REQUEST 会超时）
@@ -246,9 +277,20 @@ int World::run() {
     // 初始化玩家
     m_player->initialize(renderSystem.getUIManager(), localSkinPath);
 
+    // Host：恢复本地玩家上次的背包（若有独立存档文件；ItemRegistry 此时已加载）
+    if (m_netMode == NetMode::Host && m_netManager) {
+        if (auto* lp = m_netManager->getLocalPlayer()) {
+            InventoryData inv;
+            if (loadPlayerInventoryFile(lp->playerName, inv)) applyNetInventory(inv);
+        }
+    }
+
     // 掉落物管理器（单机本地实体），注入给玩家用于 F 丢弃 / 破坏掉落
     m_droppedItems = std::make_unique<DroppedItemManager>();
     m_player->setDroppedItemManager(m_droppedItems.get());
+
+    // 掉落物网络同步接线（Host 权威广播 / Join 客户端渲染 + 请求生成）
+    if (m_netManager) setupDroppedItemNetworking();
 
     // 设置方块选择回调
     m_player->setOnBlockSelectedCallback([&renderSystem](const glm::ivec3& blockPos) {
@@ -286,12 +328,50 @@ int World::run() {
         m_player->update(deltaTime, *m_chunkManager, renderSystem);
         auto camera = m_player->getCamera();
 
-        // 网络：同步本地玩家位置到 NetState
+        // 网络：同步本地玩家位置 / 运动状态 / 挥手到 NetState
         if (m_netManager && (m_netMode == NetMode::Host || m_netMode == NetMode::Join)) {
             auto* netState = m_netManager->getLocalNetState();
             if (netState) {
                 netState->setPosition(m_player->getPosition());
                 netState->setLook(camera->Yaw, camera->Pitch);
+
+                // 运动状态（供远程端步态动画复现走/跑/蹲）
+                uint8_t flags = 0;
+                if (m_player->isOnGround())  flags |= PlayerFlagBits::ON_GROUND;
+                if (m_player->isCrouching()) flags |= PlayerFlagBits::CROUCHING;
+                if (m_player->isRunning())   flags |= PlayerFlagBits::RUNNING;
+                netState->setMotion(m_player->getVelocity(), flags);
+
+                // 挥手事件计数：本地动画器每挥一次自增，低字节变化才发（可靠通道）
+                uint8_t swing = (uint8_t)m_player->getAnimator().getSwingCount();
+                if (swing != netState->m_swingCounter) {
+                    netState->setSwingCounter(swing);
+                }
+            }
+
+            // 世界时间同步：Host 把权威时间镜像进 WorldState；Join 读 WorldState 灌回 RS。
+            if (m_renderSystem) {
+                if (auto* ws = m_netManager->getWorldState()) {
+                    if (m_netMode == NetMode::Host) {
+                        ws->mirror(m_renderSystem->getWorldTime(),
+                                   m_renderSystem->getTimeScale(),
+                                   m_renderSystem->isSunMoving());
+                    } else if (m_netMode == NetMode::Join) {
+                        m_renderSystem->setWorldTime(ws->timeHours());
+                        m_renderSystem->setSunMoving(ws->sunMoving());
+                    }
+                }
+            }
+
+            // 背包同步：本地背包/手持物 → netState（客户端上报服务端持久化）
+            syncPlayerNetInventory();
+
+            // 客户端：收到服务端恢复的背包则应用（消费一次）
+            if (m_netMode == NetMode::Join) {
+                InventoryData restored;
+                if (m_netManager->takeRestoredInventory(restored)) {
+                    applyNetInventory(restored);
+                }
             }
         }
 
@@ -322,6 +402,15 @@ int World::run() {
         // 的交互（需求 4）成立，且与 MC 单机一致。
         if (m_droppedItems) {
             m_droppedItems->update(deltaTime, *m_chunkManager, *m_player);
+        }
+
+        // Host：定时批量把掉落物位置/数量同步给客户端（10Hz，不可靠通道）
+        if (m_netMode == NetMode::Host && m_netManager && m_droppedItems) {
+            m_droppedSyncTimer += deltaTime;
+            if (m_droppedSyncTimer >= 0.1f) {
+                m_droppedSyncTimer = 0.0f;
+                broadcastDroppedSync();
+            }
         }
 
         // 背包交互（长按脱离到光标 / 光标图标跟随）
@@ -378,8 +467,24 @@ int World::run() {
     if (m_saveManager && m_saveManager->isWorldOpen()) {
         PlayerSaveData pd = m_player->getSaveData();
         m_saveManager->savePlayerState(pd);
+        // Host：把本地玩家背包也存进独立文件（必须在 leave() 前——leave 会清空玩家表，
+        // 之后 getLocalPlayer() 返回 nullptr）。
+        if (m_netMode == NetMode::Host && m_netManager) {
+            if (auto* lp = m_netManager->getLocalPlayer()) {
+                InventoryData inv;
+                buildLocalInventoryData(inv);
+                savePlayerInventoryFile(lp->playerName, inv);
+            }
+        }
+        // 关服/断网：趁存档仍打开（isWorldOpen==true）持久化所有在线远程玩家背包，再断开。
+        // 放在 closeWorld() 之前，否则 persist 会因存档已关而静默失败；
+        // 也放在析构之前，避免析构期成员逆序销毁导致 saveManager 先于 netManager 释放。
+        if (m_netManager) m_netManager->leave();
         m_chunkManager->saveAllDirtyChunks();
         m_saveManager->closeWorld();
+    } else if (m_netManager) {
+        // Join 等无本地存档模式：仍需正常断网（无远程背包要持久化）。
+        m_netManager->leave();
     }
 
     return 0;
@@ -422,8 +527,6 @@ void World::updateInventory(float deltaTime) {
     if (!m_inventoryOpen || !m_player) return;
     auto inv = m_player->getInventoryUI();
     if (!inv) return;
-
-    const float LONG_PRESS_SEC = 0.18f;
 
     if (m_invLmbHeld && !m_invDetached && !m_player->hasCursorStack() &&
         m_invPressSlot >= 0) {
@@ -542,7 +645,12 @@ void World::processKey(int key, int action) {
     }
     // L：时间是否流动的开关（关 = 冻结时间）
     if (key == GLFW_KEY_L && action == GLFW_PRESS) {
-        if (m_renderSystem) {
+        if (isTimeNetClient()) {
+            // 客户端：发命令给服务端，取当前 WorldState 状态取反
+            auto* ws = m_netManager->getWorldState();
+            bool nowMoving = ws ? ws->sunMoving() : true;
+            m_netManager->sendWorldCmd(WorldCmdType::SetMoving, nowMoving ? 0.0f : 1.0f);
+        } else if (m_renderSystem) {
             m_renderSystem->toggleSunMoving();
             std::cout << "[时间] " << (m_renderSystem->isSunMoving() ? "继续流动" : "已暂停")
                       << "（当前 " << formatWorldTime(m_renderSystem->getWorldTime()) << "）" << std::endl;
@@ -550,8 +658,11 @@ void World::processKey(int key, int action) {
     }
     // 8/9/0：预设时间 早上7点 / 正午12点 / 晚上7点，并顺便暂停时间（方便定格观察光照）
     if (action == GLFW_PRESS && (key == GLFW_KEY_8 || key == GLFW_KEY_9 || key == GLFW_KEY_0)) {
-        if (m_renderSystem) {
-            float hour = (key == GLFW_KEY_8) ? 7.0f : (key == GLFW_KEY_9) ? 12.0f : 19.0f;
+        float hour = (key == GLFW_KEY_8) ? 7.0f : (key == GLFW_KEY_9) ? 12.0f : 19.0f;
+        if (isTimeNetClient()) {
+            m_netManager->sendWorldCmd(WorldCmdType::SetTime, hour);
+            m_netManager->sendWorldCmd(WorldCmdType::SetMoving, 0.0f);  // 预设顺便暂停
+        } else if (m_renderSystem) {
             m_renderSystem->setWorldTime(hour);
             m_renderSystem->setSunMoving(false);   // 预设顺便暂停
             std::cout << "[时间] 跳到 " << formatWorldTime(hour) << "（已暂停）" << std::endl;
@@ -587,7 +698,233 @@ void World::updateSunSpeedKeys(float deltaTime) {
 
     // 固定灵敏度：每现实秒把 time_scale 调整 kRate（游戏小时/现实秒 每秒）
     const float kRate = 0.4f;
-    m_renderSystem->adjustTimeScale((float)dir * kRate * deltaTime);
+    float delta = (float)dir * kRate * deltaTime;
+    if (isTimeNetClient()) {
+        // 客户端：高频增量走不可靠通道（丢一两个无所谓，服务端复制回来会纠正）
+        m_netManager->sendWorldCmd(WorldCmdType::AdjustScale, delta, false);
+    } else {
+        m_renderSystem->adjustTimeScale(delta);
+    }
+}
+
+// 客户端(Join)且有网络管理器：时间由网络驱动，按键改发 WORLD_CMD 而非本地应用。
+bool World::isTimeNetClient() const {
+    return m_netManager && m_netMode == NetMode::Join;
+}
+
+// Host：应用客户端发来的世界时间命令到本地权威 RenderSystem（下一帧 mirror 复制回所有端）。
+void World::applyTimeCommand(WorldCmdType t, float p) {
+    if (!m_renderSystem) return;
+    switch (t) {
+    case WorldCmdType::SetTime:     m_renderSystem->setWorldTime(p);          break;
+    case WorldCmdType::AdjustScale: m_renderSystem->adjustTimeScale(p);       break;
+    case WorldCmdType::SetMoving:   m_renderSystem->setSunMoving(p != 0.0f);  break;
+    }
+}
+
+// ============================================================================
+// 背包同步 / 持久化（需求 2）
+// ============================================================================
+
+std::string World::localHeldItemId() const {
+    if (!m_player) return std::string();
+    const ItemStack* s = m_player->getSelectedStack();
+    return (s && s->def) ? s->def->id : std::string();
+}
+
+void World::buildLocalInventoryData(InventoryData& out) const {
+    out.slots.clear();
+    if (!m_player) return;
+    const auto& inv = m_player->getInventory();
+    out.slots.resize(inv.size());
+    for (size_t i = 0; i < inv.size(); ++i) {
+        const ItemStack& st = inv[i];
+        if (st.def && st.count > 0) {
+            out.slots[i].id = st.def->id;
+            out.slots[i].count = (uint16_t)st.count;
+            out.slots[i].durability = (uint16_t)st.durability;
+        }
+        // 否则留空（id="" count=0）
+    }
+}
+
+void World::applyNetInventory(const InventoryData& inv) {
+    if (!m_player) return;
+    auto& dst = m_player->getInventory();
+    for (size_t i = 0; i < dst.size(); ++i) {
+        if (i >= inv.slots.size()) { dst[i].clear(); continue; }
+        const auto& sl = inv.slots[i];
+        if (sl.id.empty() || sl.count == 0) { dst[i].clear(); continue; }
+        const ItemDefinition* def = ItemRegistry::instance().get(sl.id);
+        if (!def) { dst[i].clear(); continue; }
+        ItemStack st(def, (int)sl.count);
+        st.durability = (int)sl.durability;
+        dst[i] = st;
+    }
+    m_player->syncHotbarUI();
+}
+
+// 每帧：本地背包/手持物 → netState。手持物两端都广播；整背包仅客户端上报服务端持久化。
+void World::syncPlayerNetInventory() {
+    if (!m_netManager) return;
+    auto* netState = m_netManager->getLocalNetState();
+    if (!netState) return;
+
+    std::string held = localHeldItemId();
+    if (held != netState->m_heldItemId) netState->setHeldItem(held);
+
+    if (m_netMode == NetMode::Join) {
+        InventoryData inv;
+        buildLocalInventoryData(inv);
+        if (inv != netState->m_inventory) netState->setInventory(inv);
+    }
+}
+
+// 玩家名 → 合法文件名（LAN 名简单，稳妥起见把非字母数字替换成 '_'）
+static std::string sanitizePlayerName(const std::string& n) {
+    std::string r;
+    for (char c : n) r += (std::isalnum((unsigned char)c) ? c : '_');
+    if (r.empty()) r = "player";
+    return r;
+}
+
+void World::savePlayerInventoryFile(const std::string& name, const InventoryData& inv) {
+    if (!m_saveManager || !m_saveManager->isWorldOpen()) return;
+    std::string dir = m_saveManager->getSavesRoot() + "/" +
+                      m_saveManager->getWorldName() + "/players";
+    ChunkSaveManager::makeDir(dir);
+    MemoryStream s;
+    NetTypeSerializer<InventoryData>::write(s, inv);
+    std::ofstream f(dir + "/" + sanitizePlayerName(name) + ".inv", std::ios::binary);
+    if (f) f.write((const char*)s.data(), (std::streamsize)s.size());
+}
+
+bool World::loadPlayerInventoryFile(const std::string& name, InventoryData& out) {
+    if (!m_saveManager || !m_saveManager->isWorldOpen()) return false;
+    std::string path = m_saveManager->getSavesRoot() + "/" +
+                       m_saveManager->getWorldName() + "/players/" +
+                       sanitizePlayerName(name) + ".inv";
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return false;
+    std::vector<uint8_t> buf((std::istreambuf_iterator<char>(f)),
+                             std::istreambuf_iterator<char>());
+    if (buf.empty()) return false;
+    MemoryStream s;
+    s.writeBytes(buf.data(), buf.size());
+    NetTypeSerializer<InventoryData>::read(s, out);
+    return true;
+}
+
+// ============================================================================
+// 掉落物网络同步（需求 3）
+// ============================================================================
+
+void World::setupDroppedItemNetworking() {
+    if (!m_netManager || !m_droppedItems) return;
+
+    // 收发游戏消息（掉落物）的统一入口
+    m_netManager->setGameMessageHandler(
+        [this](NetMsgType t, MemoryStream& p) { handleGameMessage(t, p); });
+
+    if (m_netMode == NetMode::Host) {
+        // 服务端权威：生成/销毁广播给所有客户端
+        m_droppedItems->setServerCallbacks(
+            [this](const DroppedItem& it) {
+                MemoryStream s;
+                s.writePod((uint8_t)NetObjType::DroppedItem);
+                s.writePod(it.netId);
+                s.writeString(it.stack.def ? it.stack.def->id : std::string());
+                s.writePod((uint16_t)it.stack.count);
+                s.writePod((uint16_t)it.stack.durability);
+                s.writePod(it.pos.x); s.writePod(it.pos.y); s.writePod(it.pos.z);
+                m_netManager->broadcast(NetMsgType::SPAWN_OBJECT, s, true);
+            },
+            [this](uint16_t netId) {
+                MemoryStream s;
+                s.writePod(netId);
+                m_netManager->broadcast(NetMsgType::DESTROY_OBJECT, s, true);
+            });
+    } else if (m_netMode == NetMode::Join) {
+        // 客户端：不本地模拟，丢弃/破坏改为向服务端请求生成
+        m_droppedItems->setClientMode(true);
+        m_droppedItems->setDropRequestCallback(
+            [this](const ItemStack& st, const glm::vec3& pos, const glm::vec3& vel) {
+                MemoryStream s;
+                s.writeString(st.def ? st.def->id : std::string());
+                s.writePod((uint16_t)st.count);
+                s.writePod((uint16_t)st.durability);
+                s.writePod(pos.x); s.writePod(pos.y); s.writePod(pos.z);
+                s.writePod(vel.x); s.writePod(vel.y); s.writePod(vel.z);
+                m_netManager->sendToServer(NetMsgType::DROP_REQUEST, s, true);
+            });
+    }
+}
+
+void World::handleGameMessage(NetMsgType type, MemoryStream& payload) {
+    if (!m_droppedItems) return;
+
+    switch (type) {
+    case NetMsgType::SPAWN_OBJECT: {  // 客户端：生成掉落物
+        uint8_t tag = payload.readPod<uint8_t>();
+        if ((NetObjType)tag != NetObjType::DroppedItem) return;
+        uint16_t netId = payload.readPod<uint16_t>();
+        std::string id = payload.readString();
+        uint16_t count = payload.readPod<uint16_t>();
+        uint16_t dur   = payload.readPod<uint16_t>();
+        glm::vec3 pos;
+        pos.x = payload.readPod<float>(); pos.y = payload.readPod<float>(); pos.z = payload.readPod<float>();
+        const ItemDefinition* def = ItemRegistry::instance().get(id);
+        if (!def) return;
+        ItemStack st(def, (int)count);
+        st.durability = (int)dur;
+        m_droppedItems->netSpawn(netId, st, pos);
+        break;
+    }
+    case NetMsgType::DESTROY_OBJECT: {  // 客户端：销毁掉落物
+        uint16_t netId = payload.readPod<uint16_t>();
+        m_droppedItems->netDespawn(netId);
+        break;
+    }
+    case NetMsgType::DROPPED_SYNC: {  // 客户端：批量位置/数量
+        uint16_t n = payload.readPod<uint16_t>();
+        for (uint16_t i = 0; i < n; ++i) {
+            uint16_t netId = payload.readPod<uint16_t>();
+            glm::vec3 pos;
+            pos.x = payload.readPod<float>(); pos.y = payload.readPod<float>(); pos.z = payload.readPod<float>();
+            uint16_t count = payload.readPod<uint16_t>();
+            m_droppedItems->netApply(netId, pos, (int)count);
+        }
+        break;
+    }
+    case NetMsgType::DROP_REQUEST: {  // 服务端：客户端请求生成，权威落地
+        std::string id = payload.readString();
+        uint16_t count = payload.readPod<uint16_t>();
+        uint16_t dur   = payload.readPod<uint16_t>();
+        glm::vec3 pos, vel;
+        pos.x = payload.readPod<float>(); pos.y = payload.readPod<float>(); pos.z = payload.readPod<float>();
+        vel.x = payload.readPod<float>(); vel.y = payload.readPod<float>(); vel.z = payload.readPod<float>();
+        const ItemDefinition* def = ItemRegistry::instance().get(id);
+        if (!def) return;
+        ItemStack st(def, (int)count);
+        st.durability = (int)dur;
+        m_droppedItems->spawn(st, pos, vel);  // 服务端权威生成 → onSpawn 广播
+        break;
+    }
+    default: break;
+    }
+}
+
+void World::broadcastDroppedSync() {
+    if (!m_netManager || m_netMode != NetMode::Host || !m_droppedItems) return;
+    const auto& items = m_droppedItems->items();
+    MemoryStream s;
+    s.writePod((uint16_t)items.size());
+    for (const auto& it : items) {
+        s.writePod(it.netId);
+        s.writePod(it.pos.x); s.writePod(it.pos.y); s.writePod(it.pos.z);
+        s.writePod((uint16_t)it.stack.count);
+    }
+    m_netManager->broadcast(NetMsgType::DROPPED_SYNC, s, false);  // 高频走不可靠
 }
 
 // 把 0-24 浮点世界时间格式化成 "HH:MM"。

@@ -16,6 +16,7 @@
 #include "../item/ItemDefinition.h"
 #include "../item/BlockItemModel.h"
 #include "../item/ItemRegistry.h"
+#include "../item/HeldDisplayRegistry.h"
 #include "../entity/DroppedItemManager.h"
 #include <random>
 #include <cmath>
@@ -589,7 +590,8 @@ void RenderSystem::move_DirLight(float deltaTime)
 {
     // 世界时间推进：m_sunMoving 时按"现实秒 → 游戏小时"的比例累加。比例可负（时间倒流）。
     // 用 0-24 浮点表示世界时间，wrap 到 [0,24)。
-    if (m_sunMoving) {
+    // 客户端(externallyDriven)时间由网络设入，本地不推进（否则会与服务端叠加漂移）。
+    if (m_sunMoving && !m_timeExternallyDriven) {
         m_worldTimeHours += m_timeScale * deltaTime;
         m_worldTimeHours = glm::mod(m_worldTimeHours, 24.0f);
         if (m_worldTimeHours < 0.0f) m_worldTimeHours += 24.0f;  // glm::mod 对负数已规范，这里双保险
@@ -1215,7 +1217,7 @@ void RenderSystem::render(const ChunkManager& chunkManager,
     // 远程玩家模型
     if (netManager) {
         PROFILE_SCOPE("render.remotePlayers");
-        renderRemotePlayers(netManager, view, geoProj, camera);
+        renderRemotePlayers(netManager, view, geoProj, camera, deltaTime);
     }
 
     // 掉落物（挤出模型）
@@ -1908,6 +1910,15 @@ void RenderSystem::renderModel(const std::shared_ptr<Camera> camera,
 
     // 使用动画姿态绘制
     model->drawPosed(m_modeShader, player->getModelFootPosition(), player->getPose());
+
+    // 第三人称：把手持物挂到右手骨骼（跟随走路摆臂 / 破坏方块挥手）
+    ItemStack* held = player->getSelectedStack();
+    if (held && !held->empty() && held->def) {
+        const HeldItemDisplay& disp = HeldDisplayRegistry::instance().resolve(*held->def);
+        glm::mat4 armMat = model->rightHandMatrix(player->getModelFootPosition(), player->getPose());
+        glm::mat4 itemMat = armMat * disp.thirdPerson.matrix();
+        drawHeldItem(held->def, itemMat, view, projection, camera->Position, lightDir);
+    }
 }
 
 void RenderSystem::renderFirstPersonHand(Player* player, float deltaTime)
@@ -1917,6 +1928,9 @@ void RenderSystem::renderFirstPersonHand(Player* player, float deltaTime)
     if (player->isThirdPerson()) return;
     PlayerModel* model = player->getModel();
     if (!model) return;
+
+    // 手臂本体参数从独立 JSON（held_display.json 的 "arm"）灌入，改完不用重编即可微调。
+    model->handConfig = HeldDisplayRegistry::instance().armConfig();
 
     // 手部专用透视 + 单位 view（相机空间：+X 右、+Y 上、-Z 前）。
     // FOV 与世界视野解耦，改世界 FOV 不影响手的观感；近裁 0.01 保证不被裁掉。
@@ -1963,80 +1977,66 @@ void RenderSystem::renderFirstPersonHand(Player* player, float deltaTime)
     swingMat = glm::rotate(swingMat, sw.pitch, glm::vec3(1, 0, 0));
     swingMat = glm::rotate(swingMat, sw.roll,  glm::vec3(0, 0, 1));
 
+    // 摆放 = 该物品的第一人称档案（held_display.json），叠加挥手矩阵。统一走 drawHeldItem。
     const ItemDefinition* def = held->def;
+    const HeldItemDisplay& disp = HeldDisplayRegistry::instance().resolve(*def);
+    glm::mat4 handMat = swingMat * disp.firstPerson.matrix();
+    // 相机空间上下文：view=单位阵、viewPos=0、光方向用相机空间固定值。
+    drawHeldItem(def, handMat, handView, handProj, glm::vec3(0.0f), glm::vec3(0.3f, -0.6f, -0.7f));
+}
+
+void RenderSystem::drawHeldItem(const ItemDefinition* def, const glm::mat4& model,
+    const glm::mat4& view, const glm::mat4& projection,
+    const glm::vec3& viewPos, const glm::vec3& itemLightDir)
+{
+    if (!def) return;
 
     if (def->modelType == ItemModelType::CUSTOM_MODEL && !def->modelPath.empty()) {
         // 自定义 OBJ 模型（如望远镜）：复用模型着色器 mode.vert/frag
         Model* im = getItemModel(def->modelPath);
-        if (im) {
-            glEnable(GL_CULL_FACE);
-            glCullFace(GL_BACK);
-            m_modeShader.use();
-            m_modeShader.setMat4("projection", handProj);
-            m_modeShader.setMat4("view", handView);
-            m_modeShader.setVec3("viewPos", glm::vec3(0.0f));
-            m_modeShader.setVec3("light.direction", glm::vec3(0.3f, -0.6f, -0.7f));
-
-            glm::mat4 m(1.0f);
-            m = glm::translate(m, glm::vec3(0.42f, -0.45f, -0.85f));
-            m = glm::rotate(m, glm::radians(-15.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-            m = glm::rotate(m, glm::radians(5.0f),   glm::vec3(1.0f, 0.0f, 0.0f));
-            m = glm::scale(m, glm::vec3(0.65f));
-            m_modeShader.setMat4("model", swingMat * m);
-
-            im->Draw(m_modeShader);
-            glBindVertexArray(0);
-        }
+        if (!im) return;
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);
+        m_modeShader.use();
+        m_modeShader.setMat4("projection", projection);
+        m_modeShader.setMat4("view", view);
+        m_modeShader.setVec3("viewPos", viewPos);
+        m_modeShader.setVec3("light.direction", itemLightDir);
+        m_modeShader.setMat4("model", model);
+        im->Draw(m_modeShader);
+        glBindVertexArray(0);
     } else if (def->isBlockItem() && m_blockTextureArray != 0 &&
                BlockItemModel::hasValidTextures(def->blockType)) {
         // 方块物品：立方体（block_item 着色器 + 纹理数组）
         const BlockItemModel* cube = BlockItemModelCache::instance().get(def->blockType);
-        if (cube) {
-            glDisable(GL_CULL_FACE);
-            m_blockItemShader.use();
-            m_blockItemShader.setMat4("projection", handProj);
-            m_blockItemShader.setMat4("view", handView);
-            m_blockItemShader.setVec3("lightDir", glm::vec3(0.3f, -0.6f, -0.7f));
-            m_blockItemShader.setInt("blockTextures", 0);
-
-            glm::mat4 m(1.0f);
-            m = glm::translate(m, glm::vec3(0.55f, -0.55f, -1.0f));
-            m = glm::rotate(m, glm::radians(35.0f),  glm::vec3(0.0f, 1.0f, 0.0f));
-            m = glm::rotate(m, glm::radians(25.0f),  glm::vec3(1.0f, 0.0f, 0.0f));
-            m = glm::scale(m, glm::vec3(0.55f));
-            m_blockItemShader.setMat4("model", swingMat * m);
-
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D_ARRAY, m_blockTextureArray);
-            cube->draw();
-
-            glEnable(GL_CULL_FACE);
-            glBindVertexArray(0);
-        }
+        if (!cube) return;
+        glDisable(GL_CULL_FACE);
+        m_blockItemShader.use();
+        m_blockItemShader.setMat4("projection", projection);
+        m_blockItemShader.setMat4("view", view);
+        m_blockItemShader.setVec3("lightDir", itemLightDir);
+        m_blockItemShader.setInt("blockTextures", 0);
+        m_blockItemShader.setMat4("model", model);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, m_blockTextureArray);
+        cube->draw();
+        glEnable(GL_CULL_FACE);
+        glBindVertexArray(0);
     } else if (def->iconTexture != 0 && !def->iconPath.empty()) {
         const ItemModel* im = ItemModelCache::instance().get(def->id, def->iconPath);
-        if (im) {
-            glDisable(GL_CULL_FACE); // 挤出模型两面可见
-            m_itemShader.use();
-            m_itemShader.setMat4("projection", handProj);
-            m_itemShader.setMat4("view", handView);
-            m_itemShader.setVec3("lightDir", glm::vec3(0.3f, -0.6f, -0.7f)); // 相机空间固定光
-            m_itemShader.setInt("texture_diffuse1", 0);
-
-            glm::mat4 m(1.0f);
-            m = glm::translate(m, glm::vec3(0.55f, -0.55f, -1.0f));
-            m = glm::rotate(m, glm::radians(20.0f),  glm::vec3(0.0f, 1.0f, 0.0f));
-            m = glm::rotate(m, glm::radians(-10.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-            m = glm::scale(m, glm::vec3(0.7f));
-            m_itemShader.setMat4("model", swingMat * m);
-
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, def->iconTexture);
-            im->draw();
-
-            glEnable(GL_CULL_FACE); // 恢复
-            glBindVertexArray(0);
-        }
+        if (!im) return;
+        glDisable(GL_CULL_FACE); // 挤出模型两面可见
+        m_itemShader.use();
+        m_itemShader.setMat4("projection", projection);
+        m_itemShader.setMat4("view", view);
+        m_itemShader.setVec3("lightDir", itemLightDir);
+        m_itemShader.setInt("texture_diffuse1", 0);
+        m_itemShader.setMat4("model", model);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, def->iconTexture);
+        im->draw();
+        glEnable(GL_CULL_FACE); // 恢复
+        glBindVertexArray(0);
     }
 }
 
@@ -2057,7 +2057,7 @@ Model* RenderSystem::getItemModel(const std::string& path) {
 
 void RenderSystem::renderRemotePlayers(NetManager* netManager,
     const glm::mat4& view, const glm::mat4& projection,
-    const std::shared_ptr<Camera>& camera)
+    const std::shared_ptr<Camera>& camera, float deltaTime)
 {
     if (!netManager || !netManager->isConnected()) return;
 
@@ -2073,16 +2073,22 @@ void RenderSystem::renderRemotePlayers(NetManager* netManager,
         if (pos.x == 0.0f && pos.y == 0.0f && pos.z == 0.0f) continue;
         float yawDeg = player->getRenderYaw();
 
-        // 身体朝向：Camera.Yaw → bodyYaw 转换（与 PlayerAnimator 一致）
-        float bodyYaw = glm::half_pi<float>() - glm::radians(yawDeg);
+        // 用复制过来的运动状态驱动该玩家自己的动画器，复现走/跑/蹲/待机 + 挥手。
+        // 动画器内部把 cameraYaw(度) 转成 bodyYaw（π/2 - radians），与本地第三人称一致。
+        glm::vec3 vel = player->getRenderVelocity();
+        PlayerAnimator::Input in;
+        in.horizontalVelocity = glm::vec3(vel.x, 0.0f, vel.z);
+        in.onGround = player->isOnGround();
+        in.crouching = player->isCrouching();
+        in.running = player->isRunning();
+        in.cameraYaw = yawDeg;
+        in.cameraPitch = player->getRenderPitch();
+        player->animator.update(deltaTime, in);
+        const PlayerPose& idlePose = player->animator.getPose();
 
         // 脚底位置：碰撞箱中心减半高
         glm::vec3 footPos = pos;
         footPos.y -= PhysicsConstants::PLAYER_HEIGHT_STANDING * 0.5f;
-
-        // 简单站立姿态
-        PlayerPose idlePose{};
-        idlePose.bodyYaw = bodyYaw;
 
         // 绑定皮肤纹理 + 绘制模型
         glEnable(GL_DEPTH_TEST);
@@ -2113,6 +2119,18 @@ void RenderSystem::renderRemotePlayers(NetManager* netManager,
             m_remotePlayerModel.drawPosed(m_modeShader, footPos, idlePose, skinTex);
         } else {
             m_remotePlayerModel.drawPosed(m_modeShader, footPos, idlePose);
+        }
+
+        // 远程玩家手持物：按复制过来的 heldItemId 解析定义，挂到右手骨骼（同第三人称）
+        const std::string& heldId = player->getHeldItemId();
+        if (!heldId.empty()) {
+            const ItemDefinition* def = ItemRegistry::instance().get(heldId);
+            if (def) {
+                const HeldItemDisplay& disp = HeldDisplayRegistry::instance().resolve(*def);
+                glm::mat4 armMat = m_remotePlayerModel.rightHandMatrix(footPos, idlePose);
+                glm::mat4 m = armMat * disp.thirdPerson.matrix();
+                drawHeldItem(def, m, view, projection, camera->Position, lightDir);
+            }
         }
     }
 }

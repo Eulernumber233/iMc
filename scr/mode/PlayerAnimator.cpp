@@ -166,6 +166,7 @@ void PlayerAnimator::update(float deltaTime, const Input& in) {
 void PlayerAnimator::triggerSwingArm() {
     // 重新播放（长按破坏时每次冷却到期都重置，得到连续挥手）
     m_swingTimer = config.swingDuration;
+    ++m_swingCount;  // 事件计数，供网络复制识别每一次挥手
 }
 
 float PlayerAnimator::getBodyYawDegrees() const {

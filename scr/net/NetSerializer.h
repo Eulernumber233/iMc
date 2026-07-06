@@ -91,6 +91,32 @@ private:
 };
 
 // ============================================================================
+// InventoryData: 背包的网络/存档表示（与 ItemStack 解耦，不持指针）
+// 每格：物品 id（空串 = 空格）+ 数量 + 耐久。定长（通常 36 格）。
+// ============================================================================
+struct InventoryNetSlot {
+    std::string id;
+    uint16_t count = 0;
+    uint16_t durability = 0;
+};
+
+struct InventoryData {
+    std::vector<InventoryNetSlot> slots;
+
+    bool operator==(const InventoryData& o) const {
+        if (slots.size() != o.slots.size()) return false;
+        for (size_t i = 0; i < slots.size(); ++i) {
+            const auto& a = slots[i];
+            const auto& b = o.slots[i];
+            if (a.count != b.count || a.durability != b.durability || a.id != b.id)
+                return false;
+        }
+        return true;
+    }
+    bool operator!=(const InventoryData& o) const { return !(*this == o); }
+};
+
+// ============================================================================
 // NetTypeSerializer<T>: 类型序列化器（主模板 + 基础类型 + 自定义类型特化）
 // ============================================================================
 
@@ -170,5 +196,28 @@ struct NetTypeSerializer<std::string> {
     }
     static void read(MemoryStream& s, std::string& v) {
         v = s.readString();
+    }
+};
+
+// ---- InventoryData ----
+template<>
+struct NetTypeSerializer<InventoryData> {
+    static void write(MemoryStream& s, const InventoryData& v) {
+        s.writePod((uint16_t)v.slots.size());
+        for (const auto& sl : v.slots) {
+            s.writeString(sl.id);
+            s.writePod(sl.count);
+            s.writePod(sl.durability);
+        }
+    }
+    static void read(MemoryStream& s, InventoryData& v) {
+        uint16_t n = s.readPod<uint16_t>();
+        v.slots.clear();
+        v.slots.resize(n);
+        for (auto& sl : v.slots) {
+            sl.id = s.readString();
+            sl.count = s.readPod<uint16_t>();
+            sl.durability = s.readPod<uint16_t>();
+        }
     }
 };

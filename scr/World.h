@@ -7,6 +7,8 @@
 #include "chunk/ChunkManager.h"
 #include "generate/TerrainGenerator.h"
 #include "entity/DroppedItemManager.h"
+#include "net/NetCommon.h"
+#include "net/NetSerializer.h"   // InventoryData
 #include <memory>
 #include <sstream>
 
@@ -78,6 +80,25 @@ private:
     void updateSunSpeedKeys(float deltaTime);    // 主循环每帧轮询 o/p 持续按住状态
     void printTimeFlowSpeed();                   // 输出当前时间流速（现实世界单位）
     static std::string formatWorldTime(float hour);  // 0-24 浮点 → "HH:MM"
+
+    // 世界时间网络同步辅助（需求 3）
+    bool isTimeNetClient() const;                    // 是否为「时间由网络驱动」的客户端
+    void applyTimeCommand(WorldCmdType type, float param);  // Host 应用客户端时间命令
+
+    // 背包同步辅助（需求 2）
+    std::string localHeldItemId() const;             // 本地玩家当前手持物 id（空手 = ""）
+    void buildLocalInventoryData(InventoryData& out) const;  // Player 背包 → InventoryData
+    void applyNetInventory(const InventoryData& inv);        // InventoryData → Player 背包（解析 id）
+    void syncPlayerNetInventory();                   // 每帧：把本地背包/手持物写入 netState
+    // Host：保存/加载某玩家背包到独立存档文件（saves/<world>/players/<name>.json）
+    void savePlayerInventoryFile(const std::string& name, const InventoryData& inv);
+    bool loadPlayerInventoryFile(const std::string& name, InventoryData& out);
+
+    // 掉落物网络同步（需求 3）
+    void setupDroppedItemNetworking();               // run() 里按 netMode 接线
+    void handleGameMessage(NetMsgType type, MemoryStream& payload);  // 分派 SPAWN/DESTROY/DROPPED_SYNC/DROP_REQUEST
+    void broadcastDroppedSync();                     // Host 定时批量同步位置/数量
+    float m_droppedSyncTimer = 0.0f;                 // DROPPED_SYNC 节流计时
 
     // 区块管理器
     std::shared_ptr<ChunkManager> m_chunkManager;

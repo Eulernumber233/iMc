@@ -17,11 +17,55 @@ namespace {
 
 void DroppedItemManager::spawn(const ItemStack& stack, const glm::vec3& pos, const glm::vec3& vel) {
     if (stack.empty()) return;
+    // 客户端：不本地生成，转成向服务端的生成请求（服务端权威生成后再广播回来）
+    if (m_clientMode) {
+        if (m_onDropRequest) m_onDropRequest(stack, pos, vel);
+        return;
+    }
     DroppedItem it;
     it.stack = stack;
     it.pos = pos;
     it.vel = vel;
+    it.netId = m_nextNetId++;
     m_items.push_back(it);
+    if (m_onSpawn) m_onSpawn(m_items.back());  // 服务端广播 SPAWN
+}
+
+DroppedItem* DroppedItemManager::findByNetId(uint16_t netId) {
+    for (auto& it : m_items) if (it.netId == netId) return &it;
+    return nullptr;
+}
+
+void DroppedItemManager::updateClientVisual(float dt) {
+    const float rotSpeed = 1.5f;
+    for (auto& it : m_items) {
+        it.spin += rotSpeed * dt;
+        it.bob += dt;
+    }
+}
+
+void DroppedItemManager::netSpawn(uint16_t netId, const ItemStack& stack, const glm::vec3& pos) {
+    if (DroppedItem* ex = findByNetId(netId)) { ex->stack = stack; ex->pos = pos; return; }
+    DroppedItem it;
+    it.stack = stack;
+    it.pos = pos;
+    it.netId = netId;
+    it.pickupDelay = 0.0f;
+    m_items.push_back(it);
+}
+
+void DroppedItemManager::netApply(uint16_t netId, const glm::vec3& pos, int count) {
+    DroppedItem* it = findByNetId(netId);
+    if (!it) return;
+    it->pos = pos;
+    if (count > 0) it->stack.count = count;
+}
+
+void DroppedItemManager::netDespawn(uint16_t netId) {
+    m_items.erase(
+        std::remove_if(m_items.begin(), m_items.end(),
+            [netId](const DroppedItem& it) { return it.netId == netId; }),
+        m_items.end());
 }
 
 bool DroppedItemManager::boxHitsSolid(ChunkManager& cm, const glm::vec3& c, float half) const {
@@ -48,6 +92,9 @@ bool DroppedItemManager::moveAxis(ChunkManager& cm, DroppedItem& it, int axis, f
 }
 
 void DroppedItemManager::update(float dt, ChunkManager& chunkManager, Player& player) {
+    // 客户端：不跑物理/拾取，实体由网络驱动，这里只播动画
+    if (m_clientMode) { updateClientVisual(dt); return; }
+
     const float rotSpeed = 1.5f;
     glm::vec3 pc = player.getPosition();
 
@@ -111,11 +158,13 @@ void DroppedItemManager::update(float dt, ChunkManager& chunkManager, Player& pl
         }
     }
 
-    // 移除已被完全拾取 / 掉出世界的项
+    // 移除已被完全拾取 / 掉出世界的项；服务端在移除前通知 onDespawn 广播 DESTROY
     m_items.erase(
         std::remove_if(m_items.begin(), m_items.end(),
-            [](const DroppedItem& it) {
-                return it.stack.empty() || it.pos.y < -64.0f;
+            [this](const DroppedItem& it) {
+                bool gone = it.stack.empty() || it.pos.y < -64.0f;
+                if (gone && m_onDespawn && it.netId != 0) m_onDespawn(it.netId);
+                return gone;
             }),
         m_items.end());
 }

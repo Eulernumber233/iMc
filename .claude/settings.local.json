@@ -71,7 +71,13 @@
       "Bash(timeout 8 ./x64/Debug/iMc.exe)",
       "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /t:Rebuild /p:Configuration=Debug /p:Platform=x64 /m /nologo /clp:ErrorsOnly /v:minimal 2>&1 | Select-Object -Last 8; \"REBUILD DONE\")",
       "PowerShell($msb = Get-Command msbuild -ErrorAction SilentlyContinue; if \\($msb\\) { $msb.Source } else { \"no-msbuild-in-PATH\" }; $vs = Get-ChildItem \"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1; if \\($vs\\) { $vs.FullName } else { \"no-vs2022\" })",
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Debug /p:Platform=x64 /m /nologo /clp:Summary /v:minimal 2>&1 | Select-Object -Last 40)",
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Debug /p:Platform=x64 /m /nologo /clp:ErrorsOnly /v:minimal 2>&1 | Select-Object -Last 40)",
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Debug /p:Platform=x64 /m /nologo /clp:ErrorsOnly /v:minimal)",
+      "PowerShell(Get-Process *)",
+      "PowerShell(Stop-Process *)",
+      "PowerShell(Get-CimInstance *)"
     ],
     "additionalDirectories": [
       "e:\\opengl\\iMc\\scr"

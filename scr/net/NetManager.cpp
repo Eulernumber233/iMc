@@ -9,10 +9,37 @@
 #include <thread>
 #include <algorithm>
 
+// ============================================================================
+// WorldState
+// ============================================================================
+
+WorldState::WorldState() {
+    REGISTER_PROP_BEGIN(WorldState);
+    REGISTER_PROP_NOREP(m_timeHours, Unreliable);  // 0
+    REGISTER_PROP_NOREP(m_timeScale, Reliable);    // 1
+    REGISTER_PROP_NOREP(m_sunMoving, Reliable);    // 2
+    REGISTER_PROP_END();
+}
+
+void WorldState::mirror(float h, float s, bool moving) {
+    if (h != m_timeHours) { m_timeHours = h; markDirty(0); }
+    if (s != m_timeScale) { m_timeScale = s; markDirty(1); }
+    uint8_t mb = moving ? 1 : 0;
+    if (mb != m_sunMoving) { m_sunMoving = mb; markDirty(2); }
+}
+
 NetManager::NetManager() = default;
 
 NetManager::~NetManager() {
     leave();
+}
+
+void NetManager::ensureWorldState() {
+    if (m_worldState) return;
+    auto ws = std::make_unique<WorldState>();
+    m_worldState = ws.get();
+    ws->setOwnerId(0);  // 服务端权威（owner=0），客户端不上报，只接收
+    m_objManager.addObject(NetConstants::WORLD_STATE_NETID, std::move(ws));
 }
 
 // ============================================================================
@@ -41,6 +68,7 @@ bool NetManager::host(uint16_t port, const std::string& worldName, uint32_t seed
     player->skinName = "steve";
     player->peer = nullptr;  // 本地玩家无 peer
     m_localNetState = player->netState.get();
+    m_localNetState->setOwnerId(m_localPlayerId);  // 本地玩家 owner=自己，客户端据此上报
     player->netState->setOwner(player.get());
 
     // 注册到 ObjectManager
@@ -158,6 +186,7 @@ bool NetManager::join(const std::string& ip, uint16_t port, const std::string& p
                             player->skinName = skinName;
                             player->peer = nullptr;
                             m_localNetState = player->netState.get();
+                            m_localNetState->setOwnerId(m_localPlayerId);
                             player->netState->setOwner(player.get());
                             // 设置初始位置（来自服务端）
                             player->updateCachedPosition(glm::vec3(spawnX, spawnY, spawnZ));
@@ -228,6 +257,12 @@ void NetManager::leave() {
     m_transport.stopNetThread();
 
     if (m_isHost) {
+        // 关服前持久化所有在线远程玩家的背包
+        if (m_playerPersistCb) {
+            for (auto& [id, p] : m_players) {
+                if (p->peer) persistPlayerInventory(id, p->playerName);
+            }
+        }
         // 通知所有客户端断开（线程已停，主线程直接发 + flush，同步推出 disconnect 包）
         m_transport.disconnectAll();
     }
@@ -288,19 +323,30 @@ void NetManager::update() {
         }
     } else {
         PROFILE_SCOPE("net.propSync");
-        // 客户端：只同步本地玩家的脏属性到服务端
-        if (m_localNetState && m_localNetState->isDirty() && m_serverPeer) {
-            MemoryStream propStream;
-            m_localNetState->serializeDirty(propStream);
+        // 客户端：把所有「自己 owner」的对象的脏属性上报服务端，按可靠性分通道。
+        // 目前只有本地玩家一个 owner 对象，但泛化后新增 owner 对象无需再改这里。
+        if (m_serverPeer) {
+            for (auto& [id, obj] : m_objManager.allObjects()) {
+                if (obj->getOwnerId() != m_localPlayerId) continue;
+                if (!obj->isDirty()) continue;
 
-            if (propStream.size() > 0) {
-                auto msg = NetMessage::propertySync(m_localNetState->getNetId(), propStream);
-                std::vector<uint8_t> buf;
-                msg.encode(buf);
-                // 客户端位置全走不可靠通道
-                m_transport.sendUnreliable(m_serverPeer, buf.data(), buf.size());
+                MemoryStream rel, unrel;
+                obj->serializeDirtySplit(rel, unrel);
+
+                if (rel.size() > 0) {
+                    auto msg = NetMessage::propertySync(obj->getNetId(), rel);
+                    std::vector<uint8_t> buf;
+                    msg.encode(buf);
+                    m_transport.sendReliable(m_serverPeer, buf.data(), buf.size());
+                }
+                if (unrel.size() > 0) {
+                    auto msg = NetMessage::propertySync(obj->getNetId(), unrel);
+                    std::vector<uint8_t> buf;
+                    msg.encode(buf);
+                    m_transport.sendUnreliable(m_serverPeer, buf.data(), buf.size());
+                }
+                obj->clearDirty();
             }
-            m_localNetState->clearDirty();
         }
     }
 }
@@ -339,6 +385,10 @@ void NetManager::dispatchEvents() {
             if (it != m_peerToPlayer.end()) {
                 uint16_t pid = it->second;
                 printf("[NetManager] player %u disconnected\n", pid);
+                // 断开前持久化其背包（Host）
+                auto pit = m_players.find(pid);
+                if (pit != m_players.end())
+                    persistPlayerInventory(pid, pit->second->playerName);
                 m_objManager.destroyObject(pid);
                 m_players.erase(pid);
                 m_peerToPlayer.erase(it);
@@ -419,6 +469,22 @@ void NetManager::dispatchMessage(ENetPeer* peer, NetMessage& msg) {
     case NetMsgType::BLOCK_CHANGE:
         if (m_isHost) handleBlockChangeServer(peer, payload);
         else          handleBlockChangeClient(payload);
+        break;
+
+    case NetMsgType::WORLD_CMD:
+        if (m_isHost) handleWorldCmd(payload);
+        break;
+
+    case NetMsgType::INVENTORY_RESTORE:
+        if (!m_isHost) handleInventoryRestore(payload);
+        break;
+
+    // 通用游戏消息：交由 World 注册的处理器按类型分派（掉落物 spawn/despawn/同步/生成请求）
+    case NetMsgType::SPAWN_OBJECT:
+    case NetMsgType::DESTROY_OBJECT:
+    case NetMsgType::DROPPED_SYNC:
+    case NetMsgType::DROP_REQUEST:
+        if (m_gameMsgHandler) m_gameMsgHandler(msg.type, payload);
         break;
 
     default:
@@ -541,6 +607,20 @@ void NetManager::handleJoinRequest(ENetPeer* peer, MemoryStream& payload) {
         sendToAll(peer, msg, true);  // 排除新玩家自己
     }
 
+    // 背包恢复：从存档取该玩家背包，seed 服务端权威副本并发 INVENTORY_RESTORE 给客户端。
+    if (m_playerLoadCb) {
+        InventoryData savedInv;
+        if (m_playerLoadCb(playerName, savedInv)) {
+            if (auto* obj = m_objManager.findObject(newId))
+                static_cast<PlayerNetState*>(obj)->m_inventory = savedInv;
+            NetMessage invMsg(NetMsgType::INVENTORY_RESTORE);
+            NetTypeSerializer<InventoryData>::write(invMsg.payload, savedInv);
+            std::vector<uint8_t> invBuf;
+            invMsg.encode(invBuf);
+            m_transport.sendReliable(peer, invBuf.data(), invBuf.size());
+        }
+    }
+
     // 客户端增加 → 先扩大序列化线程池，再投递全量推送（pushAllChunks 会一次提交几百个 job）。
     updateSerializeThreadCount();
 
@@ -558,11 +638,19 @@ void NetManager::handlePropertySyncServer(ENetPeer* peer, MemoryStream& payload)
     NetObject* obj = m_objManager.findObject(netObjId);
     if (!obj) return;
 
-    // 反序列化属性
-    obj->deserialize(payload);
+    // 反序列化属性，记录实际应用到的 propId
+    std::vector<uint16_t> applied;
+    obj->deserialize(payload, &applied);
 
-    // 标记所有属性为脏，下一帧 collectDirty 会广播给其他客户端
-    obj->markAllDirty();
+    // 只把「本次真正变化 且 未标记 NO_REBROADCAST」的属性标脏，
+    // 下一帧 collectDirty 广播给其他客户端。
+    // NO_REBROADCAST 属性（如整背包）服务端应用/持久化但不外发，省带宽也不泄露。
+    for (uint16_t propId : applied) {
+        auto* prop = obj->getProperty(propId);
+        if (prop && !prop->hasFlag(NetObject::PROP_NO_REBROADCAST)) {
+            obj->markDirty(propId);
+        }
+    }
 }
 
 // ============================================================================
@@ -599,6 +687,7 @@ void NetManager::handleJoinAccept(MemoryStream& payload) {
     player->skinName = skinName;
     player->peer = nullptr;
     m_localNetState = player->netState.get();
+    m_localNetState->setOwnerId(m_localPlayerId);
     player->netState->setOwner(player.get());
     player->updateCachedPosition(glm::vec3(spawnX, spawnY, spawnZ));
     player->updateCachedLook(spawnYaw, 0.0f);
@@ -797,6 +886,9 @@ void NetManager::setChunkManager(ChunkManager* cm) {
     m_chunkManager = cm;
     m_chunkSync.init(cm, this);
 
+    // host / join 都在此创建世界状态对象（固定 netId，两端一致才能收发 PROPERTY_SYNC）
+    ensureWorldState();
+
     // 服务端：chunk 卸载时清除 per-peer 已推送记录，使玩家再次靠近能重新收到最新数据。
     if (m_isHost && cm) {
         cm->setChunkUnloadedCallback([this](int cx, int cz) {
@@ -866,6 +958,74 @@ void NetManager::handleBlockChangeServer(ENetPeer* peer, MemoryStream& payload) 
     int cx, cz;
     worldToChunkXZ(wx, wz, cx, cz);
     m_chunkSync.broadcastBlockChange(cx, cz, buf);
+}
+
+// ============================================================================
+// 世界命令（时间同步）
+// ============================================================================
+
+void NetManager::sendWorldCmd(WorldCmdType type, float param, bool reliable) {
+    if (m_isHost || !m_serverPeer) return;  // 只有客户端向服务端发请求
+    NetMessage msg(NetMsgType::WORLD_CMD);
+    msg.payload.writePod((uint8_t)type);
+    msg.payload.writePod(param);
+    std::vector<uint8_t> buf;
+    msg.encode(buf);
+    if (reliable) m_transport.sendReliable(m_serverPeer, buf.data(), buf.size());
+    else          m_transport.sendUnreliable(m_serverPeer, buf.data(), buf.size());
+}
+
+void NetManager::handleWorldCmd(MemoryStream& payload) {
+    if (payload.remaining() < sizeof(uint8_t) + sizeof(float)) return;
+    uint8_t t = payload.readPod<uint8_t>();
+    float p = payload.readPod<float>();
+    // 应用到权威时间源（World 注册的 handler → RenderSystem）。下一帧 mirror 会复制回所有端。
+    if (m_worldCmdHandler) m_worldCmdHandler((WorldCmdType)t, p);
+}
+
+// ============================================================================
+// 背包持久化
+// ============================================================================
+
+void NetManager::persistPlayerInventory(uint16_t playerId, const std::string& name) {
+    if (!m_playerPersistCb) return;
+    auto* obj = m_objManager.findObject(playerId);
+    if (!obj) return;
+    // playerId 对应的 NetObject 一定是 PlayerNetState（世界状态用独立保留 netId）
+    auto* ns = static_cast<PlayerNetState*>(obj);
+    m_playerPersistCb(name, ns->m_inventory);
+}
+
+void NetManager::handleInventoryRestore(MemoryStream& payload) {
+    NetTypeSerializer<InventoryData>::read(payload, m_restoredInventory);
+    m_hasRestoredInventory = true;
+}
+
+bool NetManager::takeRestoredInventory(InventoryData& out) {
+    if (!m_hasRestoredInventory) return false;
+    out = m_restoredInventory;
+    m_hasRestoredInventory = false;
+    return true;
+}
+
+// ============================================================================
+// 通用游戏消息收发（掉落物）
+// ============================================================================
+
+void NetManager::broadcast(NetMsgType type, MemoryStream& payload, bool reliable) {
+    NetMessage msg(type);
+    if (payload.size() > 0) msg.payload.writeBytes(payload.data(), payload.size());
+    sendToAll(msg, reliable);
+}
+
+void NetManager::sendToServer(NetMsgType type, MemoryStream& payload, bool reliable) {
+    if (m_isHost || !m_serverPeer) return;
+    NetMessage msg(type);
+    if (payload.size() > 0) msg.payload.writeBytes(payload.data(), payload.size());
+    std::vector<uint8_t> buf;
+    msg.encode(buf);
+    if (reliable) m_transport.sendReliable(m_serverPeer, buf.data(), buf.size());
+    else          m_transport.sendUnreliable(m_serverPeer, buf.data(), buf.size());
 }
 
 void NetManager::handleBlockChangeClient(MemoryStream& payload) {

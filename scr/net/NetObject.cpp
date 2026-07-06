@@ -32,12 +32,26 @@ void NetObject::serializeDirty(MemoryStream& s) {
     }
 }
 
-void NetObject::deserialize(MemoryStream& s) {
+void NetObject::serializeDirtySplit(MemoryStream& rel, MemoryStream& unrel,
+                                    bool skipNoRebroadcast) {
+    for (uint16_t propId : m_dirtyProps) {
+        if (propId >= m_properties.size()) continue;
+        auto& prop = m_properties[propId];
+        if (skipNoRebroadcast && prop.hasFlag(PROP_NO_REBROADCAST)) continue;
+        MemoryStream& s =
+            (prop.reliability == NetReliability::Reliable) ? rel : unrel;
+        s.writePod(propId);
+        prop.serialize(this, prop.offset, s);
+    }
+}
+
+void NetObject::deserialize(MemoryStream& s, std::vector<uint16_t>* applied) {
     while (s.remaining() >= sizeof(uint16_t)) {
         uint16_t propId = s.readPod<uint16_t>();
         if (propId >= m_properties.size()) break;
         auto& prop = m_properties[propId];
         prop.deserialize(this, prop.offset, s);
+        if (applied) applied->push_back(propId);
         if (prop.onRep) {
             prop.onRep(this);
         }

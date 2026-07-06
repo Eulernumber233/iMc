@@ -109,6 +109,10 @@ public:
     // 当前是否正在挥手
     bool isSwinging() const { return m_swingTimer > 0.0f; }
 
+    // 累计挥手次数：每次 triggerSwingArm 自增一次（含长按连续挥手的每一下）。
+    // 网络同步用其低字节作事件计数，接收端察觉变化即触发一次挥手，捕获所有挥动。
+    uint32_t getSwingCount() const { return m_swingCount; }
+
     // 读取当前帧的 pose
     const PlayerPose& getPose() const { return m_pose; }
 
@@ -140,4 +144,7 @@ private:
 
     // 挥手动画剩余时间（秒）；>0 表示正在挥手
     float m_swingTimer = 0.0f;
+
+    // 累计挥手次数（每 triggerSwingArm 自增），供网络事件计数
+    uint32_t m_swingCount = 0;
 };

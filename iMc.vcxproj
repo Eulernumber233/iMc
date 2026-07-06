@@ -246,6 +246,7 @@
   <ItemGroup>
     <None Include=".gitattributes" />
     <None Include=".gitignore" />
+    <None Include="assert\item_registry.json" />
     <None Include="assert\runtime_config.json" />
     <None Include="PropertySheet.props" />
     <None Include="PropertySheet_debug.props" />

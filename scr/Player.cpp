@@ -664,7 +664,8 @@ void Player::handleBlockInteraction(ChunkManager& chunkManager) {
         if (now - m_lastPlaceTime >= ACTION_COOLDOWN) {
             if (tryPlaceBlock(chunkManager)) {
                 m_lastPlaceTime = now;
-                m_animator.triggerSwingArm();
+                m_animator.triggerSwingArm();        // 第三人称 / 远程：复用挖方块那套挥手
+                if (m_model) m_model->triggerHandSwing();  // 第一人称手部：复用左键挥手动画
             }
         }
     }

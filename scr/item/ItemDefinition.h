@@ -2,6 +2,8 @@
 #include "../core.h"
 #include "../chunk/BlockType.h"
 #include <string>
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 // ── 物品数据资产（类 UE5 DataAsset）──────────────────────────────
 // 物品的"静态定义"：一份 JSON 条目对应一个 ItemDefinition，全局唯一，
@@ -29,6 +31,34 @@ enum class ItemModelType {
     EXTRUDED_2D,   // 逐像素挤出 2D 图标（默认，多数物品）
     BLOCK_CUBE,    // 直接渲染方块立方体（方块物品，v1 暂统一走 EXTRUDED_2D）
     CUSTOM_MODEL   // 外部模型文件（modelPath）
+};
+
+// ── 手持物摆放变换 ──────────────────────────────────────────────
+// 一套「平移 + 欧拉角(度) + 均匀缩放」。矩阵组合顺序与旧硬编码严格一致：
+//   T · Ry(yaw) · Rx(pitch) · Rz(roll) · S
+// 保证第一人称预设精确复刻原有观感（零回归）。
+struct HeldTransform {
+    glm::vec3 translation{0.0f};
+    glm::vec3 rotationDeg{0.0f};   // (x=pitch 绕X, y=yaw 绕Y, z=roll 绕Z)
+    float     scale = 1.0f;
+
+    glm::mat4 matrix() const {
+        glm::mat4 m(1.0f);
+        m = glm::translate(m, translation);
+        m = glm::rotate(m, glm::radians(rotationDeg.y), glm::vec3(0, 1, 0));
+        m = glm::rotate(m, glm::radians(rotationDeg.x), glm::vec3(1, 0, 0));
+        m = glm::rotate(m, glm::radians(rotationDeg.z), glm::vec3(0, 0, 1));
+        m = glm::scale(m, glm::vec3(scale));
+        return m;
+    }
+};
+
+// 一个物品在「手上」的两种上下文摆放：
+//   firstPerson —— 相机空间（+X 右 / +Y 上 / -Z 前），叠加挥手矩阵后画到屏幕。
+//   thirdPerson —— 挂到右臂「握持点」矩阵之后（自动跟随摆臂/挥手），再乘本变换。
+struct HeldItemDisplay {
+    HeldTransform firstPerson;
+    HeldTransform thirdPerson;
 };
 
 struct ItemDefinition {
@@ -60,3 +90,26 @@ struct ItemDefinition {
         return category == ItemCategory::BLOCK && blockType != BLOCK_AIR;
     }
 };
+
+// ── 手持摆放预设（模板层）──────────────────────────────────────
+// 按模型类型给默认摆放，对应旧 renderFirstPersonHand 里三段硬编码分支。
+// firstPerson 精确复刻旧值；thirdPerson 是新加的合理默认（可在 JSON 里 per-item 微调）。
+inline HeldItemDisplay defaultHeldDisplay(ItemModelType type) {
+    HeldItemDisplay d;
+    switch (type) {
+    case ItemModelType::CUSTOM_MODEL:
+        d.firstPerson = { glm::vec3(0.42f, -0.45f, -0.85f), glm::vec3(5.0f, -15.0f, 0.0f), 0.65f };
+        d.thirdPerson = { glm::vec3(0.0f, -0.20f, 0.05f),   glm::vec3(0.0f, 0.0f, 0.0f),   0.50f };
+        break;
+    case ItemModelType::BLOCK_CUBE:
+        d.firstPerson = { glm::vec3(0.55f, -0.55f, -1.0f), glm::vec3(25.0f, 35.0f, 0.0f), 0.55f };
+        d.thirdPerson = { glm::vec3(0.0f, -0.06f, 0.02f),  glm::vec3(0.0f, 0.0f, 0.0f),   0.42f };
+        break;
+    case ItemModelType::EXTRUDED_2D:
+    default:
+        d.firstPerson = { glm::vec3(0.55f, -0.55f, -1.0f), glm::vec3(-10.0f, 20.0f, 0.0f), 0.70f };
+        d.thirdPerson = { glm::vec3(0.0f, -0.14f, 0.04f),  glm::vec3(0.0f, 0.0f, 0.0f),    0.50f };
+        break;
+    }
+    return d;
+}

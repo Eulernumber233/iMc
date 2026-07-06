@@ -504,6 +504,36 @@ void PlayerModel::drawFirstPersonHand(Shader& shader, bool leftMousePressed, flo
     glBindVertexArray(0);
 }
 
+glm::mat4 PlayerModel::rightHandMatrix(const glm::vec3& worldPos, const PlayerPose& pose) const {
+    // 与 drawPosed 完全一致的根变换（世界位置 + 身体 yaw + 胯部枢轴前倾）
+    glm::mat4 root = glm::mat4(1.0f);
+    root = glm::translate(root, worldPos + pose.rootOffset);
+    root = glm::rotate(root, pose.bodyYaw, glm::vec3(0, 1, 0));
+
+    const glm::vec3 hipPivot = glm::vec3(0.0f, 12.0f / 16.0f, 0.0f);
+    glm::mat4 bodyTilt = glm::mat4(1.0f);
+    if (pose.bodyPitch != 0.0f) {
+        bodyTilt = glm::translate(bodyTilt, hipPivot);
+        bodyTilt = glm::rotate(bodyTilt, pose.bodyPitch, glm::vec3(1, 0, 0));
+        bodyTilt = glm::translate(bodyTilt, -hipPivot);
+    }
+
+    // RIGHT_ARM 分支：移到肩部 origin，绕肩枢轴做 pitch/roll（同 applyJointRotation）
+    glm::mat4 model = root * bodyTilt;
+    model = glm::translate(model, m_parts[RIGHT_ARM].origin);
+    glm::vec3 pv = m_parts[RIGHT_ARM].pivot;
+    if (pose.rightArmPitch != 0.0f || pose.rightArmRoll != 0.0f) {
+        model = glm::translate(model, pv);
+        if (pose.rightArmPitch != 0.0f) model = glm::rotate(model, pose.rightArmPitch, glm::vec3(1, 0, 0));
+        if (pose.rightArmRoll  != 0.0f) model = glm::rotate(model, pose.rightArmRoll,  glm::vec3(0, 0, 1));
+        model = glm::translate(model, -pv);
+    }
+
+    // 从肩部 origin 下移到手掌（臂底偏前）：臂高 12px，取约 11px 处、前移 2px（半深）
+    model = glm::translate(model, glm::vec3(0.0f, -11.0f / 16.0f, 2.0f / 16.0f));
+    return model;
+}
+
 GLuint PlayerModel::loadTexture(const std::string& path) {
     int width, height, channels;
     // MC 皮肤通常有透明通道，强制加载为 RGBA

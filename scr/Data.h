@@ -206,3 +206,6 @@ const float MAX_SHADOW_DISTANCE = 180.0f;
 const int CASCADE_COUNT = 4;
 // 每级联默认分辨率（可被 RuntimeConfig.csmShadowSize 覆盖）
 const int CSM_SHADOW_SIZE = 2048;
+
+// 长按计时阈值，单位秒。低于该值的按下事件视为点击。
+const float LONG_PRESS_SEC = 0.10f;

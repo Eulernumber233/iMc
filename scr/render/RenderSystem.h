@@ -116,6 +116,11 @@ public:
     float getWorldTime() const { return m_worldTimeHours; }
     bool  isSunMoving() const { return m_sunMoving; }
 
+    // 时间是否由外部（网络）驱动：客户端(Join)置 true，move_DirLight 不再自行推进时间，
+    // 只按外部 setWorldTime 设入的值算太阳。单机/Host 为 false（本地权威自行推进）。
+    void setTimeExternallyDriven(bool v) { m_timeExternallyDriven = v; }
+    bool isTimeExternallyDriven() const { return m_timeExternallyDriven; }
+
     // 粒子系统
     void toggleWeather() { m_particleManager.toggleWeather(); }
     void emitBlockDebris(const glm::vec3& blockPosition, BlockType blockType, int count = 50) {
@@ -206,6 +211,7 @@ private:
     float m_worldTimeHours = 12.0f;   // 当前世界时间 [0,24)，默认正午
     float m_timeScale      = 0.2f;    // 时间比例：1 现实秒 = 多少游戏小时（可负=倒流）
     bool  m_sunMoving      = true;    // 时间是否流动（l 切换；关 = 冻结时间）
+    bool  m_timeExternallyDriven = false; // true=时间由网络驱动（客户端），不本地推进
     static constexpr float kTimeScaleMax = 6.0f; // 比例上限（1 现实秒最多 6 游戏小时 → 4 秒一昼夜）
 
     // 白天->夜晚的强度系数 [0,1]，地平线附近平滑过渡
@@ -369,7 +375,15 @@ private:
         const glm::mat4& view, const glm::mat4& projection);
     void renderRemotePlayers(NetManager* netManager,
         const glm::mat4& view, const glm::mat4& projection,
-        const std::shared_ptr<Camera>& camera);
+        const std::shared_ptr<Camera>& camera, float deltaTime);
+
+    // 手持物品绘制（三处共用：第一人称 / 第三人称本机 / 远程玩家）。
+    // 按 def->modelType 选着色器（自定义 OBJ / 方块立方体 / 挤出 2D），用传入的
+    // model 矩阵（相机空间或世界空间均可）绘制。不改深度/帧缓冲，仅内部管理剔除并复原。
+    // itemLightDir：光方向（相机空间上下文传固定值，世界空间传场景 lightDir）。
+    void drawHeldItem(const struct ItemDefinition* def, const glm::mat4& model,
+        const glm::mat4& view, const glm::mat4& projection,
+        const glm::vec3& viewPos, const glm::vec3& itemLightDir);
 
     // 远程玩家模型（共享几何体，逐玩家设置变换矩阵）
     PlayerModel m_remotePlayerModel;
