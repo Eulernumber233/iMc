@@ -189,6 +189,10 @@ private:
     void handleJoinRequest(ENetPeer* peer, MemoryStream& payload);
     void handlePropertySyncServer(ENetPeer* peer, MemoryStream& payload);
 
+    // 远程玩家插值：若 applied 含位置属性，把该玩家当前状态压入其插值缓冲（服务端/客户端共用）。
+    void pushInterpSnapshotIfMoved(uint16_t netObjId, NetObject* obj,
+                                   const std::vector<uint16_t>& applied);
+
     // Handlers (客户端)
     void handleJoinAccept(MemoryStream& payload);
     void handleJoinDeny(MemoryStream& payload);

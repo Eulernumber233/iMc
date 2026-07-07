@@ -120,6 +120,8 @@ void RuntimeConfig::loadFrom(const std::string& path) {
     if (root.isMember("view_bob_scale")) viewBobScale = (float)root["view_bob_scale"].asDouble();
     if (root.isMember("view_bob_run_scale")) viewBobRunScale = (float)root["view_bob_run_scale"].asDouble();
     if (root.isMember("disable_ime")) disableIme = root["disable_ime"].asBool();
+    if (root.isMember("net_send_rate")) netSendRate = (float)root["net_send_rate"].asDouble();
+    if (root.isMember("net_interp_delay")) netInterpDelay = (float)root["net_interp_delay"].asDouble();
 
     std::cout << "[RuntimeConfig] loaded from " << path
               << " | render_radius=" << renderRadius

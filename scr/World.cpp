@@ -343,17 +343,31 @@ int World::run() {
         if (m_netManager && (m_netMode == NetMode::Host || m_netMode == NetMode::Join)) {
             auto* netState = m_netManager->getLocalNetState();
             if (netState) {
-                netState->setPosition(m_player->getPosition());
-                netState->setLook(camera->Yaw, camera->Pitch);
+                // 位置/朝向/运动：墙钟累加器按固定频率标脏（与帧率解耦）。接收端插值缓冲
+                // 依赖离散、间隔较大的快照才能延迟播放；每帧发（200Hz）既浪费带宽又让缓冲
+                // 跨度过短。发送频率由 runtime_config 的 net_send_rate 控制（热重载即时生效）。
+                // 挥手/背包在下方不受节流，事件发生即发。
+                float sendRate = RuntimeConfig::get().netSendRate;
+                if (sendRate < 1.0f) sendRate = 1.0f;    // 夹住，防 0/负值导致除零或不发
+                const float NET_SEND_INTERVAL = 1.0f / sendRate;
+                m_netSendAccum += deltaTime;
+                if (m_netSendAccum >= NET_SEND_INTERVAL) {
+                    // 累加器只扣一个间隔（不清零）：卡顿累积多份时下几帧连续补发，节奏不漂。
+                    m_netSendAccum -= NET_SEND_INTERVAL;
+                    if (m_netSendAccum > NET_SEND_INTERVAL) m_netSendAccum = NET_SEND_INTERVAL;  // 防长卡顿后爆发
 
-                // 运动状态（供远程端步态动画复现走/跑/蹲）
-                uint8_t flags = 0;
-                if (m_player->isOnGround())  flags |= PlayerFlagBits::ON_GROUND;
-                if (m_player->isCrouching()) flags |= PlayerFlagBits::CROUCHING;
-                if (m_player->isRunning())   flags |= PlayerFlagBits::RUNNING;
-                netState->setMotion(m_player->getVelocity(), flags);
+                    netState->setPosition(m_player->getPosition());
+                    netState->setLook(camera->Yaw, camera->Pitch);
 
-                // 挥手事件计数：本地动画器每挥一次自增，低字节变化才发（可靠通道）
+                    // 运动状态（供远程端步态动画复现走/跑/蹲 + 插值 Hermite 切线）
+                    uint8_t flags = 0;
+                    if (m_player->isOnGround())  flags |= PlayerFlagBits::ON_GROUND;
+                    if (m_player->isCrouching()) flags |= PlayerFlagBits::CROUCHING;
+                    if (m_player->isRunning())   flags |= PlayerFlagBits::RUNNING;
+                    netState->setMotion(m_player->getVelocity(), flags);
+                }
+
+                // 挥手事件计数：本地动画器每挥一次自增，低字节变化才发（可靠通道，即时不节流）
                 uint8_t swing = (uint8_t)m_player->getAnimator().getSwingCount();
                 if (swing != netState->m_swingCounter) {
                     netState->setSwingCounter(swing);

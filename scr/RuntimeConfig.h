@@ -100,6 +100,15 @@ public:
     // 超出此半径才真正落盘 + 卸载。调大 = 更省磁盘 IO/地形重生成，但占更多内存。
     int retainMarginChunks = 6;
 
+    // ---- 联机：远程玩家平滑（信任客户端模型的接收端插值）----
+    // 二者都每帧读取，故支持热重载即时调参。
+    // netSendRate：本地玩家位置/朝向/运动的网络发送频率（Hz，与帧率解耦）。太高浪费带宽、
+    //   让接收端插值缓冲跨度过短；太低则每步位移大、外推更频繁。25 是较稳的默认。
+    float netSendRate = 25.0f;
+    // netInterpDelay：远程玩家渲染落后最新快照的时间（秒），在真实快照间夹住做插值。
+    //   调大更抗网络抖动/丢包但对端显示更"过去"；约 2~3 个发送间隔为宜。
+    float netInterpDelay = 0.10f;
+
 private:
     RuntimeConfig() = default;
     void loadFrom(const std::string& path);

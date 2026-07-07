@@ -2084,22 +2084,33 @@ void RenderSystem::renderRemotePlayers(NetManager* netManager,
     for (const auto& [id, player] : players) {
         if (id == localId) continue;  // 跳过本地玩家
 
-        // 使用缓存的渲染位置（由 OnRep 回调或 join 消息设置）
-        glm::vec3 pos = player->getRenderPosition();
+        // 远程位置：优先用插值缓冲在 now-INTERP_DELAY 处采样（Hermite 平滑 + 丢包外推）。
+        // 首个位置快照到来前退回旧缓存（join 消息设置的出生点）。
+        glm::vec3 pos, vel;
+        float yawDeg, pitchDeg;
+        NetPlayer::InterpSample s;
+        double interpDelay = RuntimeConfig::get().netInterpDelay;  // 秒，热重载即时生效
+        if (player->hasInterpData() &&
+            player->sampleInterpolated(netNowSeconds() - interpDelay, s)) {
+            pos = s.pos; yawDeg = s.yaw; pitchDeg = s.pitch; vel = s.vel;
+        } else {
+            pos = player->getRenderPosition();
+            yawDeg = player->getRenderYaw();
+            pitchDeg = player->getRenderPitch();
+            vel = player->getRenderVelocity();
+        }
         // 跳过尚未收到位置同步的玩家
         if (pos.x == 0.0f && pos.y == 0.0f && pos.z == 0.0f) continue;
-        float yawDeg = player->getRenderYaw();
 
         // 用复制过来的运动状态驱动该玩家自己的动画器，复现走/跑/蹲/待机 + 挥手。
         // 动画器内部把 cameraYaw(度) 转成 bodyYaw（π/2 - radians），与本地第三人称一致。
-        glm::vec3 vel = player->getRenderVelocity();
         PlayerAnimator::Input in;
         in.horizontalVelocity = glm::vec3(vel.x, 0.0f, vel.z);
         in.onGround = player->isOnGround();
         in.crouching = player->isCrouching();
         in.running = player->isRunning();
         in.cameraYaw = yawDeg;
-        in.cameraPitch = player->getRenderPitch();
+        in.cameraPitch = pitchDeg;
         player->animator.update(deltaTime, in);
         const PlayerPose& idlePose = player->animator.getPose();
 

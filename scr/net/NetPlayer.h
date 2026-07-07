@@ -113,6 +113,37 @@ public:
         }
     }
 
+    // ── 远程玩家插值缓冲（信任客户端模型的接收端平滑）─────────────────
+    // 每收到一次位置同步就把 {到达时间, pos, yaw, pitch, vel} 压入环形缓冲；渲染时取
+    // renderTime = netNowSeconds() - INTERP_DELAY，在两个真实快照之间做 Hermite 插值
+    //（pos+vel 当切线，转弯圆滑、无需加速度）。缓冲耗尽（丢包）时用最后速度线性外推，
+    // 上限 MAX_EXTRAP 秒后冻结。局域网丢包率低 → 几乎全程在跑纯插值。
+    struct InterpSnapshot {
+        double t = 0.0;        // 到达时间（netNowSeconds），本地时钟插值轴
+        glm::vec3 pos{0.0f};
+        float yaw = 0.0f;
+        float pitch = 0.0f;
+        glm::vec3 vel{0.0f};
+    };
+    struct InterpSample {
+        glm::vec3 pos{0.0f};
+        float yaw = 0.0f;
+        float pitch = 0.0f;
+        glm::vec3 vel{0.0f};  // 采样点速度，供步态动画
+    };
+
+    // 插值延迟由 RuntimeConfig::netInterpDelay 提供（渲染端在调用 sampleInterpolated 前
+    // 用 now - 该延迟 算出 renderTime），故此处不再定义常量。
+    // 外推上限（秒）：缓冲耗尽时最多按最后速度外推这么久，超过则冻结，避免橡皮筋。
+    static constexpr double MAX_EXTRAP = 0.25;
+
+    // 收到位置同步时调用（NetManager 在 deserialize 后调），压入一个快照。
+    void pushInterpSnapshot(const glm::vec3& pos, float yaw, float pitch, const glm::vec3& vel);
+    // 在 renderTime 采样插值/外推结果。返回 false 表示尚无任何快照（调用方退回缓存位置）。
+    bool sampleInterpolated(double renderTime, InterpSample& out) const;
+    // 是否已有插值快照（无则 renderRemotePlayers 退回旧缓存路径）。
+    bool hasInterpData() const { return m_interpCount > 0; }
+
 private:
     glm::vec3 m_renderPos{0.0f};
     float m_renderYaw = 0.0f;
@@ -124,4 +155,15 @@ private:
     bool m_running = false;
     int  m_lastSwingByte = -1;  // -1 = 尚未收到过
     std::string m_heldItemId;   // 手持物 id 缓存
+
+    // 插值缓冲（环形）：按到达顺序写入，因 netNowSeconds 单调故物理顺序即时间有序。
+    static constexpr int INTERP_BUFFER_SIZE = 16;
+    InterpSnapshot m_interpBuf[INTERP_BUFFER_SIZE];
+    int m_interpCount = 0;   // 已填数量（<= SIZE）
+    int m_interpHead  = 0;   // 下一个写入的物理下标
+    // 逻辑下标 [0, count) → 物理下标（0=最旧, count-1=最新）
+    const InterpSnapshot& interpAt(int logical) const {
+        int phys = (m_interpHead - m_interpCount + logical + 2 * INTERP_BUFFER_SIZE) % INTERP_BUFFER_SIZE;
+        return m_interpBuf[phys];
+    }
 };

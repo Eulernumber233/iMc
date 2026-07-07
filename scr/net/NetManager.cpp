@@ -651,6 +651,22 @@ void NetManager::handlePropertySyncServer(ENetPeer* peer, MemoryStream& payload)
             obj->markDirty(propId);
         }
     }
+
+    // 若本次含位置更新，为对应远程玩家压入一个插值快照（Host 也要看别的客户端平滑移动）。
+    pushInterpSnapshotIfMoved(netObjId, obj, applied);
+}
+
+// 若 applied 含位置属性（propId 0），把该玩家当前 pos/yaw/pitch/vel 压入其插值缓冲。
+// netObjId==playerId 时才是玩家对象；本地玩家不入缓冲（本地用自身实时数据渲染）。
+void NetManager::pushInterpSnapshotIfMoved(uint16_t netObjId, NetObject* obj,
+                                           const std::vector<uint16_t>& applied) {
+    if (netObjId == m_localPlayerId) return;
+    bool moved = std::find(applied.begin(), applied.end(), (uint16_t)0) != applied.end();
+    if (!moved) return;
+    auto it = m_players.find(netObjId);
+    if (it == m_players.end()) return;
+    auto* ps = static_cast<PlayerNetState*>(obj);
+    it->second->pushInterpSnapshot(ps->m_position, ps->m_yaw, ps->m_pitch, ps->m_velocity);
 }
 
 // ============================================================================
@@ -796,8 +812,12 @@ void NetManager::handlePropertySyncClient(MemoryStream& payload) {
         return;
     }
 
-    obj->deserialize(payload);
+    std::vector<uint16_t> applied;
+    obj->deserialize(payload, &applied);
     obj->clearDirty();  // 远程对象不需要再往外同步
+
+    // 若本次含位置更新，为对应远程玩家压入一个插值快照。
+    pushInterpSnapshotIfMoved(netObjId, obj, applied);
 }
 
 void NetManager::handleChunkData(MemoryStream& payload) {

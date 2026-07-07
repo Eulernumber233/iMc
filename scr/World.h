@@ -105,6 +105,11 @@ private:
     void broadcastDroppedSync();                     // Host 定时批量同步位置/数量
     float m_droppedSyncTimer = 0.0f;                 // DROPPED_SYNC 节流计时
 
+    // 本地玩家位置/朝向/运动的网络发送节流：用墙钟累加器按固定频率发（与帧率解耦，
+    // 200fps 也只发 ~25Hz，省带宽；某帧卡顿也不丢 tick，累加器下帧补上）。接收端靠
+    // 插值缓冲 + 延迟播放吸收这个离散节奏。挥手/背包等事件属性不受此节流（照常即时发）。
+    float m_netSendAccum = 0.0f;
+
     // 区块管理器
     std::shared_ptr<ChunkManager> m_chunkManager;
 

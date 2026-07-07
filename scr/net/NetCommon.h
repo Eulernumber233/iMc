@@ -4,6 +4,16 @@
 #define ENET_IPV4_ONLY
 
 #include <cstdint>
+#include <chrono>
+
+// 单调时钟：返回自首次调用起的秒数（double）。远程玩家插值缓冲用它作为统一时间轴
+// —— 发送端节奏、网络抖动都被「按到达时间入缓冲 + 延迟播放」吸收，故用本地时钟即可，
+// 不需要两端时钟同步。接收端（NetManager 记录到达时间）与渲染端（RenderSystem 计算
+// renderTime = now - 插值延迟）都调它，保证同一时间轴。
+inline double netNowSeconds() {
+    static const auto epoch = std::chrono::steady_clock::now();
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - epoch).count();
+}
 
 namespace NetConstants {
 
