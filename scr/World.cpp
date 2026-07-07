@@ -646,8 +646,12 @@ void World::processKey(int key, int action) {
         }
         return;
     }
-    // 调试面板可见时，键盘不转发给游戏（ImGui 仍通过链式回调收到输入，可在面板里打字）。
-    // 仅放行 F1（上面已处理）。
+    // 调试面板打开时也放行 F3：方便一边开面板一边切第一/第三人称对照调 TRS。
+    if (key == GLFW_KEY_F3 && action == GLFW_PRESS && m_debugUI && m_debugUI->isVisible()) {
+        if (m_player) m_player->toggleThirdPerson();
+        return;
+    }
+    // 调试面板可见时，其余键盘不转发给游戏（ImGui 仍通过链式回调收到输入，可在面板里打字）。
     if (m_debugUI && m_debugUI->isVisible()) return;
 
     // ESC：背包开着则先关背包，否则退出

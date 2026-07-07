@@ -1,5 +1,6 @@
 ﻿#pragma once
 #include "ItemDefinition.h"
+#include "BlockItemModel.h"        // hasValidTextures（有效模型类型判定，与渲染一致）
 #include "../mode/PlayerModel.h"   // FirstPersonHandConfig
 #include "../HotReload.h"
 #include <json/json.h>
@@ -31,19 +32,20 @@ public:
     // 解析某物品最终摆放。返回引用指向稳定存储（m_profiles / m_builtin），可安全长借。
     const HeldItemDisplay& resolve(const ItemDefinition& def) {
         ensure();
+        ItemModelType eff = effectiveModelType(def);
         const std::string* prof = nullptr;
         auto it = m_itemProfile.find(def.id);
         if (it != m_itemProfile.end()) {
             prof = &it->second;
         } else {
-            const std::string& d = m_defaultProfile[(int)def.modelType];
+            const std::string& d = m_defaultProfile[(int)eff];
             if (!d.empty()) prof = &d;
         }
         if (prof) {
             auto pit = m_profiles.find(*prof);
             if (pit != m_profiles.end()) return pit->second;
         }
-        return m_builtin[(int)def.modelType];   // 兜底：内置预设
+        return m_builtin[(int)eff];   // 兜底：内置预设
     }
 
     // 第一人称手臂本体参数（含挥手时长/振幅）。
@@ -61,19 +63,20 @@ public:
     // 与 resolve 同样的优先级解析，但返回可变指针（永不为空：兜底到内置预设）。
     HeldItemDisplay* resolveMutable(const ItemDefinition& def) {
         ensure();
+        ItemModelType eff = effectiveModelType(def);
         const std::string* prof = nullptr;
         auto it = m_itemProfile.find(def.id);
         if (it != m_itemProfile.end()) {
             prof = &it->second;
         } else {
-            const std::string& d = m_defaultProfile[(int)def.modelType];
+            const std::string& d = m_defaultProfile[(int)eff];
             if (!d.empty()) prof = &d;
         }
         if (prof) {
             auto pit = m_profiles.find(*prof);
             if (pit != m_profiles.end()) return &pit->second;
         }
-        return &m_builtin[(int)def.modelType];
+        return &m_builtin[(int)eff];
     }
 
     // 供热重载：重新读 held_display.json。resolve() 返回的引用不跨帧持有
@@ -83,6 +86,17 @@ public:
 
 private:
     HeldDisplayRegistry() = default;
+
+    // 「有效模型类型」——与 RenderSystem::drawHeldItem 的渲染判定保持一致：
+    // 方块物品且有有效纹理层才画立方体（走 block 档案），否则退回其 model_type
+    // （多为 extruded_2d → flat；custom_model 保留）。关键：item_registry 里方块的
+    // model_type 一律填 extruded_2d（立方体由 isBlockItem 运行时决定），故 TRS 档案
+    // 选择绝不能只看 def.modelType，否则方块会渲染成立方体却套用 flat 摆放而错位。
+    ItemModelType effectiveModelType(const ItemDefinition& def) const {
+        if (def.isBlockItem() && BlockItemModel::hasValidTextures(def.blockType))
+            return ItemModelType::BLOCK_CUBE;
+        return def.modelType;
+    }
 
     void ensure() {
         if (!m_loaded) {

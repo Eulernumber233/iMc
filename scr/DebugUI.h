@@ -1,6 +1,6 @@
 ﻿#pragma once
 
-// 前向声明，避免在头文件里拖入 ImGui / GL / 物品定义
+
 struct GLFWwindow;
 struct ItemDefinition;
 

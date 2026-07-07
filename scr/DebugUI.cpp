@@ -70,45 +70,57 @@ void DebugUI::draw(const ItemDefinition* heldDef, int fbWidth, int fbHeight) {
 void DebugUI::buildPanels(const ItemDefinition* heldDef) {
     HeldDisplayRegistry& reg = HeldDisplayRegistry::instance();
 
-    ImGui::Begin("调试面板 (F1 开合)");
-    ImGui::TextUnformatted("held_display 实时调参：拖动数值即时生效");
+    ImGui::Begin("Debug Panel (F1)");
+    ImGui::TextUnformatted("held_display live tuning: drag values, applies instantly");
     ImGui::Separator();
 
-    if (ImGui::CollapsingHeader("第一人称手臂 arm", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::CollapsingHeader("First-person arm", ImGuiTreeNodeFlags_DefaultOpen)) {
         FirstPersonHandConfig& a = reg.armMutable();
         ImGui::DragFloat3("offset", &a.offset.x, 0.005f);
         ImGui::DragFloat("pitch", &a.pitch, 0.5f);
         ImGui::DragFloat("yaw",   &a.yaw,   0.5f);
         ImGui::DragFloat("roll",  &a.roll,  0.5f);
         ImGui::DragFloat("scale", &a.scale, 0.005f, 0.01f, 5.0f);
-        ImGui::SeparatorText("挥手");
+        ImGui::SeparatorText("Swing");
         ImGui::DragFloat("swing_duration",  &a.swingDuration, 0.005f, 0.01f, 2.0f);
         ImGui::DragFloat("swing_pitch_amp", &a.swingPitchAmp, 0.5f);
         ImGui::DragFloat("swing_roll_amp",  &a.swingRollAmp,  0.5f);
         ImGui::DragFloat("swing_lift",      &a.swingLift,     0.005f);
     }
 
-    if (ImGui::CollapsingHeader("当前手持物 first-person TRS", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::CollapsingHeader("Held item TRS", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (heldDef) {
-            ImGui::Text("物品 id: %s", heldDef->id.c_str());
+            ImGui::Text("item id: %s", heldDef->id.c_str());
             HeldItemDisplay* d = reg.resolveMutable(*heldDef);
+
+            // 第一人称（屏幕上手里那份）。"##fp" 后缀让 ImGui 的控件 ID 唯一（显示不出）。
+            ImGui::SeparatorText("First person (in hand, on screen)");
             HeldTransform& fp = d->firstPerson;
-            ImGui::DragFloat3("t 平移",  &fp.translation.x, 0.005f);
-            ImGui::DragFloat3("r 旋转(度)", &fp.rotationDeg.x, 0.5f);
-            ImGui::DragFloat("s 缩放",   &fp.scale, 0.005f, 0.01f, 5.0f);
-            ImGui::TextDisabled("注意：改的是该物品所用【档案】，共享此档案的物品会一起变");
+            ImGui::DragFloat3("t (translate)##fp",  &fp.translation.x, 0.005f);
+            ImGui::DragFloat3("r (rotate deg)##fp", &fp.rotationDeg.x, 0.5f);
+            ImGui::DragFloat("s (scale)##fp",       &fp.scale, 0.005f, 0.01f, 5.0f);
+
+            // 第三人称（挂右手骨骼，按 F3 切到第三人称才看得到效果）。
+            ImGui::SeparatorText("Third person (attached to right hand)");
+            HeldTransform& tp = d->thirdPerson;
+            ImGui::DragFloat3("t (translate)##tp",  &tp.translation.x, 0.005f);
+            ImGui::DragFloat3("r (rotate deg)##tp", &tp.rotationDeg.x, 0.5f);
+            ImGui::DragFloat("s (scale)##tp",       &tp.scale, 0.005f, 0.01f, 5.0f);
+
+            ImGui::TextDisabled("Tip: press F3 to toggle first/third person while tuning");
+            ImGui::TextDisabled("Note: edits the PROFILE this item uses; items sharing it change too");
         } else {
-            ImGui::TextDisabled("(当前空手：切到某个物品格再调 first-person 摆放)");
+            ImGui::TextDisabled("(Empty hand: select an item slot to tune placement)");
         }
     }
 
     ImGui::Separator();
-    if (ImGui::Button("输出当前值到控制台(JSON)")) {
+    if (ImGui::Button("Print values to console (JSON)")) {
         printValuesToConsole(heldDef);
     }
     ImGui::SameLine();
-    ImGui::Checkbox("ImGui 官方 Demo (学习用)", &m_showDemo);
-    ImGui::TextDisabled("改好后：把控制台输出的数值粘回 assert/held_display.json 即可持久化");
+    ImGui::Checkbox("ImGui Demo (learn)", &m_showDemo);
+    ImGui::TextDisabled("After tuning: paste console output back into assert/held_display.json");
 
     ImGui::End();
 }
@@ -118,7 +130,7 @@ void DebugUI::printValuesToConsole(const ItemDefinition* heldDef) {
     const FirstPersonHandConfig& a = reg.armMutable();
 
     std::ostringstream os;
-    os << "\n===== held_display 当前值（可粘回 assert/held_display.json）=====\n";
+    os << "\n===== held_display current values (paste into assert/held_display.json) =====\n";
     os << "\"arm\": {\n";
     os << "  \"offset\": [" << a.offset.x << ", " << a.offset.y << ", " << a.offset.z << "],\n";
     os << "  \"pitch\": " << a.pitch << ", \"yaw\": " << a.yaw
@@ -132,11 +144,17 @@ void DebugUI::printValuesToConsole(const ItemDefinition* heldDef) {
     if (heldDef) {
         HeldItemDisplay* d = reg.resolveMutable(*heldDef);
         const HeldTransform& fp = d->firstPerson;
-        os << "// 物品 \"" << heldDef->id << "\" 的 first-person 档案：\n";
+        const HeldTransform& tp = d->thirdPerson;
+        os << "// item \"" << heldDef->id << "\" profile (first + third):\n";
         os << "\"first\": {\n";
         os << "  \"t\": [" << fp.translation.x << ", " << fp.translation.y << ", " << fp.translation.z << "],\n";
         os << "  \"r\": [" << fp.rotationDeg.x << ", " << fp.rotationDeg.y << ", " << fp.rotationDeg.z << "],\n";
         os << "  \"s\": " << fp.scale << "\n";
+        os << "},\n";
+        os << "\"third\": {\n";
+        os << "  \"t\": [" << tp.translation.x << ", " << tp.translation.y << ", " << tp.translation.z << "],\n";
+        os << "  \"r\": [" << tp.rotationDeg.x << ", " << tp.rotationDeg.y << ", " << tp.rotationDeg.z << "],\n";
+        os << "  \"s\": " << tp.scale << "\n";
         os << "}\n";
     }
     std::cout << os.str() << std::endl;
