@@ -15,24 +15,84 @@ uniform mat4 invProjection;     // 深度 + 屏幕 UV → 视图空间
 uniform mat4 invView;           // 视图空间 → 世界空间
 
 // 光照参数（亮度/能量分配已在 CPU 端按昼夜算好折进下面两个颜色）：
-//   sunShineAmbient = 环境光颜色 * ambientWeight（始终保留的底光，含整体预算）
-//   sunShineDiffuse = 阳光色温色  * sunWeight（已含日照强度 sunIntensity + 总预算）
-// 详见 RenderSystem::lightingPass 的「光照能量分配」。
 uniform vec3 sunShineAmbient;
 uniform vec3 sunShineDiffuse;
 uniform vec3 sunShineDir;
 uniform vec3 sunShinePos;
-uniform float sunShineIntensity; // 保留兼容（=1.0）：日照强度已折进 sunShineDiffuse，shader 内不再二次乘
+uniform float sunShineIntensity; // 保留兼容（=1.0）
 
-// 阴影：阶段 2 已把 PCSS 计算 + 时域累积拆到独立 pass，这里只采样累积后的可见度。
-// shadowVisibility ∈ [0,1]：1=完全受光，0=完全阴影（已含软阴影 + 时域降噪）。
+// 阴影可见度
 uniform sampler2D shadowVisibility;
 uniform vec3 uViewPos;
 
-// AO 随昼夜淡出：AO 本质是"环境光被遮挡"，夜晚环境光弱而均匀，强 AO 会造成"没光却有阴影"。
-// aoStrength ∈ [0,1]：1=AO 全效（白天），接近 0=AO 几乎不起作用（夜晚保留弱底值）。
-// 由 CPU 端按日照强度算好传入；effectiveAO = mix(1.0, ao, aoStrength)。
+// AO 随昼夜淡出
 uniform float aoStrength;
+
+// ── 光照缓存（体素洪水填充块光照）─────────────────────────────────
+// binding=2: 所有 section 的光照数据拼成的扁平数组，每个 cell 为 packed RGBA8 uint
+layout(std430, binding = 2) readonly buffer LightCacheSSBO {
+    uint lightData[];        // 每 cell: R|G<<8|B<<16|A<<24
+};
+
+// binding=3: 相对 section 坐标 → lightData 偏移的查找表（-1 = 无数据）
+layout(std430, binding = 3) readonly buffer SectionMapSSBO {
+    int sectionOffsets[];    // 每 entry: lightData 中的基偏移，-1=无光
+};
+
+// 当前相机所在 section 的最小坐标（世界坐标/16 下取整），vec3 传入、shader 内转 ivec3
+uniform vec3 camSecMin;
+// section 坐标范围大小（各维度的 section 数）
+uniform vec3 camSecRange;
+
+// 从光缓存采样世界坐标位置的光照 RGB
+vec3 sampleLightCache(vec3 worldPos) {
+    // 转为整数 section 坐标
+    ivec3 camMin  = ivec3(camSecMin);
+    ivec3 camRange = ivec3(camSecRange);
+
+    // 计算所在 section 坐标
+    ivec3 sec;
+    sec.x = int(floor(worldPos.x / 16.0));
+    sec.y = int(floor(worldPos.y / 16.0));
+    sec.z = int(floor(worldPos.z / 16.0));
+
+    // 转为相对于相机 section 最小坐标的偏移
+    ivec3 rel = sec - camMin;
+
+    // 越界检查
+    if (rel.x < 0 || rel.x >= camRange.x ||
+        rel.y < 0 || rel.y >= camRange.y ||
+        rel.z < 0 || rel.z >= camRange.z)
+        return vec3(0.0);
+
+    // 一维查找表索引
+    int mapIdx = rel.x + rel.y * camRange.x + rel.z * camRange.x * camRange.y;
+
+    // 边界安全检查
+    if (mapIdx < 0 || mapIdx >= camRange.x * camRange.y * camRange.z)
+        return vec3(0.0);
+
+    int dataOffset = sectionOffsets[mapIdx];
+    if (dataOffset < 0) return vec3(0.0);  // 该 section 无光照数据
+
+    // Section 内局部坐标 (0..15)
+    ivec3 local;
+    local.x = int(mod(floor(worldPos.x), 16.0));
+    local.y = int(mod(floor(worldPos.y), 16.0));
+    local.z = int(mod(floor(worldPos.z), 16.0));
+    // 处理负数
+    local = (local + 16) % 16;
+
+    int cellIdx = dataOffset + local.x + local.z * 16 + local.y * 256;
+
+    // 边界检查（安全网）
+    if (cellIdx < 0) return vec3(0.0);
+
+    uint _packed = lightData[cellIdx];
+    return vec3(float(_packed & 0xFFu) / 255.0,
+                float((_packed >> 8) & 0xFFu) / 255.0,
+                float((_packed >> 16) & 0xFFu) / 255.0);
+}
 
 struct GBufferData {
     vec3 position;
@@ -75,21 +135,30 @@ void main() {
 
     vec3 dirLightDir = normalize(-sunShineDir);
     float dirDiff = max(dot(data.normal, dirLightDir), 0.0);
-    // 阳光直射项：sunShineDiffuse 已含 sunWeight（=日照强度×预算），此处不再乘 sunShineIntensity
+    // 阳光直射项：sunShineDiffuse 已含 sunWeight，不再乘 sunShineIntensity
     vec3 dirDiffuse = sunShineDiffuse * dirDiff * data.albedo;
 
-    // 阳光可见度：来自时域累积的阴影 pass（1=受光，0=阴影，已含软阴影 + 夜晚处理）。
+    // 阳光可见度：来自时域累积的阴影 pass（1=受光，0=阴影，已含软阴影）
     float visibility = texture(shadowVisibility, vTexCoord).r;
     vec3 dirLightResult = visibility * dirDiffuse;
 
-    // 环境光底光：sunShineAmbient 已含 ambientWeight，乘 AO 做接触遮蔽。
-    // 这是「未被阳光直射处」的主要亮度来源——调 ambient_day/ambient_night 即可提亮阴影/清晨暗部。
-    // AO 随昼夜淡出：夜晚把 AO 拉向 1.0（弱化遮蔽），消除"没光却有强阴影"的违和感。
+    // 环境光底光：sunShineAmbient 已含 ambientWeight，乘 AO 做接触遮蔽
     float ao = texture(aoTex, vTexCoord).r;
     float effectiveAO = mix(1.0, ao, aoStrength);
     vec3 ambient = sunShineAmbient * data.albedo * effectiveAO;
 
-    vec3 result = ambient + dirLightResult;
+    // ── 块光照（体素洪水填充）─────────────────────────────────────
+    // 沿法线向"外侧"偏移采样，确保采样的是面朝外的空气格而不是方块自身格。
+    // 偏移 0.01 足够跨过面边界（面在整数格边界上），同时又不影响 cell 归属。
+    vec3 samplePos = data.position + data.normal * 0.01;
+    vec3 blockLight = sampleLightCache(samplePos);
+    // 块光照也受 AO 遮蔽（近方块内部光线被遮挡）
+    vec3 blockLightResult = blockLight * data.albedo * effectiveAO;
+
+    // 自发光（直接来源于 G-Buffer 的 emissive 分量）
+    vec3 emissiveResult = data.albedo * data.emissive;
+
+    vec3 result = ambient + dirLightResult + blockLightResult + emissiveResult;
 
     FragColor = vec4(result, 1.0);
 }

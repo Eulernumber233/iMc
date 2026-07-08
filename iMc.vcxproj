@@ -164,6 +164,9 @@
     <ClCompile Include="scr\item\ItemFactory.cpp" />
     <ClCompile Include="scr\item\ItemModel.cpp" />
     <ClCompile Include="scr\item\BlockItemModel.cpp" />
+    <ClCompile Include="scr\light\LightSource.cpp" />
+    <ClCompile Include="scr\light\LightCache.cpp" />
+    <ClCompile Include="scr\light\LightPropagation.cpp" />
     <ClCompile Include="scr\entity\DroppedItemManager.cpp" />
     <ClCompile Include="scr\save\ChunkSaveManager.cpp" />
     <ClCompile Include="scr\save\RegionFile.cpp" />
@@ -202,6 +205,9 @@
     <ClInclude Include="scr\chunk\BlockBox.h" />
     <ClInclude Include="scr\enet\enet.h" />
     <ClInclude Include="scr\item\HeldDisplayRegistry.h" />
+    <ClInclude Include="scr\light\LightSource.h" />
+    <ClInclude Include="scr\light\LightCache.h" />
+    <ClInclude Include="scr\light\LightPropagation.h" />
     <ClInclude Include="scr\RuntimeConfig.h" />
     <ClInclude Include="scr\Profiler.h" />
     <ClInclude Include="scr\chunk\BlockType.h" />

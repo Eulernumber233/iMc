@@ -11,6 +11,9 @@
 #include "ChunkArena.h"
 #include "ChunkWorkerPool.h"
 #include "../Camera.h"
+#include "../light/LightSource.h"
+#include "../light/LightCache.h"
+#include "../light/LightPropagation.h"
 #include <mutex>
 
 using ChunkKey = int64_t;
@@ -34,6 +37,8 @@ class ChunkSaveManager;
 struct BlockReadyEntry {
     ChunkBoxes boxes;               // 16 个 section 的方块数据 + 锁（见 BlockBox.h）
     uint8_t neighborBlockReady = 0; // 4-bit: bit[i]=1 表示 m_neighbors[i] 方向已完成 Task 1
+    std::vector<LightSource> lightSources; // Task 1 worker 扫描到的发光方块（主线程注册后用）
+    ChunkLightData sectionLightData; // Task 1 区块内 BFS 结果（shared_ptr 共享）
 };
 
 class ChunkManager {
@@ -95,6 +100,23 @@ public:
     bool setBlock(const glm::ivec3& worldPos, BlockState state);
     BlockState getBlockAt(const glm::ivec3& worldPos);
 
+    // ── 光源管理 ──────────────────────────────────────────────────
+    // 光照缓存管理器（每 section 的 RGB 光照值，供 GPU 延迟光照采样）
+    LightCacheManager& getLightCache() { return m_lightCache; }
+    const LightCacheManager& getLightCache() const { return m_lightCache; }
+
+    // 方块变动后触发增量光照更新（仅重传播 affected 区域）
+    void notifyLightChange(const glm::ivec3& worldPos);
+
+    // 每帧调用：处理待定的光照变化并上传到 GPU
+    void updateLighting();
+
+    // 区块加载后扫描注册其内部发光方块（emissive > 0），并触发重传播
+    void registerChunkLightSources(class Chunk* chunk);
+
+    // 区块卸载前移除其光源注册并清理光照缓存
+    void unregisterChunkLightSources(const glm::ivec2& chunkPos);
+
     // 网络统一点修改入口：把一次方块改动应用到本地权威数据。
     //  - chunk 在 LOADED：走 setBlock 改面 + 标脏（GPU 增量 patch 自动跟上）
     //  - chunk 在 BLOCK_READY：直接改对应 box（持写锁），并记入待存盘集合
@@ -132,6 +154,13 @@ public:
     // 使玩家再次靠近时能重新推送最新数据）。
     void setChunkUnloadedCallback(std::function<void(int, int)> fn) {
         m_onChunkUnloaded = std::move(fn);
+    }
+
+    // 方块变动通知回调：本地方块真正被修改后触发，参数为
+    //   (worldPos, oldState, newState)
+    // 供光源注册表等子系统监听方块变动。
+    void setBlockChangedCallback(std::function<void(const glm::ivec3&, BlockState, BlockState)> fn) {
+        m_onBlockChanged = std::move(fn);
     }
 
     // 强制加载 chunk（服务端按需响应 CHUNK_REQUEST）
@@ -184,10 +213,9 @@ private:
     // Worker 池
     ChunkWorkerPool m_workerPool;
 
-    // Task 1 结果队列（从 worker drain 出来，按帧配额消化）
-    std::deque<BlockDataResult> m_pendingBlockData;
-    // Task 2 结果队列
-    std::deque<ChunkBuildResult> m_pendingMeshResults;
+    // Task 1 / Task 2 结果队列（unique_ptr 避免在队列间 move 大对象）
+    std::deque<std::unique_ptr<BlockDataResult>> m_pendingBlockData;
+    std::deque<std::unique_ptr<ChunkBuildResult>> m_pendingMeshResults;
 
     // 渲染数据缓冲区管理
     ChunkArena m_arena;
@@ -281,11 +309,17 @@ private:
     // chunk 卸载回调（见 setChunkUnloadedCallback）
     std::function<void(int, int)> m_onChunkUnloaded;
 
+    // 方块变动通知回调（见 setBlockChangedCallback）
+    std::function<void(const glm::ivec3&, BlockState, BlockState)> m_onBlockChanged;
     // setBlock 的真正本地实现（绕过 sink，供 sink 内部 / applyBlockChange 调用）
     bool applyLocalSetBlock(const glm::ivec3& worldPos, BlockState state);
 
     // 是否需要扫描缺失 chunk
     bool m_needChunkScan = true;
+
+    // ── 光源系统 ──────────────────────────────────────────────────
+    LightCacheManager m_lightCache;                // 每 section 光照缓存（GPU SSBO 管理）
+    std::vector<glm::ivec3> m_pendingLightChanges; // 待处理的增量光照变动位置
 
     // 可见性缓存版本号
     uint32_t m_visGeneration = 1;

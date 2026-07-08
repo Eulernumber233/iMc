@@ -143,6 +143,14 @@ int World::run() {
     m_chunkManager->initialize(RuntimeConfig::get().renderRadius, m_player->getCamera()->Position);
     m_chunkManager->printStats();
 
+    // 方块变动回调：光源注册已在 applyLocalSetBlock 内直接处理，
+    // 此处仅保留存档标记等额外逻辑的扩展点
+    m_chunkManager->setBlockChangedCallback(
+        [this](const glm::ivec3& pos, BlockState oldState, BlockState newState) {
+            // 光源注册与光照重传播已在 ChunkManager::applyLocalSetBlock 中处理
+            // 此处可扩展联网方块同步等额外逻辑
+        });
+
     // 网络：连接 ChunkManager（必须在 ChunkManager 创建后）
     if (m_netManager) {
         m_netManager->setChunkManager(m_chunkManager.get());
@@ -422,6 +430,9 @@ int World::run() {
 
         // 更新区块管理器（根据玩家位置更新可见区块）
         m_chunkManager->update(camera);
+
+        // 光照传播与 GPU 上传（在区块更新之后、渲染之前）
+        m_chunkManager->updateLighting();
 
         // 更新掉落物（物理 + 拾取）。背包开启时仍继续，使「光标腾出一格后可继续吸附」
         // 的交互（需求 4）成立，且与 MC 单机一致。

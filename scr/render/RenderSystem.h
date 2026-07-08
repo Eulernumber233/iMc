@@ -352,7 +352,8 @@ private:
     // 时域累积：重投影历史 + 邻域 clamp + 混合 → m_shadowAccum[curr]
     void shadowAccumulatePass(const glm::mat4& invViewProj, const glm::mat4& prevViewProj);
     void lightingPass(const std::shared_ptr<Camera>camera,
-        const glm::mat4& view, const glm::mat4& projection);
+        const glm::mat4& view, const glm::mat4& projection,
+        const class ChunkManager& chunkManager);
     void renderOutlines(const glm::mat4& view, const glm::mat4& projection);
     void renderUI();
     // 掉落物：用挤出模型 / 方块立方体 + item 着色器在世界空间绘制

@@ -4,9 +4,12 @@
 #include "BlockBox.h"
 #include "ChunkDimensions.h"
 #include "Section.h"
+#include "../light/LightSource.h"
+#include "../light/LightCache.h"  // SectionLightData / ChunkLightData 类型
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -23,26 +26,35 @@ static constexpr int CHUNK_SECTION_COUNT =
 
 // ChunkBoxes 定义见 BlockBox.h
 
-// Task 1 输出：仅方块数据（按 section 切分为 BlockBox），无 mesh
+// Task 1 输出：方块数据 + 光源列表 + 区块内光照（无 mesh）
+// 光照用 shared_ptr<SectionLightData> 共享，与 BlockBox 的 shared_ptr 模式一致，避免拷贝。
 struct BlockDataResult {
     glm::ivec2 pos;
-    ChunkBoxes boxes; // 16 个 section 的方块数据 + 锁
+    ChunkBoxes boxes;                             // 16 个 section 的方块数据 + 锁（shared_ptr）
+    std::vector<LightSource> lightSources;        // Task 1 扫描到的发光方块（供主线程注册）
+    ChunkLightData sectionLightData;              // Task 1 区块内 BFS 结果（shared_ptr 共享）
 };
 
-// Task 2 输入：自身 + 4 横向邻居的 BlockBox（共享指针）
-//  - self：自身 16 个 box，Task 2 直接共享给生成出来的 Section（零拷贝）
-//  - neighbor：邻居 16 个 box，worker 持读锁拷出边界层。缺失方向为空数组（box 为 nullptr）
+// Task 2 输入：自身 + 4 横向邻居的 BlockBox（shared_ptr）+ 光照数据
+// 光照和方块数据均用 shared_ptr 共享，拷贝 MeshBuildInput 仅拷贝指针（与 ChunkBoxes 一致）。
 struct MeshBuildInput {
     glm::ivec2 pos;
-    ChunkBoxes self;
-    ChunkBoxes neighbors[4]; // ±X/±Z；某方向缺失则其内各 shared_ptr 为 nullptr
+    ChunkBoxes self;            // 自身方块数据（shared_ptr 共享）
+    ChunkBoxes neighbors[4];    // 邻居方块数据（缺失方向各 ptr 为 nullptr）
+    ChunkLightData selfLightData; // Task 1 区块内 BFS 结果（shared_ptr 共享）
+    // 邻居边界光照层：neighborBoundaryLight[d][sy] = 邻居 d 的 section sy 边界 16×16 RGBA8
+    // +X→邻居 x=0 面：[y*16+z]；-X→邻居 x=15 面：[y*16+z]；
+    // +Z→邻居 z=0 面：[y*16+x]；-Z→邻居 z=15 面：[y*16+x]。
+    // 每个边界层仅 256 个 uint32_t（1KB），4×16=64 层共 64KB，体量小故保留值拷贝。
+    std::array<std::array<std::vector<uint32_t>, CHUNK_SECTION_COUNT>, 4> neighborBoundaryLight;
 };
 
-// Task 2 输出：含完整可见面（内部 + 全部边界）的 section 数组
+// Task 2 输出：含完整可见面的 section 数组 + 每 section 的最终光照（shared_ptr 共享）
 struct ChunkBuildResult {
     glm::ivec2 pos;
     static constexpr int SECTION_COUNT = ChunkConstants::CHUNK_HEIGHT / Section::HEIGHT;
     std::array<Section, SECTION_COUNT> sections;
+    ChunkLightData sectionLightData; // Task 2 产出最终光照（shared_ptr 共享）
 };
 
 class ChunkWorkerPool {
@@ -65,10 +77,10 @@ public:
     // 与 JOB_BUILD 同构——主线程 drainBlockData / integrateBlockData 直接复用，无需单独集成路径。
     void submitNetImport(int chunkX, int chunkZ, std::vector<uint8_t>&& serialized);
 
-    // 主线程每帧调用：拿出已完成的 Task 1 结果
-    std::vector<BlockDataResult> drainBlockData();
+    // 主线程每帧调用：拿出已完成的 Task 1 结果（unique_ptr 避免 move 大对象）
+    std::vector<std::unique_ptr<BlockDataResult>> drainBlockData();
     // 主线程每帧调用：拿出已完成的 Task 2 结果
-    std::vector<ChunkBuildResult> drainMeshResults();
+    std::vector<std::unique_ptr<ChunkBuildResult>> drainMeshResults();
 
     // 当前队列待处理任务数
     int pendingCount() const { return m_pending.load(std::memory_order_relaxed); }

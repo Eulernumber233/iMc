@@ -94,7 +94,8 @@
       "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /t:Build /p:Configuration=Debug /p:Platform=x64 /m /nologo /v:minimal 2>&1 | Select-Object -Last 15)",
       "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /t:Build /p:Configuration=Debug /p:Platform=x64 /m /nologo /v:minimal 2>&1 | Select-Object -Last 20)",
       "PowerShell(Get-Command *)",
-      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Debug /p:Platform=x64 /m /v:minimal 2>&1)"
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Debug /p:Platform=x64 /m /v:minimal 2>&1)",
+      "PowerShell(taskkill *)"
     ],
     "additionalDirectories": [
       "e:\\opengl\\iMc\\scr"

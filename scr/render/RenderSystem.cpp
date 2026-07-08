@@ -1191,7 +1191,7 @@ void RenderSystem::render(const ChunkManager& chunkManager,
 
     // 4. 光照通道：计算结果到 lightingFBO（读取累积后的阴影可见度）
     //    深度由 geoProj（抖动）写入，故位置重建必须用同一 geoProj 的逆，否则世界坐标有偏移
-    { PROFILE_SCOPE("lightingPass"); lightingPass(camera, view, geoProj); }
+    { PROFILE_SCOPE("lightingPass"); lightingPass(camera, view, geoProj, chunkManager); }
 
     // 5. 将光照颜色复制到合成 FBO
     //    深度无需 blit：compositeFBO 直接共享 G-Buffer 的深度纹理
@@ -1714,7 +1714,8 @@ void RenderSystem::shadowAccumulatePass(const glm::mat4& invViewProj, const glm:
 
 
 void RenderSystem::lightingPass(const std::shared_ptr<Camera>camera
-    , const glm::mat4& view, const glm::mat4& projection) {
+    , const glm::mat4& view, const glm::mat4& projection,
+    const ChunkManager& chunkManager) {
     glBindFramebuffer(GL_FRAMEBUFFER, m_lightingFBO);
     glViewport(0, 0, m_screenWidth, m_screenHeight);
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
@@ -1736,6 +1737,16 @@ void RenderSystem::lightingPass(const std::shared_ptr<Camera>camera
     glBindTexture(GL_TEXTURE_2D, m_hbaoColorBufferBlur);
     glActiveTexture(GL_TEXTURE5);
     glBindTexture(GL_TEXTURE_2D, m_shadowAccum[m_shadowAccumCurrIdx]); // 时域累积后的阴影可见度
+
+    // ── 绑定光照缓存 SSBO ──────────────────────────────────────────
+    const auto& lightCache = chunkManager.getLightCache();
+    lightCache.bindSSBOs();
+
+    // 设置 section 查找范围（供着色器将世界坐标映射到 section 偏移表）
+    glm::ivec3 secMin  = lightCache.getCachedCameraSecMin();
+    glm::ivec3 secRange = lightCache.getCachedCameraSecRange();
+    m_deferredLightingShader.setVec3("camSecMin", glm::vec3(secMin));
+    m_deferredLightingShader.setVec3("camSecRange", glm::vec3(secRange));
 
     // 从深度重建位置所需的逆矩阵
     m_deferredLightingShader.setMat4("invProjection", glm::inverse(projection));
