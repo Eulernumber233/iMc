@@ -87,6 +87,18 @@
                 "r": [ -7, -89.5, -3 ],
                 "s": 0.435
             }
+        },
+        "torch": {
+            "first": {
+                "t": [ 0.675, -0.89, -1.05 ],
+                "r": [ 11, -1.5, 13.5 ],
+                "s": 1.175
+            },
+            "third": {
+                "t": [ 0.03, -0.025, -0.055 ],
+                "r": [ 0, -84.5, -39.5 ],
+                "s": 0.825
+            }
         }
     },
 
@@ -105,6 +117,8 @@
         "iron_sword": "tool",
         // "diamond_axe": "tool",
         // "diamond_pickaxe": "tool"
-        "stick": "stick"
+        "stick": "stick",
+        "torch": "torch",
+        "redstone_torch": "torch"
     }
 }

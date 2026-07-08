@@ -92,7 +92,9 @@
       "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /t:Build /p:Configuration=Debug /p:Platform=x64 /v:minimal /nologo 2>&1 | Select-String -Pattern \"error|错误|LNK[0-9]{4}|无法打开\" | Select-Object -First 20; Write-Output \"EXITCODE=$LASTEXITCODE\")",
       "PowerShell($enc = New-Object System.Text.UTF8Encoding\\($true\\); $p = \"E:\\\\opengl\\\\iMc\\\\scr\\\\DebugUI.cpp\"; $t = [System.IO.File]::ReadAllText\\($p\\); $t = $t -replace \"`r`n\",\"`n\" -replace \"`n\",\"`r`n\"; [System.IO.File]::WriteAllText\\($p, $t, $enc\\); $g = Get-Process -Name iMc -ErrorAction SilentlyContinue; if \\($g\\) { Write-Output \"NOTE: iMc still running \\(PID $\\($g.Id -join ','\\)\\)\" } else { Write-Output \"iMc not running\" }; & \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /t:Build /p:Configuration=Debug /p:Platform=x64 /v:minimal /nologo 2>&1 | Select-String -Pattern \"error C|error LNK|错误|MSB3073|EXITCODE\" | Select-Object -First 20; Write-Output \"EXITCODE=$LASTEXITCODE\")",
       "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /t:Build /p:Configuration=Debug /p:Platform=x64 /m /nologo /v:minimal 2>&1 | Select-Object -Last 15)",
-      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /t:Build /p:Configuration=Debug /p:Platform=x64 /m /nologo /v:minimal 2>&1 | Select-Object -Last 20)"
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /t:Build /p:Configuration=Debug /p:Platform=x64 /m /nologo /v:minimal 2>&1 | Select-Object -Last 20)",
+      "PowerShell(Get-Command *)",
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Debug /p:Platform=x64 /m /v:minimal 2>&1)"
     ],
     "additionalDirectories": [
       "e:\\opengl\\iMc\\scr"

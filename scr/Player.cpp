@@ -1035,6 +1035,7 @@ void Player::initDefaultItems() {
     give(4, "spyglass", 1);
     give(5, "diamond_sword", 1);
     give(6, "apple", 5);
-    give(7, "diamond", 12);
-    give(8, "stick", 1);   // 数量 1 不显示角标
+    give(7, "torch", 64);
+    give(8, "glowstone", 64);
+    give(9, "redstone_torch", 64);
 }

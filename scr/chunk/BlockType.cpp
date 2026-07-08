@@ -62,6 +62,14 @@ void BlockFaceType::init_type_map()
     type_to_texture[{ BLOCK_WOOD, FRONT }] = texMgr->GetTextureLayerIndex("oak_log");
     type_to_texture[{ BLOCK_WOOD, BACK }] = texMgr->GetTextureLayerIndex("oak_log");
 
+    // glowstone（萤石：六面同纹理，自发光方块）
+    type_to_texture[{ BLOCK_GLOWSTONE, RIGHT }] = texMgr->GetTextureLayerIndex("glowstone");
+    type_to_texture[{ BLOCK_GLOWSTONE, LEFT }] = texMgr->GetTextureLayerIndex("glowstone");
+    type_to_texture[{ BLOCK_GLOWSTONE, UP }] = texMgr->GetTextureLayerIndex("glowstone");
+    type_to_texture[{ BLOCK_GLOWSTONE, DOWN }] = texMgr->GetTextureLayerIndex("glowstone");
+    type_to_texture[{ BLOCK_GLOWSTONE, FRONT }] = texMgr->GetTextureLayerIndex("glowstone");
+    type_to_texture[{ BLOCK_GLOWSTONE, BACK }] = texMgr->GetTextureLayerIndex("glowstone");
+
     // 带轴方块的"侧面层 / 端面层"查表。
     //   side_layer_by_type[t] >= 0  → 该方块走"带轴渲染路径"：CPU 端往 InstanceData 写 sideLayer，
     //                                  shader 端按 orient 在 sideLayer / endLayer 间切换。

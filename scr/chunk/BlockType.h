@@ -15,6 +15,7 @@ enum BlockType : uint8_t {
     BLOCK_SAND = 5,
     BLOCK_WOOD = 6,
     BLOCK_LEAVES = 7,
+    BLOCK_GLOWSTONE = 8,  // 萤石（自发光方块）
     BLOCK_COUNT  // 方块类型总数
 };
 enum BlockFace :uint8_t {
@@ -206,6 +207,7 @@ inline const char* GetBlockName(BlockType type) {
     case BLOCK_SAND:  return "Sand";
     case BLOCK_WOOD:  return "Wood";
     case BLOCK_LEAVES:return "Leaves";
+    case BLOCK_GLOWSTONE:return "Glowstone";
     default:          return "Unknown";
     }
 }
@@ -238,6 +240,8 @@ inline BlockProperties GetBlockProperties(BlockType type) {
         return { false, true,  true,  glm::vec3(0.5f, 0.35f, 0.2f), 0.0f };
     case BLOCK_LEAVES:
         return { true,  true,  false, glm::vec3(0.2f, 0.5f, 0.2f), 0.0f };
+    case BLOCK_GLOWSTONE:
+        return { false, true,  false, glm::vec3(1.0f, 0.95f, 0.65f), 1.0f };  // 暖黄色自发光
     default:
         return { false, true,  false, glm::vec3(1.0f, 0.0f, 1.0f), 0.0f }; // 错误颜色
     }

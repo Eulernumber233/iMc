@@ -9071,5 +9071,49 @@
     "block_type": "air",
     "behavior": "generic",
     "load_in_debug": false
+  },
+  {
+    "id": "torch",
+    "display_name": "Torch",
+    "icon_name": "torch",
+    "icon": "assert/minecraft/textures/block/torch.png",
+    "category": "misc",
+    "max_stack": 64,
+    "has_durability": false,
+    "max_durability": 0,
+    "model_type": "custom_model",
+    "model_path": "assert/mode/template_torch/template_torch.obj",
+    "block_type": "air",
+    "behavior": "generic",
+    "load_in_debug": true
+  },
+  {
+    "id": "redstone_torch",
+    "display_name": "Redstone Torch",
+    "icon_name": "redstone_torch",
+    "icon": "assert/minecraft/textures/block/redstone_torch.png",
+    "category": "misc",
+    "max_stack": 64,
+    "has_durability": false,
+    "max_durability": 0,
+    "model_type": "custom_model",
+    "model_path": "assert/mode/template_redstone_torch/template_redstone_torch.obj",
+    "block_type": "air",
+    "behavior": "generic",
+    "load_in_debug": true
+  },
+  {
+    "id": "glowstone",
+    "display_name": "Glowstone",
+    "icon_name": "glowstone",
+    "icon": "assert/minecraft/textures/block/glowstone.png",
+    "category": "block",
+    "max_stack": 64,
+    "has_durability": false,
+    "max_durability": 0,
+    "model_type": "extruded_2d",
+    "block_type": "glowstone",
+    "behavior": "block",
+    "load_in_debug": true
   }
 ]

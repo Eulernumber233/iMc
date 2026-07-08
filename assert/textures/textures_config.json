@@ -12,6 +12,17 @@
             "mag_filter": "nearest"
         },
         {
+            "name": "glowstone",
+            "path": "../minecraft/textures/block/glowstone.png",
+            "category": "block",
+            "is_srgb": false,
+            "index": 2,
+            "wrap_s": "repeat",
+            "wrap_t": "repeat",
+            "min_filter": "nearest_mipmap_nearest",
+            "mag_filter": "nearest"
+        },
+        {
             "name": "crosshair_1",
             "path": "UI/crosshair_1.png",
             "category": "ui",

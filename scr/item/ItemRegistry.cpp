@@ -32,6 +32,7 @@ static BlockType parseBlockType(const std::string& s) {
     if (s == "sand")   return BLOCK_SAND;
     if (s == "wood")   return BLOCK_WOOD;
     if (s == "leaves") return BLOCK_LEAVES;
+    if (s == "glowstone") return BLOCK_GLOWSTONE;
     return BLOCK_AIR;
 }
 
