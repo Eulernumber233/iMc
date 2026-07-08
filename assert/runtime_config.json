@@ -87,7 +87,7 @@
 
     //--------------
     // ── 多线程 ────────────────────────────────────────
-    "worker_threads": 2,
+    "worker_threads": 4,
     //   0 = 自动（hardware_concurrency）；正数 = 指定线程数
 
     "max_inflight_requests": 32,

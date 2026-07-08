@@ -282,4 +282,32 @@ OpenGL 状态是全局的、跨 pass 持续的。**任何一个 pass / 渲染函
 - `scr/entt/` —— EnTT ECS 库（header-only，粒子系统用）
 - `scr/stb_image.h` / `scr/std_image.cpp` —— stb_image 纹理加载
 
+## MSVC 增量编译陈旧产物问题
+
+**现象**：改了 `.cpp` 源码，重新编译运行后行为像没改 —— 新的 `printf` 不输出、逻辑修改不生效。但源码在 IDE 里明明是最新的。
+
+**根因**：MSVC/Visual Studio 的增量链接（`/INCREMENTAL`）和最小重建（`/Gm`）在某些情况下会跳过实际重编译，继续使用过时的 `.obj` 文件：
+
+1. **时间戳粒度** —— NTFS 时间戳精度 100ns，但 VS 可能用低精度比较。快速连续保存文件时，时间戳可能被视为"未变化"。
+2. **仅函数体修改** —— 头文件（声明）没变时，IDE 的"最小依赖扫描"可能认为该 `.cpp` 不需要重编译（尤其当 `.obj` 已存在于中间目录时）。
+3. **Clean 不完全** —— VS 的 Build → Clean Solution 只清理当前配置（Debug 或 Release），不清理另一个配置的中间文件。切换到另一配置增量编译时可能混入旧 `.obj`。
+4. **预编译头缓存** —— `stdafx.h` / `pch.h` 的预编译结果缓存时间戳偏差会导致整个 TU 被跳过。
+
+**你以为是逻辑 bug 排查半天，其实新代码根本没进 exe。**
+
+### 避免措施（强制重编译）
+
+| 方法 | 命令/操作 | 效果 |
+|------|----------|------|
+| **物理删除中间目录** | 删掉 `x64/Debug/` 和 `x64/Release/`（含所有 `.obj`）后 Rebuild | 最彻底 |
+| **改头文件** | 在对应 `.h` 中加一行空注释 `// force rebuild` 再保存 | `.h` 变了 → 所有 include 它的 `.cpp` 全部重编译 |
+| **改函数签名** | 加一个无用默认参数再删掉 | 签名变了 → 链接器拒绝旧 `.obj` → 强制重编译 |
+| **Rebuild Solution** | VS: Build → Rebuild Solution（非 Build Solution） | 跳过增量检测，全部重编 |
+| **关闭增量链接** | 项目属性 → Linker → General → Enable Incremental Linking → No | Debug 编译变慢，但杜绝链接级陈旧 |
+
+**推荐实践**：
+- 每次改完代码、准备测试之前：**先 Rebuild，不要用普通的 Build**。
+- 如果 Rebuild 后仍有问题：手动删除 `x64/Debug/` 和 `x64/Release/` 目录再 Rebuild。
+- 排查"改了代码但没生效"时，第一步就加一个必输出的 `printf`，确认新代码是否进了 exe。
+
 

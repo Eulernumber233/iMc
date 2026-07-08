@@ -2,94 +2,56 @@
 #include "../core.h"
 #include "../chunk/BlockType.h"
 #include <glm/glm.hpp>
-#include <unordered_map>
-#include <vector>
 
-// Light source data structures
-//   PointLight - torch/redstone torch, attached to block surface
-//   BlockLight - glowstone, block itself emits light
+// ── 光源属性静态表 ─────────────────────────────────────────────────
+// 不再需要独立的 LightSource 结构体 / LightSourceRegistry 单例。
+// 光照属性全部从方块类型 + 编译期静态表派生，遵循"唯一数据源"原则。
 
-enum class LightType : uint8_t {
-    Point,   // torch type: attached to surface, 6-direction spread
-    Block    // glowstone type: block self-illuminating
+struct LightDef {
+    glm::vec3 color;
+    float     intensity;
+    float     radius;
 };
 
-struct LightSource {
-    glm::ivec3 pos;
-    glm::vec3  color;
-    float      intensity;
-    float      radius;
-    LightType  type;
-
-    LightSource() = default;
-    LightSource(glm::ivec3 p, glm::vec3 c, float i, float r, LightType t = LightType::Point)
-        : pos(p), color(c), intensity(i), radius(r), type(t) {}
-};
-
-// Light source registry - manages all active light sources.
-// Single-thread access (triggered by main thread block changes), no lock needed.
-class LightSourceRegistry {
-public:
-    static LightSourceRegistry& instance() {
-        static LightSourceRegistry inst;
-        return inst;
-    }
-
-    void addLight(const glm::ivec3& pos, const LightSource& src);
-    void removeLight(const glm::ivec3& pos);
-    bool hasLight(const glm::ivec3& pos) const;
-
-    // Remove all light sources within a given chunk (called on chunk unload)
-    void removeLightsInChunk(int chunkX, int chunkZ);
-
-    // Block change callback: detect if block is a light source and add/remove
-    void onBlockChanged(const glm::ivec3& pos,
-                        BlockState oldState, BlockState newState);
-
-    // Generate torch light source at the air cell position
-    static LightSource makeTorchLight(const glm::ivec3& torchAirPos,
-                                       BlockType torchType);
-
-    const std::unordered_map<int64_t, LightSource>& all() const { return m_lights; }
-
-    std::vector<LightSource> queryAffecting(const glm::ivec3& regionMin,
-                                             const glm::ivec3& regionMax) const;
-
-    size_t count() const { return m_lights.size(); }
-    void clear() { m_lights.clear(); }
-
-    // Maximum propagation radius among all known light source types.
-    // Used for incremental update regions.
-    static constexpr float kMaxLightRadius = 16.0f;
-
-private:
-    LightSourceRegistry() = default;
-
-    static int64_t posKey(const glm::ivec3& p) {
-        int64_t x = (int64_t)(uint32_t)p.x & 0xFFFFFFLL;
-        int64_t y = (int64_t)(uint32_t)(p.y & 0xFFF);
-        int64_t z = (int64_t)(uint32_t)p.z & 0xFFFFFFLL;
-        return x | (y << 24) | (z << 36);
-    }
-
-    std::unordered_map<int64_t, LightSource> m_lights;
-};
-
-// Block type -> light source definition
-inline LightSource getBlockLightDef(BlockType type, const glm::ivec3& pos) {
+/// 按 BlockType 查发光属性（仅 emissive > 0 的方块有有效值）
+inline LightDef getLightDefForBlock(BlockType type) {
     switch (type) {
     case BLOCK_GLOWSTONE:
-        return LightSource(pos, glm::vec3(1.0f, 0.95f, 0.65f), 1.0f, 15.0f, LightType::Block);
+        return { { 1.0f, 0.95f, 0.65f }, 1.0f, 15.0f };
+    // 更多发光方块在此添加 case
     default:
-        return LightSource(pos, glm::vec3(0.0f), 0.0f, 0.0f);
+        return { { 0.0f, 0.0f, 0.0f }, 0.0f, 0.0f };
     }
 }
 
+/// 火把光源（火把方块本身不发光，光从相邻空气格发出）
+inline LightDef getTorchLightDef() {
+    return { { 0.98f, 0.85f, 0.35f }, 0.8f, 14.0f };
+}
+
+/// 已知光源类型中最大传播半径（增量更新用）
+constexpr float kMaxLightRadius = 16.0f;
+
+/// 是否发光方块（有独立的 BlockType 条目）
 inline bool isLightBlock(BlockType type) {
-    switch (type) {
-    case BLOCK_GLOWSTONE:
-        return true;
-    default:
-        return false;
-    }
+    return getLightDefForBlock(type).intensity > 0.0f;
+}
+
+/// 从方块类型直接判断是否发光
+inline bool isEmissive(BlockType type) {
+    return getLightDefForBlock(type).intensity > 0.0f;
+}
+
+// ── 压缩光源坐标（chunk 内 16-bit）────────────────────────────────
+// 布局：bits 0-3: localX(0-15), bits 4-11: worldY(0-255), bits 12-15: localZ(0-15)
+// 结合 chunk 原点可得完整世界坐标：world = (chunkX*16+lx, y, chunkZ*16+lz)
+
+inline uint16_t packChunkLightPos(int lx, int worldY, int lz) {
+    return (uint16_t)((lx & 0xF) | ((worldY & 0xFF) << 4) | ((lz & 0xF) << 12));
+}
+inline int unpackLightX(uint16_t p) { return p & 0xF; }
+inline int unpackLightY(uint16_t p) { return (p >> 4) & 0xFF; }
+inline int unpackLightZ(uint16_t p) { return (p >> 12) & 0xF; }
+inline glm::ivec3 unpackLightWorld(uint16_t p, int chunkX, int chunkZ) {
+    return glm::ivec3(chunkX * 16 + unpackLightX(p), unpackLightY(p), chunkZ * 16 + unpackLightZ(p));
 }

@@ -164,8 +164,6 @@
     <ClCompile Include="scr\item\ItemFactory.cpp" />
     <ClCompile Include="scr\item\ItemModel.cpp" />
     <ClCompile Include="scr\item\BlockItemModel.cpp" />
-    <ClCompile Include="scr\light\LightSource.cpp" />
-    <ClCompile Include="scr\light\LightCache.cpp" />
     <ClCompile Include="scr\light\LightPropagation.cpp" />
     <ClCompile Include="scr\entity\DroppedItemManager.cpp" />
     <ClCompile Include="scr\save\ChunkSaveManager.cpp" />

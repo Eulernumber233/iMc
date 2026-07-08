@@ -7,6 +7,7 @@
 #include <iostream>
 #include <cstring>
 #include <deque>
+#include <bitset>
 #include <unordered_set>
 #include <shared_mutex>
 
@@ -134,7 +135,8 @@ void ChunkWorkerPool::workerMain() {
                 m_blockDone.push_back(std::move(result));
             }
             m_pending.fetch_sub(1, std::memory_order_relaxed);
-        } else if (job.kind == JOB_NET_IMPORT) {
+        }
+        else if (job.kind == JOB_NET_IMPORT) {
             // 客户端网络导入：解压 + 切片在 worker 做，产出与 JOB_BUILD 同型，走同一完成队列。
             auto result = std::make_unique<BlockDataResult>();
             result->pos = job.pos;
@@ -144,7 +146,8 @@ void ChunkWorkerPool::workerMain() {
                 m_blockDone.push_back(std::move(result));
             }
             m_pending.fetch_sub(1, std::memory_order_relaxed);
-        } else {
+        }
+        else {
             // JOB_MESH
             auto result = std::make_unique<ChunkBuildResult>();
             result->pos = job.meshInput.pos;
@@ -162,154 +165,208 @@ void ChunkWorkerPool::workerMain() {
 // ============================================================================
 
 namespace {
-    // 扫描整 chunk buffer 中的发光方块，生成光源列表（在 worker 线程执行）
-    void scanLightSources(const BlockState* buf, const glm::ivec2& pos,
-                          std::vector<LightSource>& out) {
-        constexpr int W = ChunkConstants::CHUNK_WIDTH;
-        constexpr int D = ChunkConstants::CHUNK_DEPTH;
-        constexpr int H = ChunkConstants::CHUNK_HEIGHT;
-        for (int y = 0; y < H; ++y) {
-            for (int z = 0; z < D; ++z) {
-                for (int x = 0; x < W; ++x) {
-                    BlockState state = buf[(y * D + z) * W + x];
-                    BlockProperties props = GetBlockProperties(state.type());
-                    if (props.emissive > 0.0f) {
-                        glm::ivec3 worldPos(pos.x * W + x, y, pos.y * D + z);
-                        LightSource src = getBlockLightDef(state.type(), worldPos);
-                        if (src.intensity > 0.0f) {
-                            out.push_back(src);
-                        }
-                    }
+
+// ── 区块内局部坐标 → bitset 位索引 ────────────────────────────────
+// chunk 范围 16×256×16 = 65536 格，8 KB bitset 全覆盖，零堆分配。
+constexpr int BW = ChunkConstants::CHUNK_WIDTH;   // 16
+constexpr int BD = ChunkConstants::CHUNK_DEPTH;   // 16
+constexpr int BH = ChunkConstants::CHUNK_HEIGHT;  // 256
+constexpr int BSEC_H = ChunkConstants::SECTION_HEIGHT; // 16
+constexpr int BSEC_COUNT = BH / BSEC_H;           // 16
+constexpr int BCELLS = BW * BH * BD;              // 65536
+
+inline int localBitIndex(int lx, int ly, int lz) {
+    return (ly * BD + lz) * BW + lx;
+}
+
+// ── 扫描发光方块（per-section 输出）─────────────────────────────────
+// 遍历整 chunk buffer，按 section 分组产出压缩坐标（uint16_t：x:4, y:8, z:4）。
+// 每个 section 独立 shared_ptr<vector>，可直接注入 Section 无需二次拆分。
+void scanLightSources(const BlockState* buf, const glm::ivec2& pos,
+    std::array<std::shared_ptr<std::vector<uint16_t>>, BSEC_COUNT>& out) {
+    for (int sy = 0; sy < BSEC_COUNT; ++sy) {
+        out[sy] = std::make_shared<std::vector<uint16_t>>();
+    }
+    for (int y = 0; y < BH; ++y) {
+        int sy = y / BSEC_H;
+        for (int z = 0; z < BD; ++z) {
+            for (int x = 0; x < BW; ++x) {
+                BlockState state = buf[(y * BD + z) * BW + x];
+                if (isEmissive(state.type())) {
+                    out[sy]->push_back(packChunkLightPos(x, y, z));
                 }
             }
         }
     }
+    // 清除全空 section 的 shared_ptr（nullptr 表示无光源）
+    for (int sy = 0; sy < BSEC_COUNT; ++sy) {
+        if (out[sy]->empty()) out[sy].reset();
+    }
+}
 
-    // ── 区块内 BFS 光照传播（worker 线程，无需任何锁）────────────────────
-    // 从本区块内的光源做 BFS，范围限定在 chunk 世界坐标边界内。
-    // 结果写入 out，每个 section 分配 shared_ptr<SectionLightData>（与 BlockBox 模式一致）。
-    void propagateIntraChunkLights(const BlockState* chunkBuf,
-                                    const glm::ivec2& chunkPos,
-                                    const std::vector<LightSource>& sources,
-                                    ChunkLightData& out) {
-        constexpr int W = ChunkConstants::CHUNK_WIDTH;   // 16
-        constexpr int D = ChunkConstants::CHUNK_DEPTH;   // 16
-        constexpr int H = ChunkConstants::CHUNK_HEIGHT;  // 256
-        constexpr int SEC_H = ChunkConstants::SECTION_HEIGHT; // 16
-        constexpr int SEC_COUNT = H / SEC_H;             // 16
+// ── 区块内 BFS 光照传播（优化版）──────────────────────────────────
+// 改进点：
+//   1. 多光源合并为一次 BFS（共享 visited + queue，每格只访问一次）
+//   2. bitset<65536> 替代 unordered_set（8 KB 栈分配，零哈希）
+//   3. 预分配 vector 环形缓冲替代 deque（一次分配，零碎片）
+//   4. 亮度截断：maxComp < 0.005f 提前终止
+//   5. writeLight 返回 bool，值未提升则剪枝
+void propagateIntraChunkLights(const BlockState* chunkBuf,
+    const glm::ivec2& chunkPos,
+    const std::array<std::shared_ptr<std::vector<uint16_t>>, BSEC_COUNT>& sources,
+    ChunkLightData& out) {
+    // 检查是否有任何光源
+    bool hasAnySource = false;
+    for (int sy = 0; sy < BSEC_COUNT; ++sy) {
+        if (sources[sy] && !sources[sy]->empty()) { hasAnySource = true; break; }
+    }
+    if (!hasAnySource) return;
 
-        if (sources.empty()) return;
+    // 为每个 section 分配零初始化数据
+    for (int sy = 0; sy < BSEC_COUNT; ++sy) {
+        out[sy] = std::make_shared<SectionLightData>();
+        out[sy]->fill(0u);
+    }
 
-        // 为每个 section 分配零初始化数据
-        for (int sy = 0; sy < SEC_COUNT; ++sy) {
-            out[sy] = std::make_shared<SectionLightData>();
-            out[sy]->fill(0u);
+    const int worldMinX = chunkPos.x * BW;
+    const int worldMaxX = worldMinX + BW - 1;
+    const int worldMinZ = chunkPos.y * BD;
+    const int worldMaxZ = worldMinZ + BD - 1;
+
+    // BlockQuery：直接从 chunkBuf 读取，无锁。超出范围视为不透明。
+    auto blockQuery = [&](int wx, int wy, int wz) -> BlockState {
+        if (wx < worldMinX || wx > worldMaxX ||
+            wz < worldMinZ || wz > worldMaxZ ||
+            wy < 0 || wy >= BH) {
+            return BlockState{ BLOCK_STONE, ORIENT_NONE };
         }
+        int lx = wx - worldMinX;
+        int lz = wz - worldMinZ;
+        return chunkBuf[(wy * BD + lz) * BW + lx];
+    };
 
-        // chunk 世界坐标范围
-        const int worldMinX = chunkPos.x * W;
-        const int worldMaxX = worldMinX + W - 1;
-        const int worldMinZ = chunkPos.y * D;
-        const int worldMaxZ = worldMinZ + D - 1;
+    // 写入光照值（max 混合），返回值是否实际提升了该格亮度
+    auto writeLight = [&](int wx, int wy, int wz, const glm::vec3& light) -> bool {
+        if (wx < worldMinX || wx > worldMaxX ||
+            wz < worldMinZ || wz > worldMaxZ) return false;
+        if (wy < 0 || wy >= BH) return false;
+        int lx = wx - worldMinX;
+        int lz = wz - worldMinZ;
+        int sy = wy / BSEC_H;
+        if (wy < 0) sy--;
+        if (sy < 0 || sy >= BSEC_COUNT) return false;
+        int ly = wy - sy * BSEC_H;
+        uint8_t r = uint8_t(glm::clamp(int(light.r * 255.0f + 0.5f), 0, 255));
+        uint8_t g = uint8_t(glm::clamp(int(light.g * 255.0f + 0.5f), 0, 255));
+        uint8_t b = uint8_t(glm::clamp(int(light.b * 255.0f + 0.5f), 0, 255));
+        uint32_t packed = uint32_t(r) | (uint32_t(g) << 8) | (uint32_t(b) << 16) | 0xFF000000u;
+        int cellIdx = (ly * BD + lz) * BW + lx;
+        uint32_t& cell = (*out[sy])[cellIdx];
+        if (packed > cell) { cell = packed; return true; }
+        return false;
+    };
 
-        // BlockQuery：直接从 chunkBuf 读取，无锁。超出 chunk 范围视为不透明。
-        auto blockQuery = [&](int wx, int wy, int wz) -> BlockState {
-            if (wx < worldMinX || wx > worldMaxX ||
-                wz < worldMinZ || wz > worldMaxZ ||
-                wy < 0 || wy >= H) {
-                return BlockState{ BLOCK_STONE, ORIENT_NONE };
-            }
-            int lx = wx - worldMinX;
-            int lz = wz - worldMinZ;
-            return chunkBuf[(wy * D + lz) * W + lx];
-        };
+    static const glm::ivec3 bfsDirs[6] = {
+        {1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1}
+    };
 
-        // 写入光照值（max 混合）
-        auto writeLight = [&](int wx, int wy, int wz, const glm::vec3& light) {
-            if (wx < worldMinX || wx > worldMaxX ||
-                wz < worldMinZ || wz > worldMaxZ) return;
-            if (wy < 0 || wy >= H) return;
-            int lx = wx - worldMinX;
-            int lz = wz - worldMinZ;
-            int sy = wy / SEC_H;
-            if (wy < 0) sy--;
-            if (sy < 0 || sy >= SEC_COUNT) return;
-            int ly = wy - sy * SEC_H;
-            uint8_t r = uint8_t(glm::clamp(int(light.r * 255.0f + 0.5f), 0, 255));
-            uint8_t g = uint8_t(glm::clamp(int(light.g * 255.0f + 0.5f), 0, 255));
-            uint8_t b = uint8_t(glm::clamp(int(light.b * 255.0f + 0.5f), 0, 255));
-            uint32_t packed = uint32_t(r) | (uint32_t(g) << 8) | (uint32_t(b) << 16) | 0xFF000000u;
-            int cellIdx = (ly * D + lz) * W + lx;
-            uint32_t& cell = (*out[sy])[cellIdx];
-            if (packed > cell) cell = packed;
-        };
+    // BFS 条目：位置 + 距离 + 来源光源属性（用于衰减计算）
+    struct BfsEntry {
+        glm::ivec3 pos;
+        int        dist;
+        float      srcRadius;
+        glm::vec3  srcBrightness;  // color * intensity，用于计算衰减
+    };
 
-        static const glm::ivec3 bfsDirs[6] = {
-            {1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1}
-        };
+    // 环形缓冲（预分配，零运行时堆分配）
+    static thread_local std::vector<BfsEntry> s_ring(BCELLS);
+    size_t head = 0, tail = 0;
+    auto push = [&](const BfsEntry& e) { s_ring[tail++ % BCELLS] = e; };
+    auto pop  = [&]() -> BfsEntry { return s_ring[head++ % BCELLS]; };
+    auto qempty = [&]() -> bool { return head == tail; };
 
-        struct BfsEntry { glm::ivec3 pos; int dist; };
+    // ── 多光源合并：所有光源同时入队，共享 visited ──
+    std::bitset<BCELLS> visited;
 
-        for (const auto& src : sources) {
-            if (src.intensity <= 0.0f) continue;
+    for (int sy = 0; sy < BSEC_COUNT; ++sy) {
+        if (!sources[sy] || sources[sy]->empty()) continue;
+        for (uint16_t packed : *sources[sy]) {
+            int lx = unpackLightX(packed);
+            int wy = unpackLightY(packed);
+            int lz = unpackLightZ(packed);
+            int wx = worldMinX + lx;
+            int wz = worldMinZ + lz;
 
-            std::deque<BfsEntry> queue;
-            std::unordered_set<uint64_t> visited;
+            BlockState state = chunkBuf[(wy * BD + lz) * BW + lx];
+            const LightDef& def = getLightDefForBlock(state.type());
+            if (def.intensity <= 0.0f) continue;
 
-            auto packPos = [](const glm::ivec3& p) -> uint64_t {
-                uint64_t x = (uint64_t)(uint32_t)p.x & 0xFFFFFFu;
-                uint64_t y = (uint64_t)(uint32_t)(p.y & 0xFFF);
-                uint64_t z = (uint64_t)(uint32_t)p.z & 0xFFFFFFu;
-                return x | (y << 24) | (z << 36);
-            };
+            glm::vec3 srcBrightness = def.color * def.intensity;
+            writeLight(wx, wy, wz, srcBrightness);
 
-            writeLight(src.pos.x, src.pos.y, src.pos.z, src.color * src.intensity);
-            queue.push_back({ src.pos, 0 });
-            visited.insert(packPos(src.pos));
-
-            while (!queue.empty()) {
-                auto [curPos, curDist] = queue.front();
-                queue.pop_front();
-
-                if (curDist >= (int)src.radius) continue;
-
-                int nextDist = curDist + 1;
-                float d = (float)nextDist;
-                float falloff = 1.0f - d / src.radius;
-                if (falloff <= 0.0f) continue;
-                glm::vec3 nextLight = src.color * src.intensity * falloff;
-
-                for (const auto& dir : bfsDirs) {
-                    glm::ivec3 nextPos = curPos + dir;
-                    auto key = packPos(nextPos);
-                    if (visited.count(key)) continue;
-
-                    BlockState ns = blockQuery(nextPos.x, nextPos.y, nextPos.z);
-                    if (ns.type() != BLOCK_AIR && ns.type() != BLOCK_ERRER) {
-                        BlockProperties np = GetBlockProperties(ns.type());
-                        if (!np.isTransparent) {
-                            visited.insert(key);
-                            continue;
-                        }
-                    }
-
-                    visited.insert(key);
-                    writeLight(nextPos.x, nextPos.y, nextPos.z, nextLight);
-                    queue.push_back({ nextPos, nextDist });
-                }
-            }
-        }
-
-        // 清除全零 section 的 shared_ptr（视为无光照）
-        for (int sy = 0; sy < SEC_COUNT; ++sy) {
-            if (!out[sy]) continue;
-            bool any = false;
-            for (uint32_t v : *out[sy]) {
-                if (v != 0) { any = true; break; }
-            }
-            if (!any) out[sy].reset();
+            visited.set(localBitIndex(lx, wy, lz));
+            push({ glm::ivec3(wx, wy, wz), 0, def.radius, srcBrightness });
         }
     }
+
+    // ── 单次 BFS：多光源的光同时向外扩散 ──
+    while (!qempty()) {
+        BfsEntry cur = pop();
+
+        if (cur.dist >= (int)cur.srcRadius) continue;
+
+        int nextDist = cur.dist + 1;
+        float falloff = 1.0f - (float)nextDist / cur.srcRadius;
+        if (falloff <= 0.0f) continue;
+
+        glm::vec3 nextLight = cur.srcBrightness * falloff;
+        float maxComp = nextLight.r;
+        if (nextLight.g > maxComp) maxComp = nextLight.g;
+        if (nextLight.b > maxComp) maxComp = nextLight.b;
+        if (maxComp < 0.005f) continue;  // 亮度截断
+
+        for (const auto& dir : bfsDirs) {
+            glm::ivec3 nextPos = cur.pos + dir;
+
+            // 范围检查
+            if (nextPos.x < worldMinX || nextPos.x > worldMaxX ||
+                nextPos.z < worldMinZ || nextPos.z > worldMaxZ ||
+                nextPos.y < 0 || nextPos.y >= BH)
+                continue;
+
+            int nlx = nextPos.x - worldMinX;
+            int nlz = nextPos.z - worldMinZ;
+            int bitIdx = localBitIndex(nlx, nextPos.y, nlz);
+            if (visited.test(bitIdx)) continue;
+
+            // 检查目标格是否阻挡
+            BlockState ns = chunkBuf[(nextPos.y * BD + nlz) * BW + nlx];
+            if (ns.type() != BLOCK_AIR && ns.type() != BLOCK_ERRER) {
+                BlockProperties np = GetBlockProperties(ns.type());
+                if (!np.isTransparent) {
+                    visited.set(bitIdx);
+                    continue;
+                }
+            }
+
+            // 写入光照：只有提升了亮度才继续传播（多源 max 混合的剪枝）
+            if (!writeLight(nextPos.x, nextPos.y, nextPos.z, nextLight)) continue;
+
+            visited.set(bitIdx);
+            push({ nextPos, nextDist, cur.srcRadius, cur.srcBrightness });
+        }
+    }
+
+    // 清除全零 section 的 shared_ptr（视为无光照）
+    for (int sy = 0; sy < BSEC_COUNT; ++sy) {
+        if (!out[sy]) continue;
+        bool any = false;
+        for (uint32_t v : *out[sy]) {
+            if (v != 0) { any = true; break; }
+        }
+        if (!any) out[sy].reset();
+    }
+}
 
 } // namespace
 
@@ -331,12 +388,12 @@ void ChunkWorkerPool::buildOne(const glm::ivec2& pos, BlockDataResult& out) cons
 
     splitChunkBufferToBoxes(tmp.get(), out.boxes);
 
-    // 扫描发光方块（萤石等 emissive > 0），产出光源列表供主线程注册
-    scanLightSources(tmp.get(), pos, out.lightSources);
+    // 扫描发光方块（萤石等 emissive > 0），直接产出 per-section 格式
+    scanLightSources(tmp.get(), pos, out.sectionLightSources);
 
     // Task 1 区块内 BFS：从本区块光源出发，仅在 chunk 范围内洪水填充光照。
     // 无锁（worker 独享此 chunk buffer），结果供 Task 2 跨区块边界 BFS 使用。
-    propagateIntraChunkLights(tmp.get(), pos, out.lightSources, out.sectionLightData);
+    propagateIntraChunkLights(tmp.get(), pos, out.sectionLightSources, out.sectionLightData);
 }
 
 // ============================================================================
@@ -344,8 +401,8 @@ void ChunkWorkerPool::buildOne(const glm::ivec2& pos, BlockDataResult& out) cons
 // ============================================================================
 
 void ChunkWorkerPool::netImportOne(const glm::ivec2& pos,
-                                   const std::vector<uint8_t>& serialized,
-                                   BlockDataResult& out) {
+    const std::vector<uint8_t>& serialized,
+    BlockDataResult& out) {
     // 格式（与 NetSerializeWorker::serialize 一致）：
     //   [chunkX:i32][chunkZ:i32][numSections:u8]
     //   每 section：[sy:u8][flags:u8]( [dataLen:u16][lz4 blocks] )
@@ -404,10 +461,10 @@ void ChunkWorkerPool::netImportOne(const glm::ivec2& pos,
     splitChunkBufferToBoxes(blockBuf.get(), out.boxes);
 
     // 扫描发光方块（网络导入的 chunk 可能含玩家放置的萤石）
-    scanLightSources(blockBuf.get(), pos, out.lightSources);
+    scanLightSources(blockBuf.get(), pos, out.sectionLightSources);
 
     // 区块内 BFS 光照传播（与 buildOne 一致）
-    propagateIntraChunkLights(blockBuf.get(), pos, out.lightSources, out.sectionLightData);
+    propagateIntraChunkLights(blockBuf.get(), pos, out.sectionLightSources, out.sectionLightData);
 }
 
 // ============================================================================
@@ -419,7 +476,7 @@ namespace {
     // 与玩家修改该 box 的写锁互斥；与其他 worker 的读共享。
     // 输出布局：RIGHT/LEFT 按 [y*DEPTH+z]；FRONT/BACK 按 [y*WIDTH+x]。
     void copyBoundaryLayerFromBox(const std::shared_ptr<BlockBox>& box,
-                                  BlockFace face, BlockState* out) {
+        BlockFace face, BlockState* out) {
         constexpr int W = ChunkConstants::CHUNK_WIDTH;
         constexpr int D = ChunkConstants::CHUNK_DEPTH;
         constexpr int H = ChunkConstants::SECTION_HEIGHT;
@@ -447,164 +504,167 @@ namespace {
         default: break;
         }
     }
-// ── Task 2 跨区块边界光照传播 ─────────────────────────────────────────
-// 1. 浅拷贝 selfLightData（shared_ptr，仅指针复制）
-// 2. 导入 4 邻居边界光照层（1 步衰减写入 self 边界格，max 混合）
-// 3. 从所有非零格 BFS 使边界光向内正确传播（查 self 方块，无锁）
-static void propagateCrossChunkLights(const MeshBuildInput& in,
-                                       ChunkBuildResult& out) {
-    constexpr int W = ChunkConstants::CHUNK_WIDTH;
-    constexpr int D = ChunkConstants::CHUNK_DEPTH;
-    constexpr int SEC_H = ChunkConstants::SECTION_HEIGHT;
-    constexpr int SEC_COUNT = ChunkConstants::CHUNK_HEIGHT / SEC_H;
-    constexpr int CELLS = W * SEC_H * D; // 4096
-    constexpr float kCrossoverRadius = 8.0f;
+    // ── Task 2 跨区块边界光照传播（优化版）─────────────────────────────
+    // 优化点：
+    //   1. bitset<65536> visited 替代 unordered_set（零哈希，缓存友好）
+    //   2. 预分配 vector 环形缓冲替代 deque
+    //   3. 所有种子合并为一次 BFS（替代原来每种子独立 BFS 的 O(N²) 问题）
+    //   4. writeSelfLight 返回 bool，值未提升则剪枝
+    static void propagateCrossChunkLights(const MeshBuildInput& in,
+        ChunkBuildResult& out) {
+        constexpr int W = ChunkConstants::CHUNK_WIDTH;
+        constexpr int D = ChunkConstants::CHUNK_DEPTH;
+        constexpr int SEC_H = ChunkConstants::SECTION_HEIGHT;
+        constexpr int SEC_COUNT = ChunkConstants::CHUNK_HEIGHT / SEC_H;
+        constexpr int CELLS = W * SEC_H * D; // 4096
+        constexpr float kCrossoverRadius = 8.0f;
 
-    // ── 1. 基底：浅拷贝 selfLightData（shared_ptr 共享，无数据拷贝）──
-    for (int sy = 0; sy < SEC_COUNT; ++sy) {
-        if (in.selfLightData[sy]) {
-            out.sectionLightData[sy] = in.selfLightData[sy];
-        }
-    }
-
-    // chunk 世界坐标范围
-    const int worldMinX = in.pos.x * W;
-    const int worldMinZ = in.pos.y * D;
-
-    // 从 self box 读方块（无锁）
-    auto selfBlock = [&](int lx, int ly, int lz, int sy) -> BlockState {
-        if (!in.self[sy]) return BlockState{ BLOCK_AIR, ORIENT_NONE };
-        return in.self[sy]->blocks[(ly * D + lz) * W + lx];
-    };
-
-    // 确保 section 已分配并写光照（max 混合）；已存在则直接写
-    auto writeSelfLight = [&](int lx, int ly, int lz, int sy, const glm::vec3& light) {
-        if (lx < 0 || lx >= W || lz < 0 || lz >= D || sy < 0 || sy >= SEC_COUNT) return;
-        if (ly < 0 || ly >= SEC_H) return;
-        if (!out.sectionLightData[sy]) {
-            out.sectionLightData[sy] = std::make_shared<SectionLightData>();
-            out.sectionLightData[sy]->fill(0u);
-        }
-        uint8_t r = uint8_t(glm::clamp(int(light.r * 255.0f + 0.5f), 0, 255));
-        uint8_t g = uint8_t(glm::clamp(int(light.g * 255.0f + 0.5f), 0, 255));
-        uint8_t b = uint8_t(glm::clamp(int(light.b * 255.0f + 0.5f), 0, 255));
-        uint32_t packed = uint32_t(r) | (uint32_t(g) << 8) | (uint32_t(b) << 16) | 0xFF000000u;
-        int cellIdx = (ly * D + lz) * W + lx;
-        uint32_t& cell = (*out.sectionLightData[sy])[cellIdx];
-        if (packed > cell) cell = packed;
-    };
-
-    // 读 self 光照值
-    auto readSelfLight = [&](int lx, int ly, int lz, int sy) -> glm::vec3 {
-        if (lx < 0 || lx >= W || lz < 0 || lz >= D || sy < 0 || sy >= SEC_COUNT) return glm::vec3(0);
-        if (ly < 0 || ly >= SEC_H) return glm::vec3(0);
-        auto& sp = out.sectionLightData[sy];
-        if (!sp) return glm::vec3(0);
-        int cellIdx = (ly * D + lz) * W + lx;
-        uint32_t v = (*sp)[cellIdx];
-        return glm::vec3(float(v & 0xFFu) / 255.0f,
-                          float((v >> 8) & 0xFFu) / 255.0f,
-                          float((v >> 16) & 0xFFu) / 255.0f);
-    };
-
-    // ── 2. 导入 4 邻居边界光照 ──
-    static const float kOneStepFalloff = 0.90f;
-
-    for (int d = 0; d < 4; ++d) {
+        // ── 1. 基底：浅拷贝 selfLightData（shared_ptr 共享，无数据拷贝）──
         for (int sy = 0; sy < SEC_COUNT; ++sy) {
-            const auto& boundary = in.neighborBoundaryLight[d][sy];
-            if (boundary.empty()) continue;
-
-            if (d == 0) {
-                for (int y = 0; y < SEC_H; ++y)
-                    for (int z = 0; z < D; ++z) {
-                        uint32_t v = boundary[y * D + z];
-                        if ((v & 0x00FFFFFFu) == 0) continue;
-                        glm::vec3 nb(float(v & 0xFFu)/255.f, float((v>>8)&0xFFu)/255.f, float((v>>16)&0xFFu)/255.f);
-                        writeSelfLight(W - 1, y, z, sy, nb * kOneStepFalloff);
-                    }
-            } else if (d == 1) {
-                for (int y = 0; y < SEC_H; ++y)
-                    for (int z = 0; z < D; ++z) {
-                        uint32_t v = boundary[y * D + z];
-                        if ((v & 0x00FFFFFFu) == 0) continue;
-                        glm::vec3 nb(float(v & 0xFFu)/255.f, float((v>>8)&0xFFu)/255.f, float((v>>16)&0xFFu)/255.f);
-                        writeSelfLight(0, y, z, sy, nb * kOneStepFalloff);
-                    }
-            } else if (d == 2) {
-                for (int y = 0; y < SEC_H; ++y)
-                    for (int x = 0; x < W; ++x) {
-                        uint32_t v = boundary[y * W + x];
-                        if ((v & 0x00FFFFFFu) == 0) continue;
-                        glm::vec3 nb(float(v & 0xFFu)/255.f, float((v>>8)&0xFFu)/255.f, float((v>>16)&0xFFu)/255.f);
-                        writeSelfLight(x, y, D - 1, sy, nb * kOneStepFalloff);
-                    }
-            } else {
-                for (int y = 0; y < SEC_H; ++y)
-                    for (int x = 0; x < W; ++x) {
-                        uint32_t v = boundary[y * W + x];
-                        if ((v & 0x00FFFFFFu) == 0) continue;
-                        glm::vec3 nb(float(v & 0xFFu)/255.f, float((v>>8)&0xFFu)/255.f, float((v>>16)&0xFFu)/255.f);
-                        writeSelfLight(x, y, 0, sy, nb * kOneStepFalloff);
-                    }
+            if (in.selfLightData[sy]) {
+                out.sectionLightData[sy] = in.selfLightData[sy];
             }
         }
-    }
 
-    // ── 3. BFS 向内传播 ──
-    struct VSource { glm::ivec3 pos; glm::vec3 color; };
-    std::vector<VSource> seeds;
-    seeds.reserve(4096);
+        const int worldMinX = in.pos.x * W;
+        const int worldMinZ = in.pos.y * D;
 
-    for (int sy = 0; sy < SEC_COUNT; ++sy) {
-        auto& sp = out.sectionLightData[sy];
-        if (!sp) continue;
-        int baseY = sy * SEC_H;
-        for (int i = 0; i < CELLS; ++i) {
-            uint32_t v = (*sp)[i];
-            if ((v & 0x00FFFFFFu) == 0) continue;
-            int lx = i % W, lz = (i / W) % D, ly = i / (W * D);
-            seeds.push_back({ glm::ivec3(worldMinX + lx, baseY + ly, worldMinZ + lz),
-                              glm::vec3(float(v & 0xFFu)/255.f, float((v>>8)&0xFFu)/255.f, float((v>>16)&0xFFu)/255.f) });
+        auto selfBlock = [&](int lx, int ly, int lz, int sy) -> BlockState {
+            if (!in.self[sy]) return BlockState{ BLOCK_AIR, ORIENT_NONE };
+            return in.self[sy]->blocks[(ly * D + lz) * W + lx];
+        };
+
+        // 写光照，返回值是否实际提升了该格亮度
+        auto writeSelfLight = [&](int lx, int ly, int lz, int sy, const glm::vec3& light) -> bool {
+            if (lx < 0 || lx >= W || lz < 0 || lz >= D || sy < 0 || sy >= SEC_COUNT) return false;
+            if (ly < 0 || ly >= SEC_H) return false;
+            if (!out.sectionLightData[sy]) {
+                out.sectionLightData[sy] = std::make_shared<SectionLightData>();
+                out.sectionLightData[sy]->fill(0u);
+            }
+            uint8_t r = uint8_t(glm::clamp(int(light.r * 255.0f + 0.5f), 0, 255));
+            uint8_t g = uint8_t(glm::clamp(int(light.g * 255.0f + 0.5f), 0, 255));
+            uint8_t b = uint8_t(glm::clamp(int(light.b * 255.0f + 0.5f), 0, 255));
+            uint32_t packed = uint32_t(r) | (uint32_t(g) << 8) | (uint32_t(b) << 16) | 0xFF000000u;
+            int cellIdx = (ly * D + lz) * W + lx;
+            uint32_t& cell = (*out.sectionLightData[sy])[cellIdx];
+            if (packed > cell) { cell = packed; return true; }
+            return false;
+        };
+
+        // ── 2. 导入 4 邻居边界光照 ──
+        static const float kOneStepFalloff = 0.90f;
+
+        for (int d = 0; d < 4; ++d) {
+            for (int sy = 0; sy < SEC_COUNT; ++sy) {
+                const auto& boundary = in.neighborBoundaryLight[d][sy];
+                if (boundary.empty()) continue;
+
+                if (d == 0) {
+                    for (int y = 0; y < SEC_H; ++y)
+                        for (int z = 0; z < D; ++z) {
+                            uint32_t v = boundary[y * D + z];
+                            if ((v & 0x00FFFFFFu) == 0) continue;
+                            glm::vec3 nb(float(v & 0xFFu) / 255.f, float((v >> 8) & 0xFFu) / 255.f, float((v >> 16) & 0xFFu) / 255.f);
+                            writeSelfLight(W - 1, y, z, sy, nb * kOneStepFalloff);
+                        }
+                }
+                else if (d == 1) {
+                    for (int y = 0; y < SEC_H; ++y)
+                        for (int z = 0; z < D; ++z) {
+                            uint32_t v = boundary[y * D + z];
+                            if ((v & 0x00FFFFFFu) == 0) continue;
+                            glm::vec3 nb(float(v & 0xFFu) / 255.f, float((v >> 8) & 0xFFu) / 255.f, float((v >> 16) & 0xFFu) / 255.f);
+                            writeSelfLight(0, y, z, sy, nb * kOneStepFalloff);
+                        }
+                }
+                else if (d == 2) {
+                    for (int y = 0; y < SEC_H; ++y)
+                        for (int x = 0; x < W; ++x) {
+                            uint32_t v = boundary[y * W + x];
+                            if ((v & 0x00FFFFFFu) == 0) continue;
+                            glm::vec3 nb(float(v & 0xFFu) / 255.f, float((v >> 8) & 0xFFu) / 255.f, float((v >> 16) & 0xFFu) / 255.f);
+                            writeSelfLight(x, y, D - 1, sy, nb * kOneStepFalloff);
+                        }
+                }
+                else {
+                    for (int y = 0; y < SEC_H; ++y)
+                        for (int x = 0; x < W; ++x) {
+                            uint32_t v = boundary[y * W + x];
+                            if ((v & 0x00FFFFFFu) == 0) continue;
+                            glm::vec3 nb(float(v & 0xFFu) / 255.f, float((v >> 8) & 0xFFu) / 255.f, float((v >> 16) & 0xFFu) / 255.f);
+                            writeSelfLight(x, y, 0, sy, nb * kOneStepFalloff);
+                        }
+                }
+            }
         }
-    }
-    if (seeds.empty()) return;
 
-    static const glm::ivec3 bfsDirs[6] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
-    struct BfsEntry { glm::ivec3 pos; int dist; };
-    std::unordered_set<uint64_t> visited;
-    auto packPos = [](const glm::ivec3& p) -> uint64_t {
-        return ((uint64_t)(uint32_t)p.x & 0xFFFFFFu) | (((uint64_t)(uint32_t)(p.y & 0xFFF)) << 24) | (((uint64_t)(uint32_t)p.z & 0xFFFFFFu) << 36);
-    };
+        // ── 3. 合并 BFS 向内传播 ──
+        // 所有非零格作为种子，一次 BFS（原来每个种子独立 BFS，O(N²)）
+        static const glm::ivec3 bfsDirs[6] = { {1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1} };
 
-    std::deque<BfsEntry> queue;
-    for (const auto& seed : seeds) {
-        auto key = packPos(seed.pos);
-        if (visited.count(key)) continue;
-        visited.insert(key);
-        queue.push_back({ seed.pos, 0 });
+        struct BfsEntry { glm::ivec3 pos; int dist; };
 
-        while (!queue.empty()) {
-            auto [curPos, curDist] = queue.front();
-            queue.pop_front();
-            if (curDist >= (int)kCrossoverRadius) continue;
+        // 环形缓冲（预分配）
+        static thread_local std::vector<BfsEntry> s_ring(BCELLS);
+        size_t head = 0, tail = 0;
+        auto qpush = [&](const BfsEntry& e) { s_ring[tail++ % BCELLS] = e; };
+        auto qpop  = [&]() -> BfsEntry { return s_ring[head++ % BCELLS]; };
+        auto qempty = [&]() -> bool { return head == tail; };
 
-            int curSY = curPos.y / SEC_H;
-            if (curPos.y < 0) curSY--;
-            int curLY = curPos.y - curSY * SEC_H;
-            glm::vec3 curLight = readSelfLight(curPos.x - worldMinX, curLY, curPos.z - worldMinZ, curSY);
-            float maxComp = (glm::max)(curLight.r, (glm::max)(curLight.g, curLight.b));
+        // bitset visited：chunk 范围 65536 格，8 KB 栈分配
+        std::bitset<BCELLS> visited;
+
+        // 收集所有非零种子并入队
+        for (int sy = 0; sy < SEC_COUNT; ++sy) {
+            auto& sp = out.sectionLightData[sy];
+            if (!sp) continue;
+            int baseY = sy * SEC_H;
+            for (int i = 0; i < CELLS; ++i) {
+                uint32_t v = (*sp)[i];
+                if ((v & 0x00FFFFFFu) == 0) continue;
+                int lx = i % W, lz = (i / W) % D, ly = i / (W * D);
+                int wx = worldMinX + lx, wy = baseY + ly, wz = worldMinZ + lz;
+                int bitIdx = (wy * BD + lz) * BW + lx;
+                if (visited.test(bitIdx)) continue;
+                visited.set(bitIdx);
+                qpush({ glm::ivec3(wx, wy, wz), 0 });
+            }
+        }
+
+        // 一次 BFS
+        while (!qempty()) {
+            BfsEntry cur = qpop();
+            if (cur.dist >= (int)kCrossoverRadius) continue;
+
+            int curSY = cur.pos.y / SEC_H;
+            if (cur.pos.y < 0) curSY--;
+            int curLY = cur.pos.y - curSY * SEC_H;
+            int curLX = cur.pos.x - worldMinX;
+            int curLZ = cur.pos.z - worldMinZ;
+
+            // 读当前格光照
+            glm::vec3 curLight(0);
+            {
+                auto& sp = out.sectionLightData[curSY];
+                if (sp) {
+                    int cellIdx = (curLY * D + curLZ) * W + curLX;
+                    uint32_t v = (*sp)[cellIdx];
+                    curLight = glm::vec3(float(v & 0xFFu) / 255.f, float((v >> 8) & 0xFFu) / 255.f, float((v >> 16) & 0xFFu) / 255.f);
+                }
+            }
+            float maxComp = curLight.r;
+            if (curLight.g > maxComp) maxComp = curLight.g;
+            if (curLight.b > maxComp) maxComp = curLight.b;
             if (maxComp < 0.005f) continue;
 
-            int nextDist = curDist + 1;
+            int nextDist = cur.dist + 1;
             float falloff = 1.0f - (float)nextDist / kCrossoverRadius;
             if (falloff <= 0.0f) continue;
             glm::vec3 nextLight = curLight * falloff;
 
             for (const auto& dir : bfsDirs) {
-                glm::ivec3 nextPos = curPos + dir;
-                auto nkey = packPos(nextPos);
-                if (visited.count(nkey)) continue;
+                glm::ivec3 nextPos = cur.pos + dir;
 
                 int nlx = nextPos.x - worldMinX, nlz = nextPos.z - worldMinZ;
                 if (nlx < 0 || nlx >= W || nlz < 0 || nlz >= D) continue;
@@ -614,27 +674,32 @@ static void propagateCrossChunkLights(const MeshBuildInput& in,
                 int nly = nextPos.y - nsy * SEC_H;
                 if (nly < 0 || nly >= SEC_H) continue;
 
+                int bitIdx = (nextPos.y * BD + nlz) * BW + nlx;
+                if (visited.test(bitIdx)) continue;
+
                 BlockState ns = selfBlock(nlx, nly, nlz, nsy);
                 if (ns.type() != BLOCK_AIR && ns.type() != BLOCK_ERRER) {
                     BlockProperties np = GetBlockProperties(ns.type());
-                    if (!np.isTransparent) { visited.insert(nkey); continue; }
+                    if (!np.isTransparent) { visited.set(bitIdx); continue; }
                 }
-                visited.insert(nkey);
-                writeSelfLight(nlx, nly, nlz, nsy, nextLight);
-                queue.push_back({ nextPos, nextDist });
+
+                // 只有提升了亮度才传播
+                if (!writeSelfLight(nlx, nly, nlz, nsy, nextLight)) continue;
+
+                visited.set(bitIdx);
+                qpush({ nextPos, nextDist });
             }
         }
-    }
 
-    // ── 4. 清除全零 section ──
-    for (int sy = 0; sy < SEC_COUNT; ++sy) {
-        auto& sp = out.sectionLightData[sy];
-        if (!sp) continue;
-        bool any = false;
-        for (uint32_t v : *sp) { if ((v & 0x00FFFFFFu) != 0) { any = true; break; } }
-        if (!any) sp.reset();
+        // ── 4. 清除全零 section ──
+        for (int sy = 0; sy < SEC_COUNT; ++sy) {
+            auto& sp = out.sectionLightData[sy];
+            if (!sp) continue;
+            bool any = false;
+            for (uint32_t v : *sp) { if ((v & 0x00FFFFFFu) != 0) { any = true; break; } }
+            if (!any) sp.reset();
+        }
     }
-}
 
 
 
@@ -695,6 +760,11 @@ void ChunkWorkerPool::meshBuildOne(const MeshBuildInput& in, ChunkBuildResult& o
                 for (int x = 0; x < W; ++x)
                     sec.updateFaceWithNeighbor(x, y, 0, BACK, layer[y * W + x]);
         }
+    }
+
+    // ── Per-section 光源列表：Task 1 已产出 per-section 格式，直接 move 到输出 ──
+    for (int sy = 0; sy < ChunkBuildResult::SECTION_COUNT; ++sy) {
+        out.sectionLightSources[sy] = std::move(in.selfLightSources[sy]);
     }
 
     // ── 跨区块边界光照传播 ──

@@ -103,7 +103,7 @@ void ChunkManager::initialize(int renderRadius, const glm::vec3& cameraPos) {
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
     // 初始化光照缓存 GPU 资源
-    m_lightCache.initGL();
+    // 光照 SSBO 延迟初始化（首次 upload 时创建）
 
     int n = RuntimeConfig::get().workerThreads;
     if (n <= 0) {
@@ -552,16 +552,12 @@ void ChunkManager::integrateBlockData() {
         if (m_loadedChunks.find(key) != m_loadedChunks.end()) continue;
         if (m_blockReady.find(key) != m_blockReady.end()) continue;
 
-        // ── 注册 Task 1 worker 扫描到的发光方块到光源注册表 ──
-        auto& reg = LightSourceRegistry::instance();
-        for (const auto& src : r->lightSources) {
-            reg.addLight(src.pos, src);
-        }
+        // ── 光源位置：Task 1 已产出 per-section 格式，直接 move 零拷贝 ──
 
-        // 进入 BLOCK_READY（直接 move worker 产出的 16 个 box + 区块内光照，零拷贝）
+        // 进入 BLOCK_READY（直接 move worker 产出的 16 个 box + per-section 光源 + 区块内光照）
         BlockReadyEntry entry;
         entry.boxes = std::move(r->boxes);
-        entry.lightSources = std::move(r->lightSources);
+        entry.sectionLightSources = std::move(r->sectionLightSources);
         entry.sectionLightData = std::move(r->sectionLightData);
         m_blockReady[key] = std::move(entry);
 
@@ -728,6 +724,9 @@ void ChunkManager::submitMeshTask(const glm::ivec2& pos) {
     // self 光照：move Task 1 产出的区块内 BFS 结果
     input.selfLightData = std::move(it->second.sectionLightData);
 
+    // self 光源：move Task 1 产出的 per-section 光源列表（零拷贝，Task 2 直接转交 Section）
+    input.selfLightSources = std::move(it->second.sectionLightSources);
+
     static const glm::ivec2 offsets[4] = {
         { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 }
     };
@@ -758,7 +757,7 @@ void ChunkManager::submitMeshTask(const glm::ivec2& pos) {
         if (itLoaded != m_loadedChunks.end()) {
             for (int sy = 0; sy < SEC_COUNT; ++sy) {
                 SectionKey secKey = makeSectionKey(nbPos.x, nbPos.y, sy);
-                const SectionLightCache* cache = m_lightCache.get(secKey);
+                const SectionLightCache* cache = getLightCache(secKey);
                 if (cache && cache->hasAnyLight()) {
                     extractBoundaryLightFromCache(cache, sy, d,
                                                    input.neighborBoundaryLight[d][sy]);
@@ -833,13 +832,20 @@ void ChunkManager::loadMeshResult(ChunkBuildResult& result) {
     // 连通邻居指针
     linkNeighbors(raw);
 
+    // ── 应用 Task 2 产出的 per-section 光源列表到 Section ──
+    for (int sy = 0; sy < Chunk::SECTION_COUNT; ++sy) {
+        if (result.sectionLightSources[sy] && !result.sectionLightSources[sy]->empty()) {
+            raw->getSection(sy).setLightSources(std::move(result.sectionLightSources[sy]));
+        }
+    }
+
     // ── 应用 Task 2 产出的完整光照数据到 LightCacheManager ──
     // sectionLightData 为 shared_ptr<SectionLightData>，直接 memcpy 到 LightCache。
     bool chunkHasAnyLight = false;
     for (int sy = 0; sy < Chunk::SECTION_COUNT; ++sy) {
         if (!result.sectionLightData[sy]) continue;
         SectionKey secKey = makeSectionKey(pos.x, pos.y, sy);
-        SectionLightCache* cache = m_lightCache.getOrCreate(secKey);
+        SectionLightCache* cache = &m_lightCaches[secKey];
         cache->writeRawData(result.sectionLightData[sy]->data());
         cache->setHasLight(true);
         cache->dirty = true;
@@ -1181,23 +1187,22 @@ bool ChunkManager::applyLocalSetBlock(const glm::ivec3& worldPos, BlockState sta
 
     chunk->setBlockAndUpdate(localPos.x, localPos.y, localPos.z, state);
 
-    // ── 光源注册：方块变动时直接更新光源注册表 ──
+    // ── 方块变动：更新 Section 光源列表 + 触发增量光照重传播 ──
     if (oldState.type() != state.type()) {
-        auto& reg = LightSourceRegistry::instance();
+        int sy = worldPos.y / Section::HEIGHT;
+        Section& sec = chunk->getSection(sy);
+        int lx = localPos.x;
+        int lz = localPos.z;
+        uint16_t packed = packChunkLightPos(lx, worldPos.y, lz);
 
-        // 旧方块是发光方块 → 移除光源
-        BlockProperties oldProps = GetBlockProperties(oldState.type());
-        if (oldProps.emissive > 0.0f) {
-            reg.removeLight(worldPos);
+        // 旧方块是发光方块 → 从 Section 光源列表移除（O(1) swap-and-pop）
+        if (isEmissive(oldState.type())) {
+            sec.removeLightSource(packed);
         }
 
-        // 新方块是发光方块 → 添加光源
-        BlockProperties newProps = GetBlockProperties(state.type());
-        if (newProps.emissive > 0.0f) {
-            LightSource src = getBlockLightDef(state.type(), worldPos);
-            if (src.intensity > 0.0f) {
-                reg.addLight(worldPos, src);
-            }
+        // 新方块是发光方块 → 加入 Section 光源列表
+        if (isEmissive(state.type())) {
+            sec.addLightSource(packed);
         }
 
         // 触发增量光照重传播
@@ -1454,6 +1459,200 @@ void ChunkManager::saveAllDirtyChunks() {
 
 // ── 光源传播 ──────────────────────────────────────────────────────
 
+// ── 光照缓存辅助 ──────────────────────────────────────────────────
+
+const SectionLightCache* ChunkManager::getLightCache(uint64_t sectionKey) const {
+    auto it = m_lightCaches.find(sectionKey);
+    return (it != m_lightCaches.end()) ? &it->second : nullptr;
+}
+
+void ChunkManager::bindLightSSBOs() const {
+    if (m_lightSSBO) {
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, m_lightSSBO);
+    }
+    if (m_sectionMapSSBO) {
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, m_sectionMapSSBO);
+    }
+}
+
+void ChunkManager::uploadLightSSBOs(const glm::ivec3& camSecMin, const glm::ivec3& camSecMax) {
+    bool camChanged = (camSecMin != m_lightSecMin || camSecMax != m_lightSecMax);
+    if (camChanged) {
+        m_lightSectionMapDirty = true;
+        m_lightSecMin = camSecMin;
+        m_lightSecMax = camSecMax;
+    }
+
+    // 检查是否有脏缓存需要处理
+    if (!m_lightSectionMapDirty) {
+        bool anyDirty = false;
+        for (const auto& [key, cache] : m_lightCaches) {
+            if (cache.dirty) { anyDirty = true; break; }
+        }
+        if (!anyDirty) return;
+    }
+
+    glm::ivec3 range = camSecMax - camSecMin + 1;
+    int totalSlots = range.x * range.y * range.z;
+
+    if (m_lightSectionMapDirty) {
+        // ── 重建查找表 + 光照数据 ──
+        std::vector<int32_t> sectionMap(totalSlots, -1);
+
+        // 检查是否有无槽位的光照 section（决定全量/增量路径）
+        bool needFullRebuild = false;
+        for (auto& [key, cache] : m_lightCaches) {
+            if (!cache.hasAnyLight()) continue;
+            if (m_lightSlotMap.find(key) == m_lightSlotMap.end()) {
+                needFullRebuild = true; break;
+            }
+        }
+
+        if (needFullRebuild) {
+            // ── 全量重建：新 section 出现，槽位重分配 ──
+            std::vector<uint8_t> lightData;
+            m_lightSlotMap.clear();
+
+            for (auto& [key, cache] : m_lightCaches) {
+                if (!cache.hasAnyLight()) continue;
+
+                int chunkX = int(int32_t((key >> 32) & 0xFFFFFFu));
+                int chunkZ = int(int32_t((key >> 8)  & 0xFFFFFFu));
+                int sectionY = int(key & 0xFFu);
+                if (chunkX & 0x800000) chunkX |= ~0xFFFFFF;
+                if (chunkZ & 0x800000) chunkZ |= ~0xFFFFFF;
+
+                glm::ivec3 rel = glm::ivec3(chunkX, sectionY, chunkZ) - camSecMin;
+                if (rel.x < 0 || rel.x >= range.x ||
+                    rel.y < 0 || rel.y >= range.y ||
+                    rel.z < 0 || rel.z >= range.z)
+                    continue;
+
+                int mapIdx = rel.x + rel.y * range.x + rel.z * range.x * range.y;
+                int slot = (int)(lightData.size() / SectionLightCache::BYTES);
+                m_lightSlotMap[key] = slot;
+                sectionMap[mapIdx] = slot * (int)SectionLightCache::CELLS;
+
+                const uint32_t* src = cache.rawData();
+                lightData.insert(lightData.end(),
+                                  reinterpret_cast<const uint8_t*>(src),
+                                  reinterpret_cast<const uint8_t*>(src + SectionLightCache::CELLS));
+                cache.dirty = false;
+            }
+
+            // 上传查找表 SSBO
+            GLsizeiptr mapBytes = (GLsizeiptr)sectionMap.size() * sizeof(int32_t);
+            if (!m_sectionMapSSBO || m_sectionMapSSBOSize < mapBytes) {
+                if (!m_sectionMapSSBO) glGenBuffers(1, &m_sectionMapSSBO);
+                glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_sectionMapSSBO);
+                glBufferData(GL_SHADER_STORAGE_BUFFER, mapBytes, sectionMap.data(), GL_DYNAMIC_DRAW);
+                m_sectionMapSSBOSize = mapBytes;
+            } else {
+                glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_sectionMapSSBO);
+                glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, mapBytes, sectionMap.data());
+            }
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+
+            // 上传光照数据 SSBO
+            GLsizeiptr dataBytes = (GLsizeiptr)lightData.size();
+            if (dataBytes == 0) dataBytes = 4;
+            if (!m_lightSSBO || m_lightSSBOSize < dataBytes) {
+                if (!m_lightSSBO) glGenBuffers(1, &m_lightSSBO);
+                glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_lightSSBO);
+                glBufferData(GL_SHADER_STORAGE_BUFFER, dataBytes, dataBytes > 4 ? lightData.data() : nullptr, GL_DYNAMIC_DRAW);
+                m_lightSSBOSize = dataBytes;
+            } else {
+                glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_lightSSBO);
+                glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, dataBytes, lightData.data());
+            }
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+        } else {
+            // ── 仅相机移动：重建查找表（复用已有槽位）+ 增量上传脏 section ──
+            for (auto& [key, cache] : m_lightCaches) {
+                if (!cache.hasAnyLight()) continue;
+                auto slotIt = m_lightSlotMap.find(key);
+                if (slotIt == m_lightSlotMap.end()) continue;
+
+                int chunkX = int(int32_t((key >> 32) & 0xFFFFFFu));
+                int chunkZ = int(int32_t((key >> 8)  & 0xFFFFFFu));
+                int sectionY = int(key & 0xFFu);
+                if (chunkX & 0x800000) chunkX |= ~0xFFFFFF;
+                if (chunkZ & 0x800000) chunkZ |= ~0xFFFFFF;
+
+                glm::ivec3 rel = glm::ivec3(chunkX, sectionY, chunkZ) - camSecMin;
+                if (rel.x < 0 || rel.x >= range.x ||
+                    rel.y < 0 || rel.y >= range.y ||
+                    rel.z < 0 || rel.z >= range.z)
+                    continue;
+
+                int mapIdx = rel.x + rel.y * range.x + rel.z * range.x * range.y;
+                sectionMap[mapIdx] = slotIt->second * (int)SectionLightCache::CELLS;
+            }
+
+            // 上传查找表（数据量小，增量更新）
+            GLsizeiptr mapBytes = (GLsizeiptr)sectionMap.size() * sizeof(int32_t);
+            if (!m_sectionMapSSBO || m_sectionMapSSBOSize < mapBytes) {
+                if (!m_sectionMapSSBO) glGenBuffers(1, &m_sectionMapSSBO);
+                glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_sectionMapSSBO);
+                glBufferData(GL_SHADER_STORAGE_BUFFER, mapBytes, sectionMap.data(), GL_DYNAMIC_DRAW);
+                m_sectionMapSSBOSize = mapBytes;
+            } else {
+                glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_sectionMapSSBO);
+                glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, mapBytes, sectionMap.data());
+            }
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+
+            // 增量上传脏 section（复用已有槽位，仅 glBufferSubData）
+            bool bound = false;
+            for (auto& [key, cache] : m_lightCaches) {
+                if (!cache.dirty) continue;
+                auto it = m_lightSlotMap.find(key);
+                if (it == m_lightSlotMap.end()) continue;
+                if (!bound) {
+                    glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_lightSSBO);
+                    bound = true;
+                }
+                GLintptr offset = (GLintptr)it->second * SectionLightCache::BYTES;
+                glBufferSubData(GL_SHADER_STORAGE_BUFFER, offset,
+                                 (GLsizeiptr)SectionLightCache::BYTES,
+                                 cache.rawData());
+                cache.dirty = false;
+            }
+            if (bound) glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+        }
+
+        m_lightSectionMapDirty = false;
+    } else {
+        // ── 查找表未变，仅增量上传脏 section ──
+        bool needRebuild = false;
+        bool bound = false;
+        for (auto& [key, cache] : m_lightCaches) {
+            if (!cache.dirty) continue;
+            auto it = m_lightSlotMap.find(key);
+            if (it == m_lightSlotMap.end()) {
+                needRebuild = true;
+                continue;
+            }
+            if (!bound) {
+                glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_lightSSBO);
+                bound = true;
+            }
+            GLintptr offset = (GLintptr)it->second * SectionLightCache::BYTES;
+            glBufferSubData(GL_SHADER_STORAGE_BUFFER, offset,
+                             (GLsizeiptr)SectionLightCache::BYTES,
+                             cache.rawData());
+            cache.dirty = false;
+        }
+        if (bound) glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+        if (needRebuild) {
+            // 有脏缓存尚无槽位（新增光照 section）→ 立刻全量重建，不拖延到下一帧
+            m_lightSectionMapDirty = true;
+            uploadLightSSBOs(camSecMin, camSecMax);  // 尾递归：重建槽位并上传
+            return;
+        }
+    }
+}
+
 void ChunkManager::notifyLightChange(const glm::ivec3& worldPos) {
     m_pendingLightChanges.push_back(worldPos);
 }
@@ -1463,25 +1662,87 @@ void ChunkManager::updateLighting() {
     // 区块生成时的初始光照由 Task 1（区块内 BFS）+ Task 2（跨边界 BFS）在 worker
     // 线程完成，主线程不再做全量重建。
     if (!m_pendingLightChanges.empty()) {
-        auto blockQuery = [this](const glm::ivec3& pos) -> BlockState {
+        // ── 预缓存：收集所有可能被 BFS 访问的 chunk 的 BlockBox ──
+        // BFS 区域每个变动位置 ±kMaxLightRadius（16），最多覆盖 3×3 chunk。
+        // 预取 BlockBox shared_ptr 避免 BFS 内逐格查 m_loadedChunks/m_blockReady。
+        std::unordered_map<ChunkKey, ChunkBoxes> blockCache;
+        constexpr float kRadius = kMaxLightRadius;
+        int r = (int)std::ceil(kRadius);
+        for (const auto& pos : m_pendingLightChanges) {
+            int cMinX = (int)std::floor((float)(pos.x - r) / 16.0f);
+            int cMaxX = (int)std::floor((float)(pos.x + r) / 16.0f);
+            int cMinZ = (int)std::floor((float)(pos.z - r) / 16.0f);
+            int cMaxZ = (int)std::floor((float)(pos.z + r) / 16.0f);
+            for (int cx = cMinX; cx <= cMaxX; ++cx) {
+                for (int cz = cMinZ; cz <= cMaxZ; ++cz) {
+                    ChunkKey ck = chunkPosToKey(glm::ivec2(cx, cz));
+                    if (blockCache.find(ck) == blockCache.end()) {
+                        ChunkBoxes boxes;
+                        if (getChunkBoxes(glm::ivec2(cx, cz), boxes)) {
+                            blockCache[ck] = boxes;
+                        }
+                    }
+                }
+            }
+        }
+
+        auto blockQuery = [&](const glm::ivec3& pos) -> BlockState {
             if (pos.y < 0 || pos.y >= Chunk::HEIGHT) {
                 return BlockState{ BLOCK_STONE, ORIENT_NONE };
             }
-            glm::ivec2 cp(
-                (int)std::floor((float)pos.x / (float)Chunk::WIDTH),
-                (int)std::floor((float)pos.z / (float)Chunk::DEPTH)
-            );
-            if (!hasBlockData(cp)) {
+            int cx = (int)std::floor((float)pos.x / 16.0f);
+            int cz = (int)std::floor((float)pos.z / 16.0f);
+            auto it = blockCache.find(chunkPosToKey(glm::ivec2(cx, cz)));
+            if (it == blockCache.end()) {
                 return BlockState{ BLOCK_STONE, ORIENT_NONE };
             }
-            return getBlockAt(pos);
+            int lx = ((pos.x % 16) + 16) % 16;
+            int lz = ((pos.z % 16) + 16) % 16;
+            int sy = pos.y / 16;
+            if (pos.y < 0) sy--;
+            if (sy < 0 || sy >= CHUNK_SECTION_COUNT) {
+                return BlockState{ BLOCK_STONE, ORIENT_NONE };
+            }
+            int ly = pos.y - sy * 16;
+            const auto& box = it->second[sy];
+            if (!box) return BlockState{};
+            return box->blocks[(ly * 16 + lz) * 16 + lx];
         };
         auto cacheGetter = [this](uint64_t sectionKey) -> SectionLightCache* {
-            return m_lightCache.getOrCreate(sectionKey);
+            return &m_lightCaches[sectionKey];
         };
 
-        LightSourceRegistry& reg = LightSourceRegistry::instance();
-        constexpr float kRadius = LightSourceRegistry::kMaxLightRadius;
+        // SourceQuery：从已加载区块的 Section 光源列表做 AABB 过滤。
+        // 光源数据随 Section 走（与 BlockBox 同模式），不再维护独立 map。
+        auto sourceQuery = [this](const glm::ivec3& min, const glm::ivec3& max) -> std::vector<glm::ivec3> {
+            std::vector<glm::ivec3> result;
+            int cMinX = (int)std::floor((float)min.x / 16.0f);
+            int cMinZ = (int)std::floor((float)min.z / 16.0f);
+            int cMaxX = (int)std::floor((float)max.x / 16.0f);
+            int cMaxZ = (int)std::floor((float)max.z / 16.0f);
+            int sMinY = min.y / 16;
+            int sMaxY = max.y / 16;
+            for (int cx = cMinX; cx <= cMaxX; ++cx) {
+                for (int cz = cMinZ; cz <= cMaxZ; ++cz) {
+                    Chunk* chunk = getChunk(glm::ivec2(cx, cz));
+                    if (!chunk) continue;
+                    for (int sy = sMinY; sy <= sMaxY; ++sy) {
+                        if (sy < 0 || sy >= Chunk::SECTION_COUNT) continue;
+                        Section& sec = chunk->getSection(sy);
+                        auto& sources = sec.getLightSources();
+                        if (!sources || sources->empty()) continue;
+                        for (uint16_t packed : *sources) {
+                            glm::ivec3 wp = unpackLightWorld(packed, cx, cz);
+                            if (wp.x >= min.x && wp.x <= max.x &&
+                                wp.y >= min.y && wp.y <= max.y &&
+                                wp.z >= min.z && wp.z <= max.z)
+                                result.push_back(wp);
+                        }
+                    }
+                }
+            }
+            return result;
+        };
         std::unordered_set<uint64_t> processed;
         for (const auto& pos : m_pendingLightChanges) {
             glm::ivec3 q(pos.x / 8, pos.y / 8, pos.z / 8);
@@ -1490,7 +1751,7 @@ void ChunkManager::updateLighting() {
                          | ((uint64_t)(uint32_t)q.z << 44);
             if (processed.count(key)) continue;
             processed.insert(key);
-            LightPropagation::propagateRegion(pos, kRadius, reg, blockQuery, cacheGetter);
+            LightPropagation::propagateRegion(pos, kRadius, sourceQuery, blockQuery, cacheGetter);
         }
         m_pendingLightChanges.clear();
     }
@@ -1505,49 +1766,31 @@ void ChunkManager::updateLighting() {
     glm::ivec3 secMin(camSecX - R, 0, camSecZ - R);
     glm::ivec3 secMax(camSecX + R, Chunk::SECTION_COUNT - 1, camSecZ + R);
 
-    m_lightCache.uploadToGPU(secMin, secMax);
+    uploadLightSSBOs(secMin, secMax);
 }
 
-// ── 光源注册：扫描 chunk 内所有方块，注册发光方块 ──────────────
+// ── 区块光照：扫描 chunk 内所有发光方块并触发光照传播 ──────────
 
 void ChunkManager::registerChunkLightSources(Chunk* chunk) {
     if (!chunk) return;
-    auto& reg = LightSourceRegistry::instance();
+    // 光源信息从方块数据派生，无需注册表。
+    // 扫描所有 section 找发光方块，触发增量光照传播。
     glm::ivec2 cp = chunk->getPosition();
-
-    for (int sy = 0; sy < Chunk::SECTION_COUNT; ++sy) {
-        const Section& sec = chunk->getSection(sy);
-        const BlockState* data = sec.stateData();
-        if (!data) continue;
-        int baseY = sy * Section::HEIGHT;
-        for (int y = 0; y < Section::HEIGHT; ++y) {
-            for (int z = 0; z < Section::DEPTH; ++z) {
-                for (int x = 0; x < Section::WIDTH; ++x) {
-                    BlockState state = data[(y * Section::DEPTH + z) * Section::WIDTH + x];
-                    BlockProperties props = GetBlockProperties(state.type());
-                    if (props.emissive > 0.0f) {
-                        glm::ivec3 worldPos(
-                            cp.x * Chunk::WIDTH + x,
-                            baseY + y,
-                            cp.y * Chunk::DEPTH + z
-                        );
-                        LightSource src = getBlockLightDef(state.type(), worldPos);
-                        if (src.intensity > 0.0f) {
-                            reg.addLight(worldPos, src);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    int midY = Chunk::HEIGHT / 2;
+    int cx = cp.x * Chunk::WIDTH + Chunk::WIDTH / 2;
+    int cz = cp.y * Chunk::DEPTH + Chunk::DEPTH / 2;
+    notifyLightChange(glm::ivec3(cx, midY, cz));
 }
 
 void ChunkManager::unregisterChunkLightSources(const glm::ivec2& chunkPos) {
-    auto& reg = LightSourceRegistry::instance();
-    reg.removeLightsInChunk(chunkPos.x, chunkPos.y);
+    int cx = chunkPos.x, cz = chunkPos.y;
 
-    // 清理该 chunk 所有 section 的光照缓存
+    // 清理该 chunk 所有 section 的光照缓存和 SSBO 槽位
+    // 光源列表随 Section 生命周期自动释放（shared_ptr），无需单独清理。
     for (int sy = 0; sy < Chunk::SECTION_COUNT; ++sy) {
-        m_lightCache.remove(makeSectionKey(chunkPos.x, chunkPos.y, sy));
+        uint64_t key = makeSectionKey(cx, cz, sy);
+        m_lightCaches.erase(key);
+        m_lightSlotMap.erase(key);
+        m_lightSectionMapDirty = true;  // 槽位变化，下帧重建查找表
     }
 }

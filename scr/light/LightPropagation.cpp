@@ -1,16 +1,14 @@
 ﻿#include "LightPropagation.h"
 #include "../chunk/ChunkManager.h"
 #include <cmath>
-#include <deque>
 #include <cstring>
+#include <algorithm>
+#include <climits>
 
 uint64_t LightPropagation::toSectionKey(const glm::ivec3& worldPos) {
-    int chunkW = 16;
-    int chunkD = 16;
-    int secH   = 16;
-    int chunkX = (int)std::floor((float)worldPos.x / (float)chunkW);
-    int chunkZ = (int)std::floor((float)worldPos.z / (float)chunkD);
-    int sectionY = worldPos.y / secH;
+    int chunkX = (int)std::floor((float)worldPos.x / 16.0f);
+    int chunkZ = (int)std::floor((float)worldPos.z / 16.0f);
+    int sectionY = worldPos.y / 16;
     if (worldPos.y < 0) sectionY--;
     return ChunkManager::makeSectionKey(chunkX, chunkZ, sectionY);
 }
@@ -24,16 +22,7 @@ glm::ivec3 LightPropagation::toLocal(const glm::ivec3& worldPos) {
 
 bool LightPropagation::blocksLight(BlockType type) {
     if (type == BLOCK_AIR || type == BLOCK_ERRER) return false;
-    BlockProperties props = GetBlockProperties(type);
-    return !props.isTransparent;
-}
-
-glm::vec3 LightPropagation::attenuate(const LightSource& src, int distance) {
-    if (distance <= 0) return src.color * src.intensity;
-    float d = (float)distance;
-    float falloff = 1.0f - d / src.radius;
-    if (falloff <= 0.0f) return glm::vec3(0.0f);
-    return src.color * src.intensity * falloff;
+    return !GetBlockProperties(type).isTransparent;
 }
 
 void LightPropagation::clearSectionCaches(const glm::ivec3& regionMin,
@@ -57,172 +46,184 @@ void LightPropagation::clearSectionCaches(const glm::ivec3& regionMin,
     }
 }
 
-// ---- Main propagation ----
+// ── 多光源合并 BFS ───────────────────────────────────────────────────
+// 所有光源同时入队，共享 visited + queue，每格只访问一次。
+// 用 flat vector<uint8_t> 替代 unordered_set 做 visited 追踪（零哈希，缓存友好）。
+// 与 propagateIntraChunkLights（ChunkWorkerPool.cpp）采用相同的合并策略。
 
-void LightPropagation::propagateSingle(const LightSource& src,
-                                        BlockQuery blockQuery,
-                                        CacheGetter cacheGetter) {
-    std::deque<QueueEntry> queue;
+void LightPropagation::propagateMultiSource(const std::vector<glm::ivec3>& sources,
+                                             BlockQuery blockQuery,
+                                             CacheGetter cacheGetter) {
+    if (sources.empty()) return;
 
-    // CRITICAL: Write light at the source position first.
-    // For Block-type sources (glowstone), the source cell itself must
-    // be illuminated so that faces of the block and faces of adjacent
-    // air blocks looking into it both see the light.
-    {
-        uint64_t secKey = toSectionKey(src.pos);
-        SectionLightCache* cache = cacheGetter(secKey);
-        if (cache) {
-            glm::ivec3 local = toLocal(src.pos);
-            cache->maxSet(local.x, local.y, local.z, src.color * src.intensity);
-            cache->setHasLight(true);
-        }
+    // ── 1. 计算包围盒（所有光源的最大影响范围）──
+    glm::ivec3 bmin(INT_MAX), bmax(INT_MIN);
+    for (const auto& src : sources) {
+        BlockState st = blockQuery(src);
+        const LightDef& def = isEmissive(st.type())
+            ? getLightDefForBlock(st.type()) : getTorchLightDef();
+        if (def.intensity <= 0.0f) continue;
+        int r = (int)std::ceil(def.radius);
+        bmin = glm::min(bmin, src - r);
+        bmax = glm::max(bmax, src + r);
     }
+    if (bmin.x > bmax.x) return;  // 无有效光源
 
-    // BFS: from source to surrounding cells
-    queue.push_back({ src.pos, src.color * src.intensity, 0 });
+    glm::ivec3 size = bmax - bmin + 1;
+    int totalCells = size.x * size.y * size.z;
+    // 安全上限：若区域过大（不太可能，但防御）
+    if (totalCells > 256 * 256 * 256) return;
+
+    // ── 2. flat visited 数组（uint8_t 比 vector<bool> 快，无位操作开销）──
+    std::vector<uint8_t> visited(totalCells, 0);
+    auto visitIdx = [&](const glm::ivec3& wp) -> int {
+        glm::ivec3 lp = wp - bmin;
+        return (lp.z * size.y + lp.y) * size.x + lp.x;
+    };
+
+    // ── 3. 环形缓冲 BFS（预分配，零运行时堆分配）──
+    static constexpr size_t kRingSize = 65536;
+    static thread_local std::vector<QueueEntry> s_ring(kRingSize);
+    size_t head = 0, tail = 0;
+    auto push = [&](const QueueEntry& e) { s_ring[tail++ % kRingSize] = e; };
+    auto pop  = [&]() -> QueueEntry { return s_ring[head++ % kRingSize]; };
+    auto qempty = [&]() -> bool { return head == tail; };
 
     static const glm::ivec3 dirs[6] = {
-        { 1, 0, 0 }, { -1, 0, 0 },
-        { 0, 1, 0 }, { 0, -1, 0 },
-        { 0, 0, 1 }, { 0, 0, -1 }
+        { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 }
     };
 
-    // Track visited cells to avoid redundant queue entries;
-    // key = pack(worldPos) for dedup within this propagation.
-    std::unordered_set<uint64_t> visited;
-    auto packPos = [](const glm::ivec3& p) -> uint64_t {
-        uint64_t x = (uint64_t)(uint32_t)p.x & 0xFFFFFFu;
-        uint64_t y = (uint64_t)(uint32_t)(p.y & 0xFFF);
-        uint64_t z = (uint64_t)(uint32_t)p.z & 0xFFFFFFu;
-        return x | (y << 24) | (z << 36);
+    // ── 4. 写入光照辅助：只有提升了亮度才返回 true ──
+    auto maxWrite = [&](const glm::ivec3& wp, const glm::vec3& light) -> bool {
+        uint64_t secKey = toSectionKey(wp);
+        SectionLightCache* cache = cacheGetter(secKey);
+        if (!cache) return false;
+        glm::ivec3 local = toLocal(wp);
+        glm::vec3 cur = cache->get(local.x, local.y, local.z);
+        if (light.r <= cur.r && light.g <= cur.g && light.b <= cur.b) return false;
+        cache->maxSet(local.x, local.y, local.z, light);
+        cache->setHasLight(true);
+        return true;
     };
-    visited.insert(packPos(src.pos));
 
-    while (!queue.empty()) {
-        QueueEntry cur = queue.front();
-        queue.pop_front();
+    // ── 5. 所有光源同时入队（种子）──
+    for (const auto& src : sources) {
+        BlockState st = blockQuery(src);
+        const LightDef& def = isEmissive(st.type())
+            ? getLightDefForBlock(st.type()) : getTorchLightDef();
+        if (def.intensity <= 0.0f) continue;
 
-        if (cur.dist >= (int)src.radius) continue;
-        float maxComp = glm::max(cur.light.r, glm::max(cur.light.g, cur.light.b));
-        if (maxComp < 0.005f) continue;
+        glm::vec3 srcLight = def.color * def.intensity;
+        int idx = visitIdx(src);
+        maxWrite(src, srcLight);
+        visited[idx] = 1;
+        push({ src, 0, def.radius, srcLight });
+    }
+
+    // ── 6. 单次 BFS ──
+    while (!qempty()) {
+        QueueEntry cur = pop();
+
+        if (cur.dist >= (int)cur.srcRadius) continue;
 
         int nextDist = cur.dist + 1;
-        glm::vec3 nextLight = attenuate(src, nextDist);
-        if (nextLight.r <= 0.0f && nextLight.g <= 0.0f && nextLight.b <= 0.0f)
-            continue;
+        float falloff = 1.0f - (float)nextDist / cur.srcRadius;
+        if (falloff <= 0.0f) continue;
+
+        glm::vec3 nextLight = cur.srcBrightness * falloff;
+        float maxComp = nextLight.r;
+        if (nextLight.g > maxComp) maxComp = nextLight.g;
+        if (nextLight.b > maxComp) maxComp = nextLight.b;
+        if (maxComp < 0.005f) continue;
 
         for (const auto& dir : dirs) {
             glm::ivec3 nextPos = cur.pos + dir;
 
-            // Skip already visited
-            if (visited.count(packPos(nextPos))) continue;
+            int idx = visitIdx(nextPos);
+            if (visited[idx]) continue;
 
-            // Check: does the DESTINATION cell block light?
             BlockState ns = blockQuery(nextPos);
             if (blocksLight(ns.type())) {
-                // The neighbor is opaque. Mark visited but don't
-                // write light or continue BFS from it.
-                visited.insert(packPos(nextPos));
+                visited[idx] = 1;
                 continue;
             }
 
-            visited.insert(packPos(nextPos));
+            // 只有提升了亮度才继续传播（多源 max 混合剪枝）
+            if (!maxWrite(nextPos, nextLight)) continue;
 
-            // Write light to this cell
-            uint64_t secKey = toSectionKey(nextPos);
-            SectionLightCache* cache = cacheGetter(secKey);
-            if (cache) {
-                glm::ivec3 local = toLocal(nextPos);
-                cache->maxSet(local.x, local.y, local.z, nextLight);
-                cache->setHasLight(true);
-            }
-
-            // Continue propagation
-            queue.push_back({ nextPos, nextLight, nextDist });
+            visited[idx] = 1;
+            push({ nextPos, nextDist, cur.srcRadius, cur.srcBrightness });
         }
     }
 }
 
-// ---- New: Propagate all sources ----
+// ── 单光源 BFS（薄封装，内部委托 propagateMultiSource）───────────────
 
-void LightPropagation::propagateAll(const LightSourceRegistry& registry,
-                                     BlockQuery blockQuery,
-                                     CacheGetter cacheGetter) {
-    for (const auto& [key, src] : registry.all()) {
-        if (src.intensity <= 0.0f) continue;
-        propagateSingle(src, blockQuery, cacheGetter);
-    }
+void LightPropagation::propagateSingle(const glm::ivec3& srcPos,
+                                        BlockQuery blockQuery,
+                                        CacheGetter cacheGetter) {
+    propagateMultiSource({ srcPos }, blockQuery, cacheGetter);
 }
 
-// ---- Align world-coordinate bounding box to section boundaries ----
-// clearSectionCaches works at section granularity (uses floor conversion),
-// so we expand the region to section boundaries before clearing,
-// ensuring queryAffecting and clearSectionCaches use identical ranges.
+// ── 全量传播 ───────────────────────────────────────────────────────
+
+void LightPropagation::propagateAll(const std::vector<glm::ivec3>& sources,
+                                     BlockQuery blockQuery,
+                                     CacheGetter cacheGetter) {
+    propagateMultiSource(sources, blockQuery, cacheGetter);
+}
+
+// ── 区域边界对齐 ───────────────────────────────────────────────────
+
 static void alignToSectionBounds(glm::ivec3& vmin, glm::ivec3& vmax) {
-    // Use std::floor for negative coordinates: C++ integer division
-    // truncates toward zero, but section boundaries need floor semantics
-    // (consistent with clearSectionCaches).
     vmin.x = (int)std::floor((float)vmin.x / 16.0f) * 16;
     vmin.y = (int)std::floor((float)vmin.y / 16.0f) * 16;
     vmin.z = (int)std::floor((float)vmin.z / 16.0f) * 16;
-    // vmax: round up to the next section boundary (end of current section)
     vmax.x = ((int)std::floor((float)vmax.x / 16.0f) + 1) * 16 - 1;
     vmax.y = ((int)std::floor((float)vmax.y / 16.0f) + 1) * 16 - 1;
     vmax.z = ((int)std::floor((float)vmax.z / 16.0f) + 1) * 16 - 1;
 }
 
-// ---- Incremental: clear region and re-propagate from affected sources ----
+// ── 增量：清空区域并从受影响光源重传播 ───────────────────────────
 
 void LightPropagation::propagateRegion(const glm::ivec3& center, float maxRadius,
-                                        const LightSourceRegistry& registry,
+                                        SourceQuery sourceQuery,
                                         BlockQuery blockQuery,
                                         CacheGetter cacheGetter) {
-    // Clear only the affected region
     int r = (int)std::ceil(maxRadius);
     glm::ivec3 regionMin = center - glm::ivec3(r);
     glm::ivec3 regionMax = center + glm::ivec3(r);
 
-    // Align to section boundaries so clearSectionCaches and queryAffecting agree
     glm::ivec3 alignedMin = regionMin;
     glm::ivec3 alignedMax = regionMax;
     alignToSectionBounds(alignedMin, alignedMax);
 
     clearSectionCaches(alignedMin, alignedMax, cacheGetter);
 
-    // Find sources that could affect this region (using aligned bounds)
-    auto affected = registry.queryAffecting(alignedMin, alignedMax);
+    auto affected = sourceQuery(alignedMin, alignedMax);
 
-    // Re-propagate from each affected source
-    for (const auto& src : affected) {
-        if (src.intensity <= 0.0f) continue;
-        propagateSingle(src, blockQuery, cacheGetter);
-    }
+    // 合并 BFS：所有受影响光源一次遍历
+    propagateMultiSource(affected, blockQuery, cacheGetter);
 }
 
-// ---- Incremental: remove a source and re-light its area ----
+// ── 增量：移除光源并重光照其区域 ─────────────────────────────────
 
 void LightPropagation::removeAndReLight(const glm::ivec3& oldPos, float oldRadius,
-                                         const LightSourceRegistry& registry,
+                                         SourceQuery sourceQuery,
                                          BlockQuery blockQuery,
                                          CacheGetter cacheGetter) {
-    // Clear the old source's affected area
     int r = (int)std::ceil(oldRadius);
     glm::ivec3 regionMin = oldPos - glm::ivec3(r);
     glm::ivec3 regionMax = oldPos + glm::ivec3(r);
 
-    // Align to section boundaries
     glm::ivec3 alignedMin = regionMin;
     glm::ivec3 alignedMax = regionMax;
     alignToSectionBounds(alignedMin, alignedMax);
 
     clearSectionCaches(alignedMin, alignedMax, cacheGetter);
 
-    // Find other sources that overlap this area (using aligned bounds)
-    auto affected = registry.queryAffecting(alignedMin, alignedMax);
+    auto affected = sourceQuery(alignedMin, alignedMax);
 
-    // Re-propagate from each
-    for (const auto& src : affected) {
-        if (src.intensity <= 0.0f) continue;
-        propagateSingle(src, blockQuery, cacheGetter);
-    }
+    // 合并 BFS：所有受影响光源一次遍历
+    propagateMultiSource(affected, blockQuery, cacheGetter);
 }

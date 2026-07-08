@@ -95,7 +95,19 @@
       "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /t:Build /p:Configuration=Debug /p:Platform=x64 /m /nologo /v:minimal 2>&1 | Select-Object -Last 20)",
       "PowerShell(Get-Command *)",
       "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Debug /p:Platform=x64 /m /v:minimal 2>&1)",
-      "PowerShell(taskkill *)"
+      "PowerShell(taskkill *)",
+      "Bash(\"/c/D/visual studio/Common7/IDE/devenv.exe\" iMc.sln /Build \"Debug|x64\")",
+      "PowerShell(& \"D:\\\\visual studio\\\\Common7\\\\IDE\\\\devenv.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /Build \"Debug|x64\" 2>&1 | Select-Object -Last 40)",
+      "PowerShell($msbuild = \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\"; & $msbuild \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Debug /p:Platform=x64 /v:minimal 2>&1 | Select-Object -Last 30)",
+      "PowerShell($msbuild = \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\"; & $msbuild \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Debug /p:Platform=x64 /v:minimal 2>&1 | Select-Object -Last 20)",
+      "PowerShell($msbuild = \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\"; & $msbuild \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Debug /p:Platform=x64 /v:minimal 2>&1 | Select-Object -Last 15)",
+      "PowerShell($utf8Bom = New-Object System.Text.UTF8Encoding $true; $files = @\\(\"E:\\\\opengl\\\\iMc\\\\scr\\\\light\\\\LightSource.h\", \"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkWorkerPool.h\", \"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkWorkerPool.cpp\", \"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.h\", \"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.cpp\"\\); foreach \\($f in $files\\) { $c = [IO.File]::ReadAllText\\($f\\); $c = $c -replace \"`r`n\",\"`n\" -replace \"`n\",\"`r`n\"; [IO.File]::WriteAllText\\($f, $c, $utf8Bom\\) }; Write-Host \"Done\")",
+      "PowerShell($utf8Bom = New-Object System.Text.UTF8Encoding $true; $files = @\\(\"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.h\", \"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.cpp\"\\); foreach \\($f in $files\\) { $c = [IO.File]::ReadAllText\\($f\\); $c = $c -replace \"`r`n\",\"`n\" -replace \"`n\",\"`r`n\"; [IO.File]::WriteAllText\\($f, $c, $utf8Bom\\) }; Write-Host \"Done\")",
+      "PowerShell($msbuild = \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\"; & $msbuild \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Debug /p:Platform=x64 /v:minimal 2>&1 | Select-Object -Last 12)",
+      "PowerShell($utf8Bom = New-Object System.Text.UTF8Encoding $true; @\\(\"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.h\",\"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.cpp\"\\) | % { $c = [IO.File]::ReadAllText\\($_\\); [IO.File]::WriteAllText\\($_, $c -replace \"`r`n\",\"`n\" -replace \"`n\",\"`r`n\", $utf8Bom\\) }; $msbuild = \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\"; & $msbuild \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Debug /p:Platform=x64 /v:minimal 2>&1 | Select-Object -Last 10)",
+      "Bash(git diff *)",
+      "Read(//tmp/**)",
+      "Bash(git ls-tree *)"
     ],
     "additionalDirectories": [
       "e:\\opengl\\iMc\\scr"

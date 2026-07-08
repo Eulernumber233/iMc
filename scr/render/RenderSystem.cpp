@@ -1739,12 +1739,11 @@ void RenderSystem::lightingPass(const std::shared_ptr<Camera>camera
     glBindTexture(GL_TEXTURE_2D, m_shadowAccum[m_shadowAccumCurrIdx]); // 时域累积后的阴影可见度
 
     // ── 绑定光照缓存 SSBO ──────────────────────────────────────────
-    const auto& lightCache = chunkManager.getLightCache();
-    lightCache.bindSSBOs();
+    chunkManager.bindLightSSBOs();
 
     // 设置 section 查找范围（供着色器将世界坐标映射到 section 偏移表）
-    glm::ivec3 secMin  = lightCache.getCachedCameraSecMin();
-    glm::ivec3 secRange = lightCache.getCachedCameraSecRange();
+    glm::ivec3 secMin  = chunkManager.getCachedLightSecMin();
+    glm::ivec3 secRange = chunkManager.getCachedLightSecRange();
     m_deferredLightingShader.setVec3("camSecMin", glm::vec3(secMin));
     m_deferredLightingShader.setVec3("camSecRange", glm::vec3(secRange));
 

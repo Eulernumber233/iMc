@@ -4,6 +4,7 @@
 #include "BlockBox.h"
 #include "ChunkArena.h"
 #include "ChunkDimensions.h"
+#include "../light/LightCache.h"  // SectionLightData
 #include <array>
 #include <memory>
 #include <vector>
@@ -103,6 +104,41 @@ public:
     // 不动 m_box / m_instanceData / m_PosToInstanceIndex —— 这些是 CPU 端方块数据与 mesh，仍然有效。
     void notifyGpuSlotReleased();
 
+    // ── 光照数据（与 m_box 平行的独立数据源）──────────────────────
+    // 由 Task 2 产出，loadMeshResult 中通过 setLightData 写入 Section。
+    // GPU 上传时 ChunkManager 直接从此读取。
+    const std::shared_ptr<SectionLightData>& getLightData() const { return m_lightData; }
+    void setLightData(std::shared_ptr<SectionLightData> data) {
+        m_lightData = std::move(data);
+        m_lightDirty = true;
+    }
+    bool isLightDirty() const { return m_lightDirty; }
+    void clearLightDirty() { m_lightDirty = false; }
+    bool hasLightData() const { return m_lightData != nullptr; }
+
+    // ── 光源位置数据（与 m_box 平行的独立数据源）──────────────────
+    // 由 Task 2 拆分 chunk 级光源列表产出，loadMeshResult 中写入 Section。
+    // 格式：uint16_t 压缩 chunk 内坐标（x:4, y:8, z:4），见 LightSource.h。
+    // 增删通过 addLightSource / removeLightSource（swap-and-pop，O(1) 删除）。
+    const std::shared_ptr<std::vector<uint16_t>>& getLightSources() const { return m_lightSources; }
+    void setLightSources(std::shared_ptr<std::vector<uint16_t>> sources) {
+        m_lightSources = std::move(sources);
+    }
+    void addLightSource(uint16_t packed) {
+        if (!m_lightSources) m_lightSources = std::make_shared<std::vector<uint16_t>>();
+        m_lightSources->push_back(packed);
+    }
+    void removeLightSource(uint16_t packed) {
+        if (!m_lightSources || m_lightSources->empty()) return;
+        auto& v = *m_lightSources;
+        auto it = std::find(v.begin(), v.end(), packed);
+        if (it != v.end()) {
+            *it = v.back();
+            v.pop_back();
+        }
+    }
+    bool hasLightSources() const { return m_lightSources && !m_lightSources->empty(); }
+
     // 网络序列化：读取/写入整个 section 的 BlockState 数据
     void readAllBlocks(std::vector<BlockState>& out) const;
     void writeAllBlocks(const std::vector<BlockState>& data);
@@ -137,6 +173,13 @@ private:
 
     // GPU arena slot 缓存：rebuildDrawCommands 直接读此字段，无需查 unordered_map。
     ChunkArena::Slot m_gpuSlot;
+
+    // 光照数据（shared_ptr 共享所有权，与 BlockBox 模式一致）
+    std::shared_ptr<SectionLightData> m_lightData;
+    
+    // 光源数据（shared_ptr 共享所有权，与 BlockBox 模式一致），用于增量光照传播。
+    std::shared_ptr<std::vector<uint16_t>> m_lightSources;
+    bool m_lightDirty = true;
 
     // 内部辅助
     static int idx(int x, int y, int z) { return (y * DEPTH + z) * WIDTH + x; }

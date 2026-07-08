@@ -37,7 +37,8 @@ class ChunkSaveManager;
 struct BlockReadyEntry {
     ChunkBoxes boxes;               // 16 个 section 的方块数据 + 锁（见 BlockBox.h）
     uint8_t neighborBlockReady = 0; // 4-bit: bit[i]=1 表示 m_neighbors[i] 方向已完成 Task 1
-    std::vector<LightSource> lightSources; // Task 1 worker 扫描到的发光方块（主线程注册后用）
+    // Per-section 光源坐标（Task 1 直接产出此格式，零拷贝流经 Task 2 到 Section）
+    std::array<std::shared_ptr<std::vector<uint16_t>>, CHUNK_SECTION_COUNT> sectionLightSources;
     ChunkLightData sectionLightData; // Task 1 区块内 BFS 结果（shared_ptr 共享）
 };
 
@@ -101,20 +102,25 @@ public:
     BlockState getBlockAt(const glm::ivec3& worldPos);
 
     // ── 光源管理 ──────────────────────────────────────────────────
-    // 光照缓存管理器（每 section 的 RGB 光照值，供 GPU 延迟光照采样）
-    LightCacheManager& getLightCache() { return m_lightCache; }
-    const LightCacheManager& getLightCache() const { return m_lightCache; }
-
     // 方块变动后触发增量光照更新（仅重传播 affected 区域）
     void notifyLightChange(const glm::ivec3& worldPos);
 
     // 每帧调用：处理待定的光照变化并上传到 GPU
     void updateLighting();
 
-    // 区块加载后扫描注册其内部发光方块（emissive > 0），并触发重传播
+    // 绑定光照 SSBO（延迟光照 pass 前由 RenderSystem 调用）
+    void bindLightSSBOs() const;
+
+    // 查询光照 SSBO 的相机范围（shader uniform 用）
+    glm::ivec3 getCachedLightSecMin() const { return m_lightSecMin; }
+    glm::ivec3 getCachedLightSecRange() const {
+        return m_lightSecMax - m_lightSecMin + 1;
+    }
+
+    // 区块加载后扫描注册其内部发光方块并触发重传播
     void registerChunkLightSources(class Chunk* chunk);
 
-    // 区块卸载前移除其光源注册并清理光照缓存
+    // 区块卸载前清理其光照缓存
     void unregisterChunkLightSources(const glm::ivec2& chunkPos);
 
     // 网络统一点修改入口：把一次方块改动应用到本地权威数据。
@@ -318,7 +324,25 @@ private:
     bool m_needChunkScan = true;
 
     // ── 光源系统 ──────────────────────────────────────────────────
-    LightCacheManager m_lightCache;                // 每 section 光照缓存（GPU SSBO 管理）
+    // 光照缓存：sectionKey → SectionLightCache（替代原 LightCacheManager）
+    std::unordered_map<uint64_t, SectionLightCache> m_lightCaches;
+
+    // GPU SSBO（直接管理，不再通过 LightCacheManager）
+    GLuint m_lightSSBO = 0;
+    GLuint m_sectionMapSSBO = 0;
+    GLsizeiptr m_lightSSBOSize = 0;
+    GLsizeiptr m_sectionMapSSBOSize = 0;
+    glm::ivec3 m_lightSecMin{0};
+    glm::ivec3 m_lightSecMax{0};
+    bool m_lightSectionMapDirty = true;
+
+    // ── 光照缓存内部方法 ──
+    const SectionLightCache* getLightCache(uint64_t sectionKey) const;
+    void uploadLightSSBOs(const glm::ivec3& camSecMin, const glm::ivec3& camSecMax);
+
+    // 槽位分配器：sectionKey → SSBO 槽位索引（每槽 16KB）
+    std::unordered_map<uint64_t, int> m_lightSlotMap;
+
     std::vector<glm::ivec3> m_pendingLightChanges; // 待处理的增量光照变动位置
 
     // 可见性缓存版本号

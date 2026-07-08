@@ -31,7 +31,9 @@ static constexpr int CHUNK_SECTION_COUNT =
 struct BlockDataResult {
     glm::ivec2 pos;
     ChunkBoxes boxes;                             // 16 个 section 的方块数据 + 锁（shared_ptr）
-    std::vector<LightSource> lightSources;        // Task 1 扫描到的发光方块（供主线程注册）
+    // 发光方块位置：按 section 分组（每 section 一个 shared_ptr<vector<uint16_t>>）
+    // 在 Task 1 中 scanLightSources 直接产出 per-section 格式，避免 Task 2 再拆分。
+    std::array<std::shared_ptr<std::vector<uint16_t>>, CHUNK_SECTION_COUNT> sectionLightSources;
     ChunkLightData sectionLightData;              // Task 1 区块内 BFS 结果（shared_ptr 共享）
 };
 
@@ -42,6 +44,8 @@ struct MeshBuildInput {
     ChunkBoxes self;            // 自身方块数据（shared_ptr 共享）
     ChunkBoxes neighbors[4];    // 邻居方块数据（缺失方向各 ptr 为 nullptr）
     ChunkLightData selfLightData; // Task 1 区块内 BFS 结果（shared_ptr 共享）
+    // 光源位置列表（per-section，从 BlockDataResult 零拷贝传入，Task 2 直接使用）
+    std::array<std::shared_ptr<std::vector<uint16_t>>, CHUNK_SECTION_COUNT> selfLightSources;
     // 邻居边界光照层：neighborBoundaryLight[d][sy] = 邻居 d 的 section sy 边界 16×16 RGBA8
     // +X→邻居 x=0 面：[y*16+z]；-X→邻居 x=15 面：[y*16+z]；
     // +Z→邻居 z=0 面：[y*16+x]；-Z→邻居 z=15 面：[y*16+x]。
@@ -55,6 +59,8 @@ struct ChunkBuildResult {
     static constexpr int SECTION_COUNT = ChunkConstants::CHUNK_HEIGHT / Section::HEIGHT;
     std::array<Section, SECTION_COUNT> sections;
     ChunkLightData sectionLightData; // Task 2 产出最终光照（shared_ptr 共享）
+    // Per-section 光源位置（从 chunk 级拆分，每 section 独立 shared_ptr）
+    std::array<std::shared_ptr<std::vector<uint16_t>>, SECTION_COUNT> sectionLightSources;
 };
 
 class ChunkWorkerPool {
