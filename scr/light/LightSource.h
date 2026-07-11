@@ -1,7 +1,7 @@
 ﻿#pragma once
 #include "../core.h"
-#include "../chunk/BlockType.h"
 #include <glm/glm.hpp>
+#include "../chunk/BlockType.h"
 
 // ── 光源属性静态表 ─────────────────────────────────────────────────
 // 不再需要独立的 LightSource 结构体 / LightSourceRegistry 单例。
@@ -18,6 +18,8 @@ inline LightDef getLightDefForBlock(BlockType type) {
     switch (type) {
     case BLOCK_GLOWSTONE:
         return { { 1.0f, 0.95f, 0.65f }, 1.0f, 15.0f };
+    case BLOCK_TORCH:
+        return { { 0.98f, 0.85f, 0.35f }, 0.8f, 14.0f };
     // 更多发光方块在此添加 case
     default:
         return { { 0.0f, 0.0f, 0.0f }, 0.0f, 0.0f };

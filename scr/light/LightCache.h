@@ -7,7 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
-
+#include "../chunk/ChunkDimensions.h"
 // ── 单 section 光照缓存：16³ = 4096 格，每格 RGBA8 uint32 ──────────
 // 由 Section 持有（通过 shared_ptr 共享，与 BlockBox 模式一致）。
 
@@ -89,4 +89,4 @@ private:
 using SectionLightData = std::array<uint32_t, SectionLightCache::CELLS>;
 
 /// 一个 chunk 的 16 个 section 光照数据（shared_ptr 共享所有权）
-using ChunkLightData = std::array<std::shared_ptr<SectionLightData>, 16>;
+using ChunkLightData = std::array<std::shared_ptr<SectionLightData>, ChunkConstants::SECTION_COUNT>;

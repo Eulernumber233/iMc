@@ -121,6 +121,25 @@ private:
     // 4 横向邻居（z+/z-/x+/x-，与原 NeighborChunk 顺序一致：0:+X 1:-X 2:+Z 3:-Z）
     std::array<Chunk*, 4> m_neighbors{ {nullptr, nullptr, nullptr, nullptr} };
 
+    // ── Task 3 光照 BFS 就绪追踪 ─────────────────────────────────────
+    // 8-bit 掩码标记 8 个 Moore 邻居哪些已加载。位序：
+    //   0:(-1,-1) 1:(0,-1) 2:(+1,-1)
+    //   3:(-1, 0)          4:(+1, 0)
+    //   5:(-1,+1) 6:(0,+1) 7:(+1,+1)
+    // 当所有 8 位都置位时，该 chunk 可投递 Task 3 做完整光照 BFS。
+    uint8_t m_lightNeighborsReady = 0;
+    bool    m_lightBfsDone = false;          // Task 3 已完成（避免重复投递）
+    static constexpr uint8_t LIGHT_NEIGHBORS_ALL = 0xFF;
+    static constexpr int MOORE_REV[8] = { 7, 6, 5, 4, 3, 2, 1, 0 }; // 反方向索引
+public:
+    bool isLightBfsReady() const { return m_lightNeighborsReady == LIGHT_NEIGHBORS_ALL; }
+    bool isLightBfsDone()  const { return m_lightBfsDone; }
+    void markLightBfsDone()      { m_lightBfsDone = true; }
+    void setLightNeighborReady(int slot)   { m_lightNeighborsReady |=  (1u << slot); }
+    void clearLightNeighborReady(int slot) { m_lightNeighborsReady &= ~(1u << slot); }
+    uint8_t getLightNeighborsReady() const { return m_lightNeighborsReady; }
+private:
+
     bool m_saveDirty = true; // 新生成/修改过的区块需要存档；写入磁盘后清零
 
     // 可见性缓存（chunk 粗剔结果）。用 ChunkManager 的 visGeneration 做版本号，

@@ -45,8 +45,23 @@ public:
                                  BlockQuery blockQuery,
                                  CacheGetter cacheGetter);
 
-private:
+    /// 移除遮挡物后的去遮挡传播：沿 6 方向追踪找到最近带光照的透明格，
+    /// 取其最大光照作为虚拟光源向打开空间 BFS。
+    static void propagateDeocclusion(const glm::ivec3& openedPos,
+                                     BlockQuery blockQuery,
+                                     CacheGetter cacheGetter);
+
+    /// 新增遮挡物（空气→不透明方块）：轻量级阴影传播。
+    /// 仅清空新方块周围与邻居光照成比例的小球体，只重传播邻近光源。
+    static void propagateOcclusion(const glm::ivec3& blockedPos,
+                                   SourceQuery sourceQuery,
+                                   BlockQuery blockQuery,
+                                   CacheGetter cacheGetter);
+
+    /// 判断方块是否阻挡光照传播
     static bool blocksLight(BlockType type);
+
+private:
 
     // 多光源合并 BFS：所有种子同时入队，共享 visited + queue，每格只访问一次。
     // 替代逐光源独立 BFS（O(N×volume) → O(volume)）。

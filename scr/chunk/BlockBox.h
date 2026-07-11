@@ -40,10 +40,6 @@ struct BlockBox {
 using ChunkBoxes = std::array<std::shared_ptr<BlockBox>,
                               ChunkConstants::CHUNK_HEIGHT / ChunkConstants::SECTION_HEIGHT>;
 
-// 区块内部光照数据（每 section 一个）。
-using ChunkLights = std::array<std::shared_ptr<int16_t>,
-    ChunkConstants::CHUNK_HEIGHT / ChunkConstants::SECTION_HEIGHT>;
-
 // 把一段「整 chunk 连续 buffer」（地形生成器 / 存档 / 网络反序列化的布局
 // (worldY*DEPTH+z)*WIDTH+x）切分为 CHUNK_SECTION_COUNT 个 section BlockBox。
 // 不加锁：调用时 box 都是新建、尚未对外共享。

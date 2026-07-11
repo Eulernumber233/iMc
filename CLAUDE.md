@@ -1,4 +1,4 @@
-## 语言
+﻿## 语言
 
 我正在学习中文，请使用中文和我交流，我在编写项目的同时可以学习到中文的交流技巧。代码注释与提交信息使用简体中文。请遵循此约定。
 
@@ -36,6 +36,12 @@ iMc 是一个用现代 OpenGL（4.6 core profile）和 C++17 编写的、受 Min
 - **构建**：在 VS2022 打开 `iMc.sln`，选 x64 Debug/Release，编译运行
 - **换行符**：所有源文件必须用 **CRLF**（Windows）换行。新建 `.h`/`.cpp` 时先转 CRLF（如 `unix2dos file.cpp`）再编译。纯 LF 文件会让 MSVC 误解析，报出诸如 "identifier undeclared"、"not a member of struct" 这类明明源码里有的符号的假错误。
 - **文件编码**：含中文（注释）的文件优先 UTF-8 with BOM，与现有文件一致，避免 MSVC 当成 GBK。纯 ASCII 文件可用无 BOM 的 UTF-8。
+- **⚠ Write 工具写入后必须修编码**：Claude Code 的 Write/Edit 工具写入的文件默认为 **LF 换行 + 无 BOM 的 UTF-8**，与 MSVC 要求的 CRLF + UTF-8 BOM 不兼容。含中文注释的新文件或大幅改动的文件写入后，**必须立即执行**：
+  ```powershell
+  # 一行修复 BOM + CRLF：
+  $f="文件绝对路径"; $c=[IO.File]::ReadAllText($f); $u=New-Object Text.UTF8Encoding($true); [IO.File]::WriteAllText($f,$c,$u)
+  ```
+  验证方法：用 bash 的 `file` 命令检查，应显示 `UTF-8 (with BOM) text, with CRLF line terminators`。漏掉这一步 → 编译时大量 "语法错误:namespace" 从 `__msvc_int128.hpp` 开始级联爆出，或中文乱码导致标识符解析失败。
 - **jsoncpp 注意**：内置的是老的 jsoncpp 0.5.0 API。用 `Json::Reader::parse(string, Value)` 和 `reader.getFormatedErrorMessages()`（注意拼写：单 t 的 "Formated"）。新版 `CharReaderBuilder` / `parseFromStream` **不可用**。
 
 ## 架构

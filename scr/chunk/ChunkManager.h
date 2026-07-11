@@ -37,9 +37,13 @@ class ChunkSaveManager;
 struct BlockReadyEntry {
     ChunkBoxes boxes;               // 16 个 section 的方块数据 + 锁（见 BlockBox.h）
     uint8_t neighborBlockReady = 0; // 4-bit: bit[i]=1 表示 m_neighbors[i] 方向已完成 Task 1
-    // Per-section 光源坐标（Task 1 直接产出此格式，零拷贝流经 Task 2 到 Section）
-    std::array<std::shared_ptr<std::vector<uint16_t>>, CHUNK_SECTION_COUNT> sectionLightSources;
-    ChunkLightData sectionLightData; // Task 1 区块内 BFS 结果（shared_ptr 共享）
+};
+
+// 增量光照变动记录：记录位置与变动前后的方块类型，用于区分四种情况
+struct PendingLightChange {
+    glm::ivec3 pos;
+    BlockType oldType;
+    BlockType newType;
 };
 
 class ChunkManager {
@@ -103,7 +107,9 @@ public:
 
     // ── 光源管理 ──────────────────────────────────────────────────
     // 方块变动后触发增量光照更新（仅重传播 affected 区域）
-    void notifyLightChange(const glm::ivec3& worldPos);
+    // oldType/newType 用于区分增光源/删光源/增遮挡/删遮挡四种情况
+    void notifyLightChange(const glm::ivec3& worldPos,
+                           BlockType oldType, BlockType newType);
 
     // 每帧调用：处理待定的光照变化并上传到 GPU
     void updateLighting();
@@ -117,8 +123,8 @@ public:
         return m_lightSecMax - m_lightSecMin + 1;
     }
 
-    // 区块加载后扫描注册其内部发光方块并触发重传播
-    void registerChunkLightSources(class Chunk* chunk);
+    //// 区块加载后扫描注册其内部发光方块并触发重传播
+    //void registerChunkLightSources(class Chunk* chunk);
 
     // 区块卸载前清理其光照缓存
     void unregisterChunkLightSources(const glm::ivec2& chunkPos);
@@ -324,10 +330,10 @@ private:
     bool m_needChunkScan = true;
 
     // ── 光源系统 ──────────────────────────────────────────────────
-    // 光照缓存：sectionKey → SectionLightCache（替代原 LightCacheManager）
+    // 光照缓存：sectionKey → SectionLightCache
     std::unordered_map<uint64_t, SectionLightCache> m_lightCaches;
 
-    // GPU SSBO（直接管理，不再通过 LightCacheManager）
+    // GPU SSBO
     GLuint m_lightSSBO = 0;
     GLuint m_sectionMapSSBO = 0;
     GLsizeiptr m_lightSSBOSize = 0;
@@ -340,10 +346,29 @@ private:
     const SectionLightCache* getLightCache(uint64_t sectionKey) const;
     void uploadLightSSBOs(const glm::ivec3& camSecMin, const glm::ivec3& camSecMax);
 
-    // 槽位分配器：sectionKey → SSBO 槽位索引（每槽 16KB）
+    // 槽位分配器：sectionKey → SSBO slot index
     std::unordered_map<uint64_t, int> m_lightSlotMap;
+    int m_lightNextSlot = 0;  // 下一个可用的 SSBO 槽位索引（只增不减，append 分配）
 
-    std::vector<glm::ivec3> m_pendingLightChanges; // 待处理的增量光照变动位置
+    // ── Task 3 光照 BFS 管理 ─────────────────────────────────────
+    // 已投递 Task 3 的 chunk（避免重复投递）
+    std::unordered_set<ChunkKey> m_lightInFlight;
+    // Task 3 完成队列
+    std::deque<std::unique_ptr<LightBuildResult>> m_pendingLightResults;
+
+    // 8 个 Moore 邻居的偏移（用于 light BFS 就绪检测）
+    static constexpr glm::ivec2 MOORE_OFFSETS[8] = {
+        {-1,-1}, {0,-1}, {+1,-1}, {-1,0}, {+1,0}, {-1,+1}, {0,+1}, {+1,+1}
+    };
+
+    // 检查新加载的 chunk 及其邻居是否满足 Task 3 条件
+    void checkAndSubmitLightBFS(Chunk* newChunk);
+    // 为指定 chunk 准备 LightBuildInput 并投递 Task 3
+    void submitLightBFS(const glm::ivec2& pos);
+    // 每帧取出已完成的 Task 3 结果并应用到 m_lightCaches
+    void drainLightResults();
+
+    std::vector<PendingLightChange> m_pendingLightChanges; // 待处理的增量光照变动
 
     // 可见性缓存版本号
     uint32_t m_visGeneration = 1;

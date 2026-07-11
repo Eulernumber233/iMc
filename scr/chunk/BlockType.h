@@ -16,6 +16,7 @@ enum BlockType : uint8_t {
     BLOCK_WOOD = 6,
     BLOCK_LEAVES = 7,
     BLOCK_GLOWSTONE = 8,  // 萤石（自发光方块）
+    BLOCK_TORCH = 9,
     BLOCK_COUNT  // 方块类型总数
 };
 enum BlockFace :uint8_t {

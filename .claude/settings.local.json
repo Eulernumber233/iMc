@@ -107,7 +107,18 @@
       "PowerShell($utf8Bom = New-Object System.Text.UTF8Encoding $true; @\\(\"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.h\",\"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.cpp\"\\) | % { $c = [IO.File]::ReadAllText\\($_\\); [IO.File]::WriteAllText\\($_, $c -replace \"`r`n\",\"`n\" -replace \"`n\",\"`r`n\", $utf8Bom\\) }; $msbuild = \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\"; & $msbuild \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Debug /p:Platform=x64 /v:minimal 2>&1 | Select-Object -Last 10)",
       "Bash(git diff *)",
       "Read(//tmp/**)",
-      "Bash(git ls-tree *)"
+      "Bash(git ls-tree *)",
+      "Bash(MSBuild iMc.sln /t:Build /p:Configuration=Debug /p:Platform=x64)",
+      "Bash(xxd ChunkWorkerPool.h)",
+      "PowerShell($f=\"E:\\\\opengl\\\\iMc\\\\CLAUDE.md\"; $c=[IO.File]::ReadAllText\\($f\\); $u=New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f,$c,$u\\))",
+      "PowerShell($f=\"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkWorkerPool.cpp\"; $c=[IO.File]::ReadAllText\\($f\\); $u=New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f,$c,$u\\))",
+      "PowerShell($f=\"E:\\\\opengl\\\\iMc\\\\scr\\\\light\\\\LightPropagation.cpp\"; $c=[IO.File]::ReadAllText\\($f\\); $u=New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f,$c,$u\\))",
+      "Bash(unix2dos \"E:/opengl/iMc/scr/light/LightPropagation.cpp\")",
+      "PowerShell($f=\"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.cpp\"; $c=[IO.File]::ReadAllText\\($f\\); $u=New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f,$c,$u\\))",
+      "PowerShell($f=\"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.h\"; $c=[IO.File]::ReadAllText\\($f\\); $u=New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f,$c,$u\\))",
+      "PowerShell($f = \"E:\\\\opengl\\\\iMc\\\\scr\\\\light\\\\LightPropagation.cpp\"; $c = [IO.File]::ReadAllText\\($f\\); $u = New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f, $c, $u\\))",
+      "PowerShell($f = \"E:\\\\opengl\\\\iMc\\\\scr\\\\light\\\\LightPropagation.cpp\"; $c = [IO.File]::ReadAllText\\($f\\); $c = $c.Replace\\(\"`r`n\", \"`n\"\\).Replace\\(\"`n\", \"`r`n\"\\); $u = New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f, $c, $u\\); $info = Get-Content $f -Raw -Encoding UTF8; if \\($info -match \"`r`n\"\\) { Write-Host \"CRLF confirmed\" } else { Write-Host \"LF only\" })",
+      "PowerShell(& \"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Debug /p:Platform=x64 /t:Build /m /v:minimal 2>&1 | Select-Object -Last 30)"
     ],
     "additionalDirectories": [
       "e:\\opengl\\iMc\\scr"
