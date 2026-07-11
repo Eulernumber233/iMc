@@ -1619,22 +1619,23 @@ void ChunkManager::notifyLightChange(const glm::ivec3& worldPos,
 
 void ChunkManager::updateLighting() {
     // ── 增量光照传播（主线程，仅处理方块变动引发的局部重传播）────
-    // 区分四种变动类型，每种用最轻量的算法：
-    //   增光源 → propagateSingle（max-clamp 叠加，不触及已有光照）
-    //   删光源 → removeAndReLight（仅清空旧光源范围 + 重传播邻近光源）
-    //   增遮挡 → propagateRegion（回退到全量，但范围有限，且触发频率大幅降低）
-    //   删遮挡 → propagateDeocclusion（从邻居取样虚拟光源传播）
+    // 统一策略：对于遮挡/去遮挡，清空受影响区域 + 找出所有邻近光源 + 重传播。
+    // 不再使用估算方法（propagateDeocclusion 的虚拟光源 / propagateOcclusion 的阴影半径估算），
+    // 因为从单一亮度值无法反推光源参数，估算在数学上就不可能是准确的。
+    // 重传播 BFS 体积 ≤ (2×kMaxLightRadius+1)³ ≈ 36K 格，主线程耗时 <2ms，完全可接受。
     if (!m_pendingLightChanges.empty()) {
         constexpr float kRadius = kMaxLightRadius;
         int r = (int)std::ceil(kRadius);
 
         // ── 预缓存：收集所有可能被 BFS 访问的 chunk 的 BlockBox ──
+        // 范围扩到变化点周围 r+16（多一圈 chunk），确保跨区块 BFS 不会
+        // 因邻居 chunk 缺失而把未加载区域误判为石墙截断光线。
         std::unordered_map<ChunkKey, ChunkBoxes> blockCache;
         for (const auto& ch : m_pendingLightChanges) {
-            int cMinX = (int)std::floor((float)(ch.pos.x - r) / 16.0f);
-            int cMaxX = (int)std::floor((float)(ch.pos.x + r) / 16.0f);
-            int cMinZ = (int)std::floor((float)(ch.pos.z - r) / 16.0f);
-            int cMaxZ = (int)std::floor((float)(ch.pos.z + r) / 16.0f);
+            int cMinX = (int)std::floor((float)(ch.pos.x - r) / 16.0f) - 1;
+            int cMaxX = (int)std::floor((float)(ch.pos.x + r) / 16.0f) + 1;
+            int cMinZ = (int)std::floor((float)(ch.pos.z - r) / 16.0f) - 1;
+            int cMaxZ = (int)std::floor((float)(ch.pos.z + r) / 16.0f) + 1;
             for (int cx = cMinX; cx <= cMaxX; ++cx) {
                 for (int cz = cMinZ; cz <= cMaxZ; ++cz) {
                     ChunkKey ck = chunkPosToKey(glm::ivec2(cx, cz));
@@ -1648,15 +1649,24 @@ void ChunkManager::updateLighting() {
             }
         }
 
+        // 二级缓存：blockQuery 中按需补齐未命中 chunk（减少跨区块截断）
         auto blockQuery = [&](const glm::ivec3& pos) -> BlockState {
             if (pos.y < 0 || pos.y >= Chunk::HEIGHT) {
                 return BlockState{ BLOCK_STONE, ORIENT_NONE };
             }
             int cx = (int)std::floor((float)pos.x / 16.0f);
             int cz = (int)std::floor((float)pos.z / 16.0f);
-            auto it = blockCache.find(chunkPosToKey(glm::ivec2(cx, cz)));
+            ChunkKey ck = chunkPosToKey(glm::ivec2(cx, cz));
+            auto it = blockCache.find(ck);
             if (it == blockCache.end()) {
-                return BlockState{ BLOCK_STONE, ORIENT_NONE };
+                // 缓存未命中：尝试实时查询（可能 chunk 刚加载或不在初始范围内）
+                ChunkBoxes boxes;
+                if (getChunkBoxes(glm::ivec2(cx, cz), boxes)) {
+                    it = blockCache.emplace(ck, std::move(boxes)).first;
+                } else {
+                    // 确实不存在于任何状态 → 视为实心墙（世界边界/未生成区域）
+                    return BlockState{ BLOCK_STONE, ORIENT_NONE };
+                }
             }
             int lx = ((pos.x % 16) + 16) % 16;
             int lz = ((pos.z % 16) + 16) % 16;
@@ -1705,8 +1715,6 @@ void ChunkManager::updateLighting() {
             }
             return result;
         };
-        printf("updateLighting: %zu pending changes, blockCache %zu chunks\n",
-            m_pendingLightChanges.size(), blockCache.size());
         // ── 按 8×8×8 网格去重后，逐条按类型分派 ──
         std::unordered_set<uint64_t> processed;
         for (const auto& ch : m_pendingLightChanges) {
@@ -1723,7 +1731,7 @@ void ChunkManager::updateLighting() {
             bool newOpaque = LightPropagation::blocksLight(ch.newType);
 
             if (newEmissive && !oldEmissive) {
-                // 情况 A：增光源（如火把）—— 仅从新光源传播
+                // 情况 A：增光源（如火把）—— 仅从新光源 max-clamp 叠加 BFS
                 LightPropagation::propagateSingle(ch.pos, blockQuery, cacheGetter);
             }
             else if (oldEmissive && !newEmissive) {
@@ -1733,13 +1741,14 @@ void ChunkManager::updateLighting() {
                                                     sourceQuery, blockQuery, cacheGetter);
             }
             else if (newOpaque && !oldOpaque) {
-                // 情况 C：增遮挡物 —— 轻量阴影传播（仅清空小球体 + 邻近光源）
+                // 情况 C：增遮挡物 —— 清空区域 + 重传播邻近光源（精确重传播）
                 LightPropagation::propagateOcclusion(ch.pos,
                                                       sourceQuery, blockQuery, cacheGetter);
             }
             else if (oldOpaque && !newOpaque) {
-                // 情况 D：删遮挡物（如破坏石头）—— 从邻居取光传播
-                LightPropagation::propagateDeocclusion(ch.pos, blockQuery, cacheGetter);
+                // 情况 D：删遮挡物（如破坏石头）—— 清空区域 + 重传播邻近光源（精确重传播）
+                LightPropagation::propagateDeocclusion(ch.pos,
+                    sourceQuery, blockQuery, cacheGetter);
             }
             // else: 纯透明→纯透明（如玻璃→空气），光照不变，跳过
         }

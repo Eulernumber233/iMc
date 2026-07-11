@@ -118,7 +118,10 @@
       "PowerShell($f=\"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.h\"; $c=[IO.File]::ReadAllText\\($f\\); $u=New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f,$c,$u\\))",
       "PowerShell($f = \"E:\\\\opengl\\\\iMc\\\\scr\\\\light\\\\LightPropagation.cpp\"; $c = [IO.File]::ReadAllText\\($f\\); $u = New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f, $c, $u\\))",
       "PowerShell($f = \"E:\\\\opengl\\\\iMc\\\\scr\\\\light\\\\LightPropagation.cpp\"; $c = [IO.File]::ReadAllText\\($f\\); $c = $c.Replace\\(\"`r`n\", \"`n\"\\).Replace\\(\"`n\", \"`r`n\"\\); $u = New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f, $c, $u\\); $info = Get-Content $f -Raw -Encoding UTF8; if \\($info -match \"`r`n\"\\) { Write-Host \"CRLF confirmed\" } else { Write-Host \"LF only\" })",
-      "PowerShell(& \"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Debug /p:Platform=x64 /t:Build /m /v:minimal 2>&1 | Select-Object -Last 30)"
+      "PowerShell(& \"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Debug /p:Platform=x64 /t:Build /m /v:minimal 2>&1 | Select-Object -Last 30)",
+      "PowerShell($f=\"E:\\\\opengl\\\\iMc\\\\scr\\\\light\\\\LightCache.h\"; $c=[IO.File]::ReadAllText\\($f\\); $u=New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f,$c,$u\\))",
+      "PowerShell($f=\"E:\\\\opengl\\\\iMc\\\\scr\\\\light\\\\LightPropagation.h\"; $c=[IO.File]::ReadAllText\\($f\\); $u=New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f,$c,$u\\))",
+      "PowerShell($f=\"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\BlockType.h\"; $c=[IO.File]::ReadAllText\\($f\\); $u=New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f,$c,$u\\); $f2=\"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.cpp\"; $c2=[IO.File]::ReadAllText\\($f2\\); $u2=New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f2,$c2,$u2\\))"
     ],
     "additionalDirectories": [
       "e:\\opengl\\iMc\\scr"

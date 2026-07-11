@@ -22,6 +22,19 @@ bool LightPropagation::blocksLight(BlockType type) {
     return !GetBlockProperties(type).isTransparent;
 }
 
+int LightPropagation::getLightOpacity(BlockType type) {
+    // 不透明方块：完全阻挡
+    if (blocksLight(type)) return 255;
+    // 空气：无衰减
+    if (type == BLOCK_AIR || type == BLOCK_ERRER) return 0;
+    // 透明方块：额外距离衰减（模拟光在水中/树叶中更快衰减）
+    switch (type) {
+    case BLOCK_WATER: return 2;    // 水：每格等效 3 格空气（1 + 2）
+    case BLOCK_LEAVES: return 1;   // 树叶：每格等效 2 格空气（1 + 1）
+    default: return 0;             // 其他透明方块（如火把占位）按空气处理
+    }
+}
+
 void LightPropagation::clearSectionCaches(const glm::ivec3& regionMin,
                                            const glm::ivec3& regionMax,
                                            CacheGetter cacheGetter) {
@@ -43,16 +56,15 @@ void LightPropagation::clearSectionCaches(const glm::ivec3& regionMin,
     }
 }
 
-// ── 逐光源 BFS（每源独立 visited 数组）──────────────────────────────
+// ── 多光源合并 BFS（含距离元数据 + 透明方块衰减）────────────────────
 // 设计要点：
-//   - 每个光源独立 BFS，写入共享 SectionLightCache。
-//   - **必须使用 visited 数组**：SectionLightCache 以 byte 精度存储，get() 返回
+//   - 所有光源同时入队，共享 visited + queue，每格只访问一次。
+//   - 每格缓存包含 RGB + 曼哈顿距离（alpha 通道），供增量更新精确计算衰减。
+//   - 透明非空气方块（水、树叶）增加等效距离惩罚，模拟光在水中/树叶中更快衰减。
+//   - 必须使用 visited 数组：SectionLightCache 以 byte 精度存储，get() 返回
 //     字节量化 float。原始 float 与字节量化 float 的 <= 比较存在精度偏差
 //     （如 0.68 > 173/255≈0.67843），仅靠 max-clamp 会导致已写入格被误判为
-//     "亮度提升"，重新入队 → 无限重入循环 → 直到 1M 防御上限才截断，实测每次
-//     约 5 秒。visited 保证每格每源只处理一次，彻底消除此问题。
-//   - 写入比较时先将入射光量化为字节精度，再与缓存值比较，确保"无变化则停止"。
-//   - 与 lightBuildOne（ChunkWorkerPool.cpp Task 3）采用相同的策略。
+//     "亮度提升"，重新入队 → 无限重入循环。visited 保证每格每源只处理一次。
 
 void LightPropagation::propagateMultiSource(const std::vector<glm::ivec3>& sources,
                                              BlockQuery blockQuery,
@@ -87,8 +99,8 @@ void LightPropagation::propagateMultiSource(const std::vector<glm::ivec3>& sourc
             return (size_t)((wy - bminY) * bd + (wz - bminZ)) * bw + (wx - bminX);
         };
 
-        // 写入辅助：将入射光量化到字节精度后再比较，消除 float↔byte 精度偏差
-        auto maxWrite = [&](const glm::ivec3& wp, const glm::vec3& light) -> bool {
+        // 写入辅助：量化后比较 RGB；距离取传入的 dist。
+        auto maxWrite = [&](const glm::ivec3& wp, const glm::vec3& light, int dist) -> bool {
             uint64_t secKey = toSectionKey(wp);
             SectionLightCache* cache = cacheGetter(secKey);
             if (!cache) return false;
@@ -98,13 +110,13 @@ void LightPropagation::propagateMultiSource(const std::vector<glm::ivec3>& sourc
             float qg = std::round(light.g * 255.0f) / 255.0f;
             float qb = std::round(light.b * 255.0f) / 255.0f;
             if (qr <= cur.r && qg <= cur.g && qb <= cur.b) return false;
-            cache->maxSet(local.x, local.y, local.z, light);
+            cache->maxSet(local.x, local.y, local.z, light, (uint8_t)dist);
             cache->setHasLight(true);
             return true;
         };
 
-        // 光源格
-        maxWrite(src, srcLight);
+        // 光源格（距离 = 0）
+        maxWrite(src, srcLight, 0);
         s_visited[vIdx(src.x, src.y, src.z)] = 1;
 
         s_ring.clear();
@@ -117,14 +129,6 @@ void LightPropagation::propagateMultiSource(const std::vector<glm::ivec3>& sourc
             if (cur.dist >= (int)cur.srcRadius) continue;
 
             int nextDist = cur.dist + 1;
-            float falloff = 1.0f - (float)nextDist / cur.srcRadius;
-            if (falloff <= 0.0f) continue;
-
-            glm::vec3 nextLight = cur.srcBrightness * falloff;
-            float maxComp = nextLight.r;
-            if (nextLight.g > maxComp) maxComp = nextLight.g;
-            if (nextLight.b > maxComp) maxComp = nextLight.b;
-            if (maxComp < 0.005f) continue;
 
             for (const auto& dir : dirs) {
                 glm::ivec3 nextPos = cur.pos + dir;
@@ -144,8 +148,25 @@ void LightPropagation::propagateMultiSource(const std::vector<glm::ivec3>& sourc
                 }
 
                 s_visited[idx] = 1;
+
+                // ── 透明方块光衰减 ──
+                // 透明非空气方块（水、树叶）增加等效距离，使光在其中更快衰减
+                int opacity = getLightOpacity(ns.type());
+                int effectiveDist = nextDist + opacity;
+                if (effectiveDist >= (int)cur.srcRadius) continue;  // 衰减后超出范围
+
+                float falloff = 1.0f - (float)effectiveDist / cur.srcRadius;
+                if (falloff <= 0.0f) continue;
+
+                glm::vec3 nextLight = cur.srcBrightness * falloff;
+                float maxComp = nextLight.r;
+                if (nextLight.g > maxComp) maxComp = nextLight.g;
+                if (nextLight.b > maxComp) maxComp = nextLight.b;
+                if (maxComp < 0.005f) continue;
+
                 // max-clamp 跨源混合：仅当本源的入射亮度提升了缓存值才继续传播
-                if (!maxWrite(nextPos, nextLight)) continue;
+                if (!maxWrite(nextPos, nextLight, effectiveDist)) continue;
+                // 入队时使用实际距离（非等效距离），保持 BFS 步数准确
                 s_ring.push_back(QueueEntry{ nextPos, nextDist, srcRadius, cur.srcBrightness });
             }
         }
@@ -223,184 +244,32 @@ void LightPropagation::removeAndReLight(const glm::ivec3& oldPos, float oldRadiu
     propagateMultiSource(affected, blockQuery, cacheGetter);
 }
 
-// ── 增量：移除遮挡物后的去遮挡传播 ─────────────────────────────────
-// 沿 6 方向追踪（最多 kMaxLightRadius 步），穿过透明无光格，
-// 找到最近带光照的格。取最大光照作为虚拟光源向新打开的空间 BFS。
+// ── 增量：移除遮挡物后的去遮挡传播（精确重传播）─────────────────────
+// 不再使用估算的 6 向追踪 + 虚拟光源 BFS。
+// 改为清空受影响区域并重传播所有邻近光源，结果始终准确。
 
 void LightPropagation::propagateDeocclusion(const glm::ivec3& openedPos,
+                                             SourceQuery sourceQuery,
                                              BlockQuery blockQuery,
                                              CacheGetter cacheGetter) {
-    static const glm::ivec3 dirs[6] = {
-        { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 }
-    };
-
-    // 1. 沿 6 方向追踪：穿过透明无光格，找到最近带光照的透明格
-    glm::vec3 maxLight(0.0f);
-    constexpr int kMaxTrace = (int)kMaxLightRadius;
-
-    for (const auto& d : dirs) {
-        for (int dist = 1; dist <= kMaxTrace; ++dist) {
-            glm::ivec3 np = openedPos + d * dist;
-            BlockState ns = blockQuery(np);
-            if (blocksLight(ns.type())) break; // 遇到不透明方块，此方向终止
-
-            uint64_t sk = toSectionKey(np);
-            SectionLightCache* cache = cacheGetter(sk);
-            if (!cache) continue;
-            glm::ivec3 loc = toLocal(np);
-            glm::vec3 l = cache->get(loc.x, loc.y, loc.z);
-            float comp = l.r;
-            if (l.g > comp) comp = l.g;
-            if (l.b > comp) comp = l.b;
-            if (comp < 0.005f) continue; // 透明但无光，继续追踪
-            // 找到光照，取 max 并停止本方向
-            if (l.r > maxLight.r) maxLight.r = l.r;
-            if (l.g > maxLight.g) maxLight.g = l.g;
-            if (l.b > maxLight.b) maxLight.b = l.b;
-            break;
-        }
-    }
-
-    float maxComp = maxLight.r;
-    if (maxLight.g > maxComp) maxComp = maxLight.g;
-    if (maxLight.b > maxComp) maxComp = maxLight.b;
-    if (maxComp < 0.005f) return; // 所有方向都没找到光源
-
-    // 2. 估算虚拟光源半径（与取到的光照亮度成比例）
-    float effectiveRadius = maxComp * kMaxLightRadius;
-    if (effectiveRadius < 1.0f) effectiveRadius = 1.0f;
-    int effR = (int)std::ceil(effectiveRadius);
-
-    // ── 包围盒 + visited（消除 float↔byte 精度误差引起的重复入队循环）──
-    int bminX = openedPos.x - effR, bmaxX = openedPos.x + effR;
-    int bminY = openedPos.y - effR, bmaxY = openedPos.y + effR;
-    int bminZ = openedPos.z - effR, bmaxZ = openedPos.z + effR;
-    int bw = bmaxX - bminX + 1, bh = bmaxY - bminY + 1, bd = bmaxZ - bminZ + 1;
-
-    static thread_local std::vector<QueueEntry> s_ring;
-    s_ring.reserve(65536);
-    static thread_local std::vector<uint8_t> s_visited;
-    s_visited.assign((size_t)bw * bh * bd, 0);
-    auto vIdx = [&](int wx, int wy, int wz) -> size_t {
-        return (size_t)((wy - bminY) * bd + (wz - bminZ)) * bw + (wx - bminX);
-    };
-
-    // 写入辅助：量化后比较
-    auto maxWrite = [&](const glm::ivec3& wp, const glm::vec3& light) -> bool {
-        uint64_t secKey = toSectionKey(wp);
-        SectionLightCache* cache = cacheGetter(secKey);
-        if (!cache) return false;
-        glm::ivec3 local = toLocal(wp);
-        glm::vec3 cur = cache->get(local.x, local.y, local.z);
-        float qr = std::round(light.r * 255.0f) / 255.0f;
-        float qg = std::round(light.g * 255.0f) / 255.0f;
-        float qb = std::round(light.b * 255.0f) / 255.0f;
-        if (qr <= cur.r && qg <= cur.g && qb <= cur.b) return false;
-        cache->maxSet(local.x, local.y, local.z, light);
-        cache->setHasLight(true);
-        return true;
-    };
-
-    // 3. BFS 从 openedPos 出发，将光照送入新打开的空间
-    maxWrite(openedPos, maxLight);
-    s_visited[vIdx(openedPos.x, openedPos.y, openedPos.z)] = 1;
-
-    s_ring.clear();
-    s_ring.push_back(QueueEntry{ openedPos, 0, effectiveRadius, maxLight });
-    size_t head = 0;
-
-    while (head < s_ring.size()) {
-        QueueEntry cur = s_ring[head++];
-
-        if (cur.dist >= (int)cur.srcRadius) continue;
-
-        int nextDist = cur.dist + 1;
-        float falloff = 1.0f - (float)nextDist / cur.srcRadius;
-        if (falloff <= 0.0f) continue;
-
-        glm::vec3 nextLight = cur.srcBrightness * falloff;
-        float nc = nextLight.r;
-        if (nextLight.g > nc) nc = nextLight.g;
-        if (nextLight.b > nc) nc = nextLight.b;
-        if (nc < 0.005f) continue;
-
-        for (const auto& d : dirs) {
-            glm::ivec3 np = cur.pos + d;
-
-            if (np.x < bminX || np.x > bmaxX) continue;
-            if (np.y < bminY || np.y > bmaxY) continue;
-            if (np.z < bminZ || np.z > bmaxZ) continue;
-
-            size_t idx = vIdx(np.x, np.y, np.z);
-            if (s_visited[idx]) continue;
-
-            BlockState ns = blockQuery(np);
-            if (blocksLight(ns.type())) {
-                s_visited[idx] = 1;
-                continue;
-            }
-
-            s_visited[idx] = 1;
-            if (!maxWrite(np, nextLight)) continue;
-            s_ring.push_back(QueueEntry{ np, nextDist, cur.srcRadius, cur.srcBrightness });
-        }
-    }
+    // 以 openedPos 为中心，清空最大光源半径范围内的缓存，
+    // 然后找出该范围内所有光源并重传播。
+    // 这保证无论光源在哪个方向、有几个光源、距离多远，结果都准确。
+    propagateRegion(openedPos, kMaxLightRadius,
+                    sourceQuery, blockQuery, cacheGetter);
 }
 
-// ── 增量：新增遮挡物的阴影传播 ─────────────────────────────────────
-// 替代全量 clearSectionCaches + propagateMultiSource。
-// 根据邻居光照亮度计算阴影半径，仅清空受影响小球体，只重传播邻近光源。
+// ── 增量：新增遮挡物的阴影传播（精确重传播）─────────────────────────
+// 不再使用基于邻居亮度的阴影半径估算。
+// 改为清空受影响区域并重传播所有邻近光源，结果始终准确。
 
 void LightPropagation::propagateOcclusion(const glm::ivec3& blockedPos,
                                            SourceQuery sourceQuery,
                                            BlockQuery blockQuery,
                                            CacheGetter cacheGetter) {
-    static const glm::ivec3 dirs[6] = {
-        { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 }
-    };
-
-    // 1. 取 6 邻居的最大光照，决定阴影影响半径
-    glm::vec3 maxNeighborLight(0.0f);
-    for (const auto& d : dirs) {
-        glm::ivec3 np = blockedPos + d;
-        BlockState ns = blockQuery(np);
-        if (blocksLight(ns.type())) continue;
-        uint64_t sk = toSectionKey(np);
-        SectionLightCache* cache = cacheGetter(sk);
-        if (!cache) continue;
-        glm::ivec3 loc = toLocal(np);
-        glm::vec3 l = cache->get(loc.x, loc.y, loc.z);
-        if (l.r > maxNeighborLight.r) maxNeighborLight.r = l.r;
-        if (l.g > maxNeighborLight.g) maxNeighborLight.g = l.g;
-        if (l.b > maxNeighborLight.b) maxNeighborLight.b = l.b;
-    }
-
-    float maxComp = maxNeighborLight.r;
-    if (maxNeighborLight.g > maxComp) maxComp = maxNeighborLight.g;
-    if (maxNeighborLight.b > maxComp) maxComp = maxNeighborLight.b;
-    if (maxComp < 0.005f) return; // 周围无光，无阴影可投射
-
-    // 2. 阴影半径 = 邻居亮度 × 最大光源半径（光照越亮 → 阴影越长）
-    int shadowR = (int)std::ceil(maxComp * kMaxLightRadius);
-    if (shadowR < 1) shadowR = 1;
-
-    // 3. 清空小球体内的光照缓存
-    glm::ivec3 sphereMin = blockedPos - glm::ivec3(shadowR);
-    glm::ivec3 sphereMax = blockedPos + glm::ivec3(shadowR);
-    glm::ivec3 alignedMin = sphereMin;
-    glm::ivec3 alignedMax = sphereMax;
-    alignToSectionBounds(alignedMin, alignedMax);
-    clearSectionCaches(alignedMin, alignedMax, cacheGetter);
-
-    // 4. 找出影响范围内的光源并重传播
-    //    搜索范围比清空范围大一个光源半径，确保边界光源被包含
-    int queryR = shadowR + (int)std::ceil(kMaxLightRadius);
-    glm::ivec3 queryMin = blockedPos - glm::ivec3(queryR);
-    glm::ivec3 queryMax = blockedPos + glm::ivec3(queryR);
-    glm::ivec3 queryAlignedMin = queryMin;
-    glm::ivec3 queryAlignedMax = queryMax;
-    alignToSectionBounds(queryAlignedMin, queryAlignedMax);
-
-    auto affected = sourceQuery(queryAlignedMin, queryAlignedMax);
-    propagateMultiSource(affected, blockQuery, cacheGetter);
+    // 以 blockedPos 为中心，清空最大光源半径范围内的缓存，
+    // 然后找出该范围内所有光源并重传播。
+    // BFS 自动正确处理新的遮挡关系——不透明方块在 BFS 中天然阻挡光。
+    propagateRegion(blockedPos, kMaxLightRadius,
+                    sourceQuery, blockQuery, cacheGetter);
 }

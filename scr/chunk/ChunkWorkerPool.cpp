@@ -564,8 +564,9 @@ void ChunkWorkerPool::lightBuildOne(const LightBuildInput& in, LightBuildResult&
                wy >= 0 && wy < BH;
     };
 
-    // 逐分量 max 写入（仅对中心 chunk 格有效）
-    auto writeLightMax = [&](int wx, int wy, int wz, const glm::vec3& light) -> bool {
+    // 逐分量 max 写入（仅对中心 chunk 格有效）。
+    // dist: 到光源的等效曼哈顿距离（含透明方块衰减），编码进 alpha 通道。
+    auto writeLightMax = [&](int wx, int wy, int wz, const glm::vec3& light, int dist) -> bool {
         if (!inCenterChunk(wx, wy, wz)) return false;
         int lx = wx - selfMinX;
         int lz = wz - selfMinZ;
@@ -583,8 +584,9 @@ void ChunkWorkerPool::lightBuildOne(const LightBuildInput& in, LightBuildResult&
         uint8_t pr = uint8_t(glm::clamp(int(newR * 255.0f + 0.5f), 0, 255));
         uint8_t pg = uint8_t(glm::clamp(int(newG * 255.0f + 0.5f), 0, 255));
         uint8_t pb = uint8_t(glm::clamp(int(newB * 255.0f + 0.5f), 0, 255));
+        uint8_t pd = uint8_t(glm::clamp(dist, 0, 255));
         (*out.sectionLightData[sy])[cellIdx] =
-            uint32_t(pr) | (uint32_t(pg) << 8) | (uint32_t(pb) << 16) | 0xFF000000u;
+            uint32_t(pr) | (uint32_t(pg) << 8) | (uint32_t(pb) << 16) | (uint32_t(pd) << 24);
         return true;
     };
 
@@ -615,7 +617,7 @@ void ChunkWorkerPool::lightBuildOne(const LightBuildInput& in, LightBuildResult&
             return ((wy - bminY) * bd + (wz - bminZ)) * bw + (wx - bminX);
         };
         // 光源格：如在中心 chunk 则写入；无论如何入队
-        writeLightMax(src.x, src.y, src.z, srcLight);
+        writeLightMax(src.x, src.y, src.z, srcLight, 0);
         s_visited[visitIdx(src.x, src.y, src.z)] = 1;
 
         s_ring.clear();
@@ -630,14 +632,6 @@ void ChunkWorkerPool::lightBuildOne(const LightBuildInput& in, LightBuildResult&
             if (cur.dist >= (int)cur.srcRadius) continue;
 
             int nextDist = cur.dist + 1;
-            float falloff = 1.0f - (float)nextDist / cur.srcRadius;
-            if (falloff <= 0.0f) continue;
-
-            glm::vec3 nextLight = cur.srcBrightness * falloff;
-            float maxComp = nextLight.r;
-            if (nextLight.g > maxComp) maxComp = nextLight.g;
-            if (nextLight.b > maxComp) maxComp = nextLight.b;
-            if (maxComp < 0.005f) continue;
 
             for (const auto& dir : bfsDirs) {
                 glm::ivec3 nextPos = cur.pos + dir;
@@ -661,11 +655,44 @@ void ChunkWorkerPool::lightBuildOne(const LightBuildInput& in, LightBuildResult&
                     }
                 }
 
+                // ── 透明方块光衰减 ──
+                int opacity = 0;
+                if (ns.type() != BLOCK_AIR && ns.type() != BLOCK_ERRER
+                    && GetBlockProperties(ns.type()).isTransparent) {
+                    // 水/树叶等透明方块：每格额外增加等效距离
+                    switch (ns.type()) {
+                    case BLOCK_WATER: opacity = 2; break;
+                    case BLOCK_LEAVES: opacity = 1; break;
+                    default: opacity = 0; break;
+                    }
+                }
+                int effectiveDist = nextDist + opacity;
+                if (effectiveDist >= (int)cur.srcRadius) {
+                    s_visited[idx] = 1;
+                    continue;
+                }
+
+                float falloffAdj = 1.0f - (float)effectiveDist / cur.srcRadius;
+                if (falloffAdj <= 0.0f) {
+                    s_visited[idx] = 1;
+                    continue;
+                }
+
+                glm::vec3 nextLightAdj = cur.srcBrightness * falloffAdj;
+                float nc2 = nextLightAdj.r;
+                if (nextLightAdj.g > nc2) nc2 = nextLightAdj.g;
+                if (nextLightAdj.b > nc2) nc2 = nextLightAdj.b;
+                if (nc2 < 0.005f) {
+                    s_visited[idx] = 1;
+                    continue;
+                }
+
                 // 标记 visited + 入队（无论是否在中心 chunk）
                 s_visited[idx] = 1;
 
-                // 尝试写入光照（仅在中心 chunk 内有效）
-                bool improved = writeLightMax(nextPos.x, nextPos.y, nextPos.z, nextLight);
+                // 尝试写入光照（仅在中心 chunk 内有效），含距离元数据
+                bool improved = writeLightMax(nextPos.x, nextPos.y, nextPos.z,
+                                              nextLightAdj, effectiveDist);
 
                 // 传播条件：光照有提升 或 格子在中心 chunk 外（需穿越到达中心）
                 if (improved || !inCenterChunk(nextPos.x, nextPos.y, nextPos.z)) {

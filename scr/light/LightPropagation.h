@@ -13,8 +13,8 @@ class SectionLightCache;  // 前向声明（供 std::function 指针类型使用
 // 衰减：线性 falloff light(d) = source * max(0, 1 - d/radius)。
 // 多光源：逐分量取 max 叠加。
 //
-// 不再依赖 LightSourceRegistry（已移除）。
-// 增量更新时调用方通过 SourceQuery 回调提供影响区域内的光源列表。
+// 每格光照缓存（SectionLightCache）同时存储 RGB 和到光源的曼哈顿距离
+// （alpha 通道），使增量更新可以精确计算衰减而无需估算。
 
 class LightPropagation {
 public:
@@ -45,14 +45,17 @@ public:
                                  BlockQuery blockQuery,
                                  CacheGetter cacheGetter);
 
-    /// 移除遮挡物后的去遮挡传播：沿 6 方向追踪找到最近带光照的透明格，
-    /// 取其最大光照作为虚拟光源向打开空间 BFS。
+    /// 移除遮挡物后的去遮挡传播。
+    /// 精确算法：清空受影响区域 + 重传播所有邻近光源，
+    /// 替代了原来依赖估算的 6 向追踪 + 虚拟光源 BFS。
     static void propagateDeocclusion(const glm::ivec3& openedPos,
+                                     SourceQuery sourceQuery,
                                      BlockQuery blockQuery,
                                      CacheGetter cacheGetter);
 
-    /// 新增遮挡物（空气→不透明方块）：轻量级阴影传播。
-    /// 仅清空新方块周围与邻居光照成比例的小球体，只重传播邻近光源。
+    /// 新增遮挡物（空气→不透明方块）的阴影传播。
+    /// 精确算法：清空受影响区域 + 重传播所有邻近光源，
+    /// 替代了原来基于邻居亮度估算阴影半径的近似方法。
     static void propagateOcclusion(const glm::ivec3& blockedPos,
                                    SourceQuery sourceQuery,
                                    BlockQuery blockQuery,
@@ -61,10 +64,14 @@ public:
     /// 判断方块是否阻挡光照传播
     static bool blocksLight(BlockType type);
 
+    /// 获取方块的光衰减量（每格额外增加的等效距离）
+    /// 返回 0（空气）、1–255（透明方块如水的衰减）、255（不透明方块）
+    static int getLightOpacity(BlockType type);
+
 private:
 
     // 多光源合并 BFS：所有种子同时入队，共享 visited + queue，每格只访问一次。
-    // 替代逐光源独立 BFS（O(N×volume) → O(volume)）。
+    // 每格缓存包含 RGB + 曼哈顿距离（alpha 通道）。
     static void propagateMultiSource(const std::vector<glm::ivec3>& sources,
                                      BlockQuery blockQuery,
                                      CacheGetter cacheGetter);
@@ -73,7 +80,7 @@ private:
         glm::ivec3 pos;
         int        dist;
         float      srcRadius;
-        glm::vec3  srcBrightness;  // color * intensity
+        glm::vec3  srcBrightness;
     };
 
     static uint64_t toSectionKey(const glm::ivec3& worldPos);

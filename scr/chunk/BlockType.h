@@ -243,6 +243,8 @@ inline BlockProperties GetBlockProperties(BlockType type) {
         return { true,  true,  false, glm::vec3(0.2f, 0.5f, 0.2f), 0.0f };
     case BLOCK_GLOWSTONE:
         return { false, true,  false, glm::vec3(1.0f, 0.95f, 0.65f), 1.0f };  // 暖黄色自发光
+    case BLOCK_TORCH:
+        return { true,  false, false, glm::vec3(0.98f, 0.85f, 0.35f), 0.8f }; // 火把：透明不挡光，自发光
     default:
         return { false, true,  false, glm::vec3(1.0f, 0.0f, 1.0f), 0.0f }; // 错误颜色
     }
