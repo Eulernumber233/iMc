@@ -64,6 +64,7 @@ ChunkManager::~ChunkManager() {
     }
     m_lightCaches.clear();
     m_lightSlotMap.clear();
+    m_dirtyLightSections.clear();
     m_lightNextSlot = 0;
     m_lightSSBOSize = 0;
     m_sectionMapSSBOSize = 0;
@@ -1340,16 +1341,29 @@ void ChunkManager::submitLightBFS(const glm::ivec2& pos) {
 }
 
 void ChunkManager::drainLightResults() {
-    auto results = m_workerPool.drainLightResults();
-    if (results.empty()) return;
+    // ── 从 worker 取回已完成结果，追加到 pending 队列 ──
+    {
+        auto results = m_workerPool.drainLightResults();
+        if (!results.empty()) {
+            for (auto& r : results) {
+                if (r) m_pendingLightResults.push_back(std::move(r));
+            }
+        }
+    }
 
-    for (auto& r : results) {
-        if (!r) continue;
+    if (m_pendingLightResults.empty()) return;
+
+    // ── 按预算逐条消费（分摊多 worker 同时完成 Task 3 的尖峰）──
+    int budget = MAX_LIGHT_INTEGRATE_PER_FRAME;
+    while (budget > 0 && !m_pendingLightResults.empty()) {
+        auto r = std::move(m_pendingLightResults.front());
+        m_pendingLightResults.pop_front();
+
         ChunkKey key = chunkPosToKey(r->pos);
         m_lightInFlight.erase(key);
 
         auto it = m_loadedChunks.find(key);
-        if (it == m_loadedChunks.end()) continue;  // chunk 已卸载
+        if (it == m_loadedChunks.end()) { --budget; continue; }  // chunk 已卸载
 
         Chunk* chunk = it->second.get();
 
@@ -1357,10 +1371,12 @@ void ChunkManager::drainLightResults() {
         for (int sy = 0; sy < CHUNK_SECTION_COUNT; ++sy) {
             if (r->sectionLightData[sy]) {
                 SectionKey secKey = makeSectionKey(r->pos.x, r->pos.y, sy);
-                SectionLightCache* cache = &m_lightCaches[secKey];
+                // try_emplace 避免 operator[] 的额外默认构造+查找
+                SectionLightCache* cache =
+                    &m_lightCaches.try_emplace(secKey).first->second;
                 cache->writeRawData(r->sectionLightData[sy]->data());
                 cache->setHasLight(true);
-                cache->dirty = true;
+                m_dirtyLightSections.insert(secKey);
             }
             // 设置 per-section 光源列表（供增量更新 sourceQuery 使用）
             if (r->sectionLightSources[sy] && !r->sectionLightSources[sy]->empty()) {
@@ -1369,10 +1385,11 @@ void ChunkManager::drainLightResults() {
         }
 
         chunk->markLightBfsDone();
+        --budget;
     }
 
     // Task 3 结果可能创建了新的光照缓存条目，section 查找表需要重建。
-    if (!results.empty()) m_lightSectionMapDirty = true;
+    if (budget < MAX_LIGHT_INTEGRATE_PER_FRAME) m_lightSectionMapDirty = true;
 }
 
 void ChunkManager::unloadDistantChunks() {
@@ -1484,14 +1501,8 @@ void ChunkManager::uploadLightSSBOs(const glm::ivec3& camSecMin, const glm::ivec
         m_lightSecMax = camSecMax;
     }
 
-    // 无变化且无脏缓存 → 快速返回
-    if (!m_lightSectionMapDirty) {
-        bool anyDirty = false;
-        for (const auto& [key, cache] : m_lightCaches) {
-            if (cache.dirty) { anyDirty = true; break; }
-        }
-        if (!anyDirty) return;
-    }
+    // 无脏 section 且查找表未变 → O(1) 快速返回（原先要 O(N) 全量扫描）
+    if (!m_lightSectionMapDirty && m_dirtyLightSections.empty()) return;
 
     glm::ivec3 range = camSecMax - camSecMin + 1;
     int totalSlots = range.x * range.y * range.z;
@@ -1539,17 +1550,13 @@ void ChunkManager::uploadLightSSBOs(const glm::ivec3& camSecMin, const glm::ivec
         return slot;
     };
 
-    // ── 辅助：上传单个脏 section（无光则仅清脏标记；假设 SSBO 已绑定）──
+    // ── 辅助：上传单个脏 section（无光则跳过；假设 SSBO 已绑定）──
     auto uploadDirtySectionBound = [&](uint64_t secKey, SectionLightCache& cache) {
-        if (!cache.hasAnyLight()) {
-            cache.dirty = false;
-            return;
-        }
+        if (!cache.hasAnyLight()) return;
         int slot = assignSlot(secKey);
         GLintptr offset = (GLintptr)slot * SectionLightCache::BYTES;
         glBufferSubData(GL_SHADER_STORAGE_BUFFER, offset,
                          (GLsizeiptr)SectionLightCache::BYTES, cache.rawData());
-        cache.dirty = false;
     };
 
     if (m_lightSectionMapDirty) {
@@ -1589,26 +1596,27 @@ void ChunkManager::uploadLightSSBOs(const glm::ivec3& camSecMin, const glm::ivec
         }
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
-        // 上传所有脏 section（批量：绑定一次 SSBO，全部上传后解绑）
+        // 上传脏 section（仅遍历脏集合，不扫全量 m_lightCaches）
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_lightSSBO);
-        for (auto& [key, cache] : m_lightCaches) {
-            if (cache.dirty) uploadDirtySectionBound(key, cache);
+        for (uint64_t secKey : m_dirtyLightSections) {
+            auto it = m_lightCaches.find(secKey);
+            if (it != m_lightCaches.end()) uploadDirtySectionBound(secKey, it->second);
         }
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+        m_dirtyLightSections.clear();
 
         m_lightSectionMapDirty = false;
     } else {
         // ── 查找表未变，仅增量上传脏 section ──
-        bool anyUpload = false;
-        for (auto& [key, cache] : m_lightCaches) {
-            if (!cache.dirty) continue;
-            if (!anyUpload) {
-                glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_lightSSBO);
-                anyUpload = true;
+        if (!m_dirtyLightSections.empty()) {
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_lightSSBO);
+            for (uint64_t secKey : m_dirtyLightSections) {
+                auto it = m_lightCaches.find(secKey);
+                if (it != m_lightCaches.end()) uploadDirtySectionBound(secKey, it->second);
             }
-            uploadDirtySectionBound(key, cache);
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+            m_dirtyLightSections.clear();
         }
-        if (anyUpload) glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
     }
 }
 
@@ -1627,47 +1635,50 @@ void ChunkManager::updateLighting() {
         constexpr float kRadius = kMaxLightRadius;
         int r = (int)std::ceil(kRadius);
 
-        // ── 预缓存：收集所有可能被 BFS 访问的 chunk 的 BlockBox ──
-        // 范围扩到变化点周围 r+16（多一圈 chunk），确保跨区块 BFS 不会
-        // 因邻居 chunk 缺失而把未加载区域误判为石墙截断光线。
-        std::unordered_map<ChunkKey, ChunkBoxes> blockCache;
+        // ── 稠密 chunk 网格：替代 unordered_map，BFS 内零哈希查找 ──
+        // 思路同 worker 端 ChunkGrid：将所有可能被 BFS 访问的 chunk 编入
+        // 一个稠密二维数组，blockQuery 用纯算术 (cx-minCX)+(cz-minCZ)*cw 索引。
+        int margin = (int)std::ceil(kMaxLightRadius / 16.0f) + 1;  // = 2
+        int minCX = INT_MAX, maxCX = INT_MIN, minCZ = INT_MAX, maxCZ = INT_MIN;
         for (const auto& ch : m_pendingLightChanges) {
-            int cMinX = (int)std::floor((float)(ch.pos.x - r) / 16.0f) - 1;
-            int cMaxX = (int)std::floor((float)(ch.pos.x + r) / 16.0f) + 1;
-            int cMinZ = (int)std::floor((float)(ch.pos.z - r) / 16.0f) - 1;
-            int cMaxZ = (int)std::floor((float)(ch.pos.z + r) / 16.0f) + 1;
-            for (int cx = cMinX; cx <= cMaxX; ++cx) {
-                for (int cz = cMinZ; cz <= cMaxZ; ++cz) {
-                    ChunkKey ck = chunkPosToKey(glm::ivec2(cx, cz));
-                    if (blockCache.find(ck) == blockCache.end()) {
-                        ChunkBoxes boxes;
-                        if (getChunkBoxes(glm::ivec2(cx, cz), boxes)) {
-                            blockCache[ck] = boxes;
-                        }
-                    }
+            int cx = (int)std::floor((float)ch.pos.x / 16.0f);
+            int cz = (int)std::floor((float)ch.pos.z / 16.0f);
+            minCX = std::min(minCX, cx - margin);
+            maxCX = std::max(maxCX, cx + margin);
+            minCZ = std::min(minCZ, cz - margin);
+            maxCZ = std::max(maxCZ, cz + margin);
+        }
+        int cw = maxCX - minCX + 1;
+        int cd = maxCZ - minCZ + 1;
+        std::vector<ChunkBoxes> chunkStorage(cw * cd);        // 持有 shared_ptr 所有权
+        std::vector<const ChunkBoxes*> grid(cw * cd, nullptr); // 稠密索引数组
+
+        for (int cx = minCX; cx <= maxCX; ++cx) {
+            for (int cz = minCZ; cz <= maxCZ; ++cz) {
+                int gi = (cx - minCX) + (cz - minCZ) * cw;
+                ChunkBoxes boxes;
+                if (getChunkBoxes(glm::ivec2(cx, cz), boxes)) {
+                    chunkStorage[gi] = std::move(boxes);
+                    grid[gi] = &chunkStorage[gi];
                 }
             }
         }
 
-        // 二级缓存：blockQuery 中按需补齐未命中 chunk（减少跨区块截断）
+        // BFS 内方块查询：稠密数组索引（零哈希）+ last-chunk 缓存。
+        // BFS 6-邻域访问约 63%+ 的水平步在同一 chunk 内，缓存消除重复数组解引用。
         auto blockQuery = [&](const glm::ivec3& pos) -> BlockState {
             if (pos.y < 0 || pos.y >= Chunk::HEIGHT) {
                 return BlockState{ BLOCK_STONE, ORIENT_NONE };
             }
             int cx = (int)std::floor((float)pos.x / 16.0f);
             int cz = (int)std::floor((float)pos.z / 16.0f);
-            ChunkKey ck = chunkPosToKey(glm::ivec2(cx, cz));
-            auto it = blockCache.find(ck);
-            if (it == blockCache.end()) {
-                // 缓存未命中：尝试实时查询（可能 chunk 刚加载或不在初始范围内）
-                ChunkBoxes boxes;
-                if (getChunkBoxes(glm::ivec2(cx, cz), boxes)) {
-                    it = blockCache.emplace(ck, std::move(boxes)).first;
-                } else {
-                    // 确实不存在于任何状态 → 视为实心墙（世界边界/未生成区域）
-                    return BlockState{ BLOCK_STONE, ORIENT_NONE };
-                }
-            }
+            if (cx < minCX || cx > maxCX || cz < minCZ || cz > maxCZ)
+                return BlockState{ BLOCK_STONE, ORIENT_NONE };
+
+            int gi = (cx - minCX) + (cz - minCZ) * cw;
+            const ChunkBoxes* cb = grid[gi];  // 纯算术索引，零哈希！
+            if (!cb) return BlockState{ BLOCK_STONE, ORIENT_NONE };
+
             int lx = ((pos.x % 16) + 16) % 16;
             int lz = ((pos.z % 16) + 16) % 16;
             int sy = pos.y / 16;
@@ -1676,11 +1687,15 @@ void ChunkManager::updateLighting() {
                 return BlockState{ BLOCK_STONE, ORIENT_NONE };
             }
             int ly = pos.y - sy * 16;
-            const auto& box = it->second[sy];
+            const auto& box = (*cb)[sy];
             if (!box) return BlockState{};
             return box->blocks[(ly * 16 + lz) * 16 + lx];
         };
-        auto cacheGetter = [this](uint64_t sectionKey) -> SectionLightCache* {
+        // 局部脏集合：BFS 过程中所有被访问（清空/写入）的 section 都会记录于此。
+        // BFS 结束后合并到 m_dirtyLightSections，实现精确脏跟踪。
+        std::unordered_set<uint64_t> bfsDirtySections;
+        auto cacheGetter = [this, &bfsDirtySections](uint64_t sectionKey) -> SectionLightCache* {
+            bfsDirtySections.insert(sectionKey);
             auto [it, _] = m_lightCaches.try_emplace(sectionKey);
             return &it->second;
         };
@@ -1753,6 +1768,9 @@ void ChunkManager::updateLighting() {
             // else: 纯透明→纯透明（如玻璃→空气），光照不变，跳过
         }
         m_pendingLightChanges.clear();
+
+        // 将 BFS 过程中所有被修改的 section 标记为脏
+        for (uint64_t sk : bfsDirtySections) m_dirtyLightSections.insert(sk);
 
         // 增量光照传播可能创建了新的缓存条目或修改了现有条目，
         // section 查找表需要重建以包含新条目的槽位映射。

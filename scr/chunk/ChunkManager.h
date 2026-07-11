@@ -270,9 +270,10 @@ private:
     // 离开渲染半径后仍保留在内存（不渲染、不卸载、不落盘），超出才落盘 + 卸载。
     // 运行时从 RuntimeConfig.retainMarginChunks 读，按内存预算可调。见 m_retainMargin。
 
-    // 每帧最多处理多少个 Task 1 / Task 2 结果（分摊多 worker 同时完成的尖峰）
+    // 每帧最多处理多少个 Task 1 / Task 2 / Task 3 结果（分摊多 worker 同时完成的尖峰）
     static constexpr int MAX_BLOCK_INTEGRATE_PER_FRAME = 8;
     static constexpr int MAX_MESH_INTEGRATE_PER_FRAME = 4;
+    static constexpr int MAX_LIGHT_INTEGRATE_PER_FRAME = 2;
 
     // 网络请求超时（秒），超时后允许重新请求
     static constexpr double INFLIGHT_TIMEOUT_SEC = 5.0;
@@ -341,6 +342,11 @@ private:
     glm::ivec3 m_lightSecMin{0};
     glm::ivec3 m_lightSecMax{0};
     bool m_lightSectionMapDirty = true;
+
+    // 脏光照 section 集合：替代 SectionLightCache::dirty 字段，避免每帧全量扫描 m_lightCaches。
+    // 任何路径修改了光照缓存后，将对应 sectionKey 插入此集合。
+    // uploadLightSSBOs 消费后清空。
+    std::unordered_set<uint64_t> m_dirtyLightSections;
 
     // ── 光照缓存内部方法 ──
     const SectionLightCache* getLightCache(uint64_t sectionKey) const;

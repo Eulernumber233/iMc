@@ -37,7 +37,6 @@ public:
         if (!inBounds(x, y, z)) return;
         m_data[index(x, y, z)] = pack(
             clampByte(rgb.r), clampByte(rgb.g), clampByte(rgb.b), dist);
-        dirty = true;
     }
 
     // max-clamp 写入：仅当新 RGB 任意分量 > 缓存值时更新。
@@ -71,7 +70,7 @@ public:
     bool hasAnyLight() const { return m_hasLight; }
     void setHasLight(bool v) { m_hasLight = v; }
 
-    bool dirty = true;
+    // 脏标记已外移到 ChunkManager::m_dirtyLightSections，避免每帧全量扫描 m_lightCaches
 
     const uint32_t* rawData() const { return m_data.data(); }
     size_t rawSize() const { return BYTES; }
@@ -79,13 +78,11 @@ public:
     // 整块写入（Task 3 结果，数据已含距离编码）
     void writeRawData(const uint32_t* src) {
         std::memcpy(m_data.data(), src, BYTES);
-        dirty = true;
     }
 
     void clear() {
         m_data.fill(0);
         m_hasLight = false;
-        dirty = true;
     }
 
 private:
