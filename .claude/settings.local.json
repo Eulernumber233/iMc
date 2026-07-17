@@ -121,7 +121,12 @@
       "PowerShell(& \"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Debug /p:Platform=x64 /t:Build /m /v:minimal 2>&1 | Select-Object -Last 30)",
       "PowerShell($f=\"E:\\\\opengl\\\\iMc\\\\scr\\\\light\\\\LightCache.h\"; $c=[IO.File]::ReadAllText\\($f\\); $u=New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f,$c,$u\\))",
       "PowerShell($f=\"E:\\\\opengl\\\\iMc\\\\scr\\\\light\\\\LightPropagation.h\"; $c=[IO.File]::ReadAllText\\($f\\); $u=New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f,$c,$u\\))",
-      "PowerShell($f=\"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\BlockType.h\"; $c=[IO.File]::ReadAllText\\($f\\); $u=New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f,$c,$u\\); $f2=\"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.cpp\"; $c2=[IO.File]::ReadAllText\\($f2\\); $u2=New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f2,$c2,$u2\\))"
+      "PowerShell($f=\"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\BlockType.h\"; $c=[IO.File]::ReadAllText\\($f\\); $u=New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f,$c,$u\\); $f2=\"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.cpp\"; $c2=[IO.File]::ReadAllText\\($f2\\); $u2=New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f2,$c2,$u2\\))",
+      "PowerShell($word = New-Object -ComObject Word.Application; $doc = $word.Documents.Open\\(\"D:\\\\CPP\\\\简历\\\\实习简历1.4.docx\"\\); $doc.Content.Text; $doc.Close\\(\\); $word.Quit\\(\\))",
+      "PowerShell(try { $word = New-Object -ComObject Word.Application; $word.Visible = $false; Write-Host \"Word COM available\"; $word.Quit\\(\\) } catch { Write-Host \"Word COM not available: $_\" })",
+      "PowerShell($word = New-Object -ComObject Word.Application; $doc = $word.Documents.Open\\(\"D:\\\\CPP\\\\简历\\\\实习简历2.0.docx\"\\); $text = $doc.Content.Text; $doc.Close\\(\\); $word.Quit\\(\\); Write-Host $text.Substring\\(0, [Math]::Min\\(500, $text.Length\\)\\))",
+      "PowerShell($f=\"E:\\\\opengl\\\\iMc\\\\iMc.vcxproj\"; $c=[IO.File]::ReadAllText\\($f\\); $u=New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f,$c,$u\\))",
+      "PowerShell($f=\"E:\\\\opengl\\\\iMc\\\\iMc.vcxproj.filters\"; $c=[IO.File]::ReadAllText\\($f\\); $u=New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f,$c,$u\\))"
     ],
     "additionalDirectories": [
       "e:\\opengl\\iMc\\scr"

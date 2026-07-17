@@ -11,11 +11,11 @@
 iMc 是一个用现代 OpenGL（4.6 core profile）和 C++17 编写的、受 Minecraft 启发的体素渲染引擎。核心特性：
 
 - 基于 section 的区块架构（16×16×16 section，沿 Y 堆叠成 16×CHUNK_HEIGHT×16 的 chunk）
-- 多线程区块管线：**两阶段任务**（Task 1 生成方块数据 → Task 2 用自身 + 4 邻居方块数据一次性构建含边界的完整 mesh），由 worker 池执行
+- 多线程区块管线：**三阶段任务**（Task 1 生成方块数据 → Task 2 用自身 + 4 邻居方块数据一次性构建含边界的完整 mesh → Task 3 用 9 区块（自身+8 Moore 邻居）做完整光照 BFS），由 worker 池执行
 - GPU 实例 arena（size-class 分配器）+ `glMultiDrawElementsIndirect`
 - 8 字节紧凑 `InstanceData`（`packed32 + blockType16 + textureLayer16`）；世界坐标在 shader 内由 `sectionBases[gl_DrawID]` 重建
 - 增量 VBO patch（`glMapBufferRange` + `UNSYNCHRONIZED`）—— 单次改方块只上传变化的面
-- 延迟渲染 + HBAO（蓝噪声 + 时域累积）+ 软阴影（PCSS+VSSM + TAA 降噪）+ 昼夜动态光照
+- 延迟渲染 + HBAO（蓝噪声 + 时域累积）+ 软阴影（PCSS+VSSM + TAA 降噪）+ 昼夜动态光照 + **体素洪水填充块光照**（多光源 BFS、透明方块衰减、RGBA8 距离缓存、增量精确重传播）
 - 第一人称玩家控制、AABB 物理、地形生成、粒子、UI、第三人称玩家模型
 - **物品系统**：数据/行为分离（`ItemDefinition` + `ItemStack` + 无状态 `Item` 行为），方块物品渲染成真立方体（背包图标 / 掉落物 / 手持），掉落物邻近同类堆叠 + 厚度可视化，背包「光标携带」拖拽（长按脱离 / 拖出丢弃），手持物品复用手臂挥手动画，支持自定义 OBJ 模型物品（如望远镜）
 - **存档系统**：Minecraft Anvil 风格的 region 文件（`.mca`）+ LZ4 压缩 + 自动保存
@@ -64,14 +64,14 @@ iMc 是一个用现代 OpenGL（4.6 core profile）和 C++17 编写的、受 Min
     - Host：进 800ms 的 `netManager->update()` 循环消化握手（着色器编译等耗时操作期间客户端的 JOIN_REQUEST 不会超时）。
     - Join：进最多 15 秒的初始地形同步循环，直到 `getLoadedChunkCount() >= 25`（玩家周围 5×5）。
     - 读档玩家位置 / 皮肤。
-  - **主循环**（每帧严格顺序）：`netManager->update()`（帧首 poll+dispatch）→ `player->update()` → 把本地玩家位置/朝向写入 `NetState` → **`chunkManager->update(camera)`** → 新世界出生点计算 → `renderSystem.render(..., netManager)` → swap + poll → `Profiler::frame()`。
+  - **主循环**（每帧严格顺序）：`netManager->update()`（帧首 poll+dispatch）→ `player->update()` → 把本地玩家位置/朝向写入 `NetState` → **`chunkManager->update(camera)`**（含 Task 1/2/3 集成 + `updateLighting` 增量光照传播 + `uploadLightSSBOs` 上传脏光照 section）→ 新世界出生点计算 → `renderSystem.render(..., netManager)` → swap + poll → `Profiler::frame()`。
   - **退出**：保存玩家状态 + `chunkManager->saveAllDirtyChunks()` + 关存档。
 
 - **Player**（`scr/Player.h/.cpp`）—— 整合相机、物理、移动（行走/奔跑/下蹲/观察者模式）、物品栏（hotbar）、方块交互（raycast 放置/破坏）、AABB 碰撞。三段速移动 + 双击冲刺。`getSaveData()` / `loadSaveData(PlayerSaveData)` 做存档；`getPosition()` / `setPosition()` 供网络同步（传送）。第三人称由 `toggleThirdPerson()`（F3）切换。
   - **走路镜头抖动**（`updateViewBob`）：仅本地第一人称叠加到相机（`m_viewBobOffset`，不改 `m_position`，故网络对端看不到；第三人称不加，同原版 MC）。相位按水平位移推进（步频同步），垂直 2× 频率、左右 1× 频率、前后随垂直同频；奔跑更强。参数 `view_bob_enabled/scale/run_scale`。
   - **贴地探测**（`updatePhysics`）：落地碰撞把玩家推到地面上方 `PHYSICS_BIAS`(0.001m)，而高帧率下每帧重力下坠量 g·dt² 小于此间隙 → 玩家悬空、`m_onGround` 反复 true/false 抖动（带动落地动画/镜头/模型抖动）。修复：上一帧着地且未上升时强制至少下探 `GROUND_STICK`(0.02m)，保证每帧稳定碰到地面。
 
-- **ChunkManager**（`scr/chunk/ChunkManager.h/.cpp`）—— 区块生命周期编排。**两阶段任务管线**（注意：与旧的 "build + 异步 stitch" 设计不同，已重构为下列两阶段）：
+- **ChunkManager**（`scr/chunk/ChunkManager.h/.cpp`）—— 区块生命周期编排。**三阶段任务管线**（注意：与旧的 "build + 异步 stitch" 设计不同，已重构为下列三阶段）：
   - **Task 1（`JOB_BUILD`）**：worker 上跑 `TerrainGenerator::fillChunkBuffer`（或从磁盘 / 网络拿数据）填一个临时整 chunk buffer，再切片成 **16 个 section `BlockBox`**（`ChunkBoxes`），**不含任何 mesh**。结果进 `m_pendingBlockData`，主线程消化后存入 `m_blockReady`（`BlockReadyEntry`，持有 `ChunkBoxes` + 4-bit `neighborBlockReady` 标记哪些邻居方向已就绪）。
   - **Task 2（`JOB_MESH`）**：当一个 chunk **自身和 4 个横向邻居的方块数据都就绪**时，投递 mesh 任务。`MeshBuildInput` 携带自身 16 个 box（直接共享给生成出来的 Section，零拷贝）+ 4 邻居各 16 个 box（`shared_ptr`）。worker 把 self box `setBox` 进 Section，读邻居边界时对邻居对应 section 的 box **持读锁拷出一层**，一次性构建**含全部内部面 + 全部跨 chunk 边界面**的 16 个 section。结果进 `m_pendingMeshResults`。**没有独立的 stitch 阶段** —— 边界在 Task 2 里就一次缝好了，因为 worker 此时能（持读锁安全地）看到邻居方块数据。
   - **状态容器**：
@@ -81,14 +81,21 @@ iMc 是一个用现代 OpenGL（4.6 core profile）和 C++17 编写的、受 Min
     - `m_loadedChunks`（`ChunkKey → unique_ptr<Chunk>`）：mesh 完整，可渲染可交互。
     - `m_activeChunks`（`vector<Chunk*>`）：`m_loadedChunks` 中在玩家渲染半径内的子集，逻辑更新 + 渲染候选。
   - 拥有 GPU `ChunkArena` 和 `SectionKey → Slot` 映射（每 section 一个 slot）。
-  - **每帧流程**：`integrateBlockData`（drain Task 1 结果 → 存入 `m_blockReady` → `notifyNeighborsBlockReady` → `checkAndSubmitMesh` 投递够格的 Task 2，受 `MAX_BLOCK_INTEGRATE_PER_FRAME = 8` 配额）→ `integrateMeshResults`（drain Task 2 结果 → `loadMeshResult` 装入 Chunk 放进 `m_loadedChunks` → `linkNeighbors`，受 `MAX_MESH_INTEGRATE_PER_FRAME = 4` 配额）→ `requestMissingChunks`（从中心向外按 Chebyshev 环补满在途队列）→ `updateActiveChunks` → `rebuildDrawCommands`。
+  - **每帧流程**：`integrateBlockData`（drain Task 1 结果 → 存入 `m_blockReady` → `notifyNeighborsBlockReady` → `checkAndSubmitMesh` 投递够格的 Task 2，受 `MAX_BLOCK_INTEGRATE_PER_FRAME = 8` 配额）→ `integrateMeshResults`（drain Task 2 结果 → `loadMeshResult` 装入 Chunk 放进 `m_loadedChunks` → `linkNeighbors` → `checkAndSubmitLightBFS` 投递够格的 Task 3，受 `MAX_MESH_INTEGRATE_PER_FRAME = 4` 配额）→ `drainLightResults`（drain Task 3 结果 → 写入 `m_lightCaches` → 标记 dirty，受 `MAX_LIGHT_INTEGRATE_PER_FRAME = 2` 配额）→ `requestMissingChunks`（从中心向外按 Chebyshev 环补满在途队列）→ `updateLighting`（处理增量光照变动 → `uploadLightSSBOs` 上传脏 section 到 GPU）→ `updateActiveChunks` → `rebuildDrawCommands`。
   - `rebuildDrawCommands`：pass 1 上传脏 section（受 evict 半径与 `m_maxUploadsPerFrame` 过滤）；pass 2 遍历 `m_activeChunks` 构建 indirect 命令缓冲 + 并行的 `m_sectionBases` 数组（上传到 `binding=0` 的 SSBO，shader 内由 `gl_DrawID` 索引）。每 pass（geometry / shadow）发一次 `glMultiDrawElementsIndirect`，命令按 section 粒度。
   - **GPU slot 驱逐**：超出 `renderRadius + EVICT_MARGIN_CHUNKS` 的 chunk 释放其 section arena slot（`evictFarChunkSlots`），CPU 数据保留；`Section::notifyGpuSlotReleased` 清增量状态，重新入界时强制全量重传。
   - **远距离卸载**：超出 `renderRadius + UNLOAD_MARGIN_CHUNKS` 的 chunk 整体卸载（`unloadDistantChunks`），卸载前 dirty chunk 会存盘。
   - **存档集成**：`setSaveManager()`、`saveAllDirtyChunks()`、`doAutoSave()`（按 `auto_save_interval_sec` 定时）。Task 1 在 worker 里会先尝试 `ChunkSaveManager::loadChunk`，磁盘没有才地形生成。
   - **网络集成**：`setNetworkClient(true)` 让客户端跳过本地地形生成；`setNetworkChunkRequester(fn)` 注册回调，缺 chunk 时发 `CHUNK_REQUEST`；`importChunkData(x, z, blocks)` 把网络收到的方块数据塞进管线（绕过生成）；`forceChunkLoad(pos)` 供服务端按需响应。
+  - **光照系统集成**：
+    - `m_lightCaches`（`unordered_map<uint64_t, SectionLightCache>`）—— CPU 端光照缓存，每 section（16³）存 RGBA8（R/G/B=光色 0–255，A=到最近光源的曼哈顿距离）。由 Task 3 和增量更新两路写入。
+    - `m_lightSSBO`（binding=2）+ `m_sectionMapSSBO`（binding=3）—— GPU 端光照数据扁平数组 + section→offset 查找表。`uploadLightSSBOs` 每帧上传脏 section（走 `m_dirtyLightSections` 集合精确跟踪，不扫全量缓存），支持按需扩容（`glCopyBufferSubData` 保留旧数据）。`bindLightSSBOs` 在延迟光照 pass 前绑定。
+    - `m_dirtyLightSections`（`unordered_set<uint64_t>`）—— 脏光照 section 集合，任何路径修改光照缓存后插入。替代 per-cache 脏标记，避免每帧 O(N) 全量扫描。
+    - **Task 3（`JOB_LIGHT`）**：当 chunk 自身及 **8 个 Moore 邻居**全部 loaded 时投递。`LightBuildInput` 携带 9 个 chunk 的 BlockBox（shared_ptr 零拷贝），worker 做 3×3 区域完整 BFS，产出 `LightBuildResult`（中心 chunk 的 16 个 section 光照数据 + per-section 光源位置列表）。主线程 `drainLightResults` 消费（受 `MAX_LIGHT_INTEGRATE_PER_FRAME=2` 配额）。
+    - **增量光照更新**（`updateLighting`）：`PendingLightChange` 记录方块变动的 old/new BlockType，区分四种情况：空气→光源（新增光源）、光源→空气（移除光源）、空气→不透明（遮挡）、不透明→空气（去遮挡）。统一策略：清空受影响区域 + 找出邻近光源 + 多源合并 BFS 重传播。稠密 chunk 网格 + last-chunk 缓存优化 BFS 内 blockQuery（零哈希查找）。
+    - **光源管理**：光源属性从 `BlockType` 静态表派生（`getLightDefForBlock`），遵循「唯一数据源」原则，无独立的 `LightSource` 结构体或光源注册表。压缩光源坐标 16-bit（localX:4 + worldY:8 + localZ:4），存在 Section 的 `m_lightSources` 向量中供 `sourceQuery` 使用。
 
-- **Chunk**（`scr/chunk/Chunk.h/.cpp`）—— `SECTION_COUNT`（HEIGHT=256 时为 16）个 Section 的容器。持有 4 个横向邻居指针（`m_neighbors[4]`，±X/±Z）用于跨 chunk 交互路由。`m_nonEmptyMask` 位掩码：第 i 位置 1 表示 section[i] 有可见面，每次改 mesh 后刷新。`setBlockAndUpdate` 路由到所属 section 并更新 6 邻居（处理跨 section + 跨 chunk）。`isMeshReady()` 区分"方块数据就绪" vs "mesh 完整"。
+- **Chunk**（`scr/chunk/Chunk.h/.cpp`）—— `SECTION_COUNT`（HEIGHT=256 时为 16）个 Section 的容器。持有 4 个横向邻居指针（`m_neighbors[4]`，±X/±Z）用于跨 chunk 交互路由，以及 8-bit `m_lightNeighborsReady` 位掩码追踪 Moore 邻居的 loaded 状态供 Task 3 就绪检测。`m_nonEmptyMask` 位掩码：第 i 位置 1 表示 section[i] 有可见面，每次改 mesh 后刷新。`setBlockAndUpdate` 路由到所属 section 并更新 6 邻居（处理跨 section + 跨 chunk）。`isMeshReady()` 区分"方块数据就绪" vs "mesh 完整"。`isLightBfsReady()` 当自身+8 Moore 邻居全部 loaded 时返回 true；`m_lightBfsDone` 标记 Task 3 已完成。
 
 - **Section**（`scr/chunk/Section.h/.cpp`）—— GPU mesh 存储单元。持有：
   - `m_box: std::shared_ptr<BlockBox>` —— section 的 16-bit/格 方块状态数据 + 一把读写锁，打包在 `BlockBox`（`scr/chunk/BlockBox.h`）里（见下方「区块数据唯一来源」）。方块数组每格低 8 位 `BlockType`，bits 8–11 `orient`，bits 12–15 预留。公开 API **只认 `BlockState`** —— `getBlock` 返回 `BlockState`，`setBlock(x,y,z, BlockState)` 写完整状态（持 `m_box->mutex` 写锁）。`addFaceLocal(x,y,z, BlockFace, BlockState)` 同理（orient 从 state 读出后塞进 `InstanceData.packed`）。`shared_ptr` 让 `adoptFrom` / `setBox` 是指针移动而非拷贝。Section 显式禁拷贝（防两个 Section 共享同一 box）、保留 move。
@@ -96,23 +103,25 @@ iMc 是一个用现代 OpenGL（4.6 core profile）和 C++17 编写的、受 Min
   - `isEmpty()` 是"无可见面"的权威信号（查 index map，不查 vector）。
   - 增量上传状态机：`m_dirty`（本帧需上传）/ `m_dirtyIndices`（上次上传后改动的索引，供 `ChunkArena::patch`）/ `m_freeSlots`（`BLOCK_ERRER` 占位位置，`addFaceLocal` 复用）/ `m_fullRebuildPending`（强制下次走全量 `reupload`）/ `clearDirty()`（上传成功后重置）。
   - **建图即 reserve**：`rebuildVisibilityInternal` 末尾为 `m_instanceData` 和 `m_PosToInstanceIndex` 各多 reserve 1024 项。这在 worker 线程做，使 Task 2 缝边界面（每 section 最多约 1024 个边界面）时不触发堆分配和 rehash —— 全局 malloc 锁下的堆分配曾是实测瓶颈。
+  - **光照数据**：`m_lightData`（`shared_ptr<SectionLightData>`，16³ RGBA8 格，含 RGB + 曼哈顿距离）和 `m_lightSources`（`shared_ptr<vector<uint16_t>>`，压缩光源坐标）。由 Task 3 产出写入，增量更新时通过 swap-and-pop 维护光源列表。`m_lightDirty` 标记光照数据是否有待上传的变更。
 
 - **ChunkArena**（`scr/chunk/ChunkArena.h/.cpp`）—— GPU VBO 分配器。Size-class 分配器，类 `{64, 256, 768, 1536, 3072, 6144, 12288}` 个实例，每类一条 free list；新分配优先从 bump cursor 取，freed slot 留在所属类（不合并，保持 alloc/free O(1)）。分配用 1.5× 超额吸收 section 增长。后备 VBO 可用 `glCopyBufferSubData` 增长且保留所有活 slot 偏移。两条上传路径：
   - `reupload(slot, data, count)` —— 全量 `glBufferSubData`；count 超容量则换更大 size class。
   - `patch(slot, data, dirtyIndices, indexCount, newCount)` —— 增量上传。用 `GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT`（无 `INVALIDATE_RANGE`，未触碰字节保留旧 GPU 值）map `[minIdx, maxIdx]` 一次，只写脏位置，unmap。**调用方须保证 GPU 当前没在读该 slot** —— `ChunkManager::update` 在帧首、`RenderSystem::render` 前跑，故成立。
 
-- **ChunkWorkerPool**（`scr/chunk/ChunkWorkerPool.h/.cpp`）—— 线程池（worker 数由 `worker_threads` 决定，0=自动），两种任务：
+- **ChunkWorkerPool**（`scr/chunk/ChunkWorkerPool.h/.cpp`）—— 线程池（worker 数由 `worker_threads` 决定，0=自动），三种任务：
   - `JOB_BUILD`（Task 1）：`submitBuild(pos)` → worker 先试 `ChunkSaveManager::loadChunk`，没有则 `TerrainGenerator::fillChunkBuffer`，产出 `BlockDataResult`（纯方块数据）。
   - `JOB_MESH`（Task 2）：`submitMeshBuild(MeshBuildInput)` → worker 用自身 + 4 邻居方块数据构建含边界的 16 个 section，产出 `ChunkBuildResult`。
-  - 单 `m_jobs` deque（FIFO，两类任务等优先）+ 条件变量。两个完成队列：`m_blockDone` / `m_meshDone` 都是 `std::deque<std::unique_ptr<...>>`（unique_ptr 让重对象构造在锁外，锁内只 push 指针）。主线程 `drainBlockData()` / `drainMeshResults()` 用 swap O(1) 取走。
-  - 三把锁：`m_jobMutex`（任务队列）、`m_blockDoneMutex`、`m_meshDoneMutex`。
+  - `JOB_LIGHT`（Task 3）：`submitLightBuild(LightBuildInput)` → worker 用 9 区块（自身+8 Moore 邻居）的 BlockBox 做完整光照 BFS，产出 `LightBuildResult`（中心 chunk 的 16 个 section 光照数据 + per-section 光源列表）。BFS 使用 per-source 小 visited 数组（≤31³≈30KB）、可跨邻居传播但仅写中心 chunk 结果。走**独立队列** `m_lightJobs` + `m_lightJobRunning` 原子互斥（单 worker 消费），与 Task 1/2 队列解耦。
+  - 单 `m_jobs` deque（FIFO，Task 1/2 等优先）+ 条件变量。三个完成队列：`m_blockDone` / `m_meshDone` / `m_lightDone` 都是 `std::deque<std::unique_ptr<...>>`（unique_ptr 让重对象构造在锁外，锁内只 push 指针）。主线程 `drainBlockData()` / `drainMeshResults()` / `drainLightResults()` 用 swap O(1) 取走。
+  - 四把锁：`m_jobMutex`（任务队列）、`m_blockDoneMutex`、`m_meshDoneMutex`、`m_lightDoneMutex`。
   - `setSaveManager(sm)` 让 worker 能在 Task 1 里读盘。
 
 - **RenderSystem**（`scr/render/RenderSystem.h/.cpp`）—— 延迟渲染管线：
   1. **G-Buffer pass**（position / normal / albedo / properties）—— 一次 `glMultiDrawElementsIndirect` 画所有可见 section
   2. **HBAO pass**（单帧地平线角 AO）+ AO 时域累积 + blur
-  3. **Shadow map pass**（定向光，PCSS+VSSM）—— 复用同一 MDI 命令缓冲 + 同一 SectionBases SSBO
-  4. **延迟光照 pass**（写入 `m_lightingFBO`）
+  3. **Shadow map pass**（定向光，PCSS+VSSM + CSM 级联阴影映射，最多 4 级）—— 复用同一 MDI 命令缓冲 + 同一 SectionBases SSBO；近处高分辨率、远处低分辨率
+  4. **延迟光照 pass**（写入 `m_lightingFBO`）—— 组合阳光+环境光+**块光照**（从光照缓存 SSBO 采样，见光照系统）+ 自发光
   5. blit 到 `m_compositeFBO`（带深度，支持后续正向渲染）
   6. **正向 pass**：方块选中轮廓、3D 模型、**远程玩家模型**、粒子、UI
   7. blit 到默认帧缓冲上屏
@@ -185,10 +194,16 @@ Minecraft Anvil 风格的区块持久化。目录结构：`saves/<worldName>/wor
 - **Particle**（`scr/particle/`）—— GPU compute shader 粒子（`GPUParticleSystem`）、基于 ECS 的 CPU 粒子（`ECSParticleSystem`），由 `ParticleManager` 管理。
 - **Model**（`scr/mode/`）—— Assimp 模型加载（`Mesh`/`Model`），玩家模型 + 骨骼动画 + 皮肤（`PlayerModel`/`PlayerAnimator`/`SkinManager`）。
 - **UI**（`scr/UI/`）—— `UIManager`（单例）、`UIHotbar`（底部快捷栏）、`UIInventory`（E 键背包面板，原版 inventory.png 度量）、`UISlot`（自包含格子：图标 + 数量角标 + 耐久条）、`UINumber`（用 ascii.png 字形烘焙数量角标）。`UISlot::setContent` 的 `iconTexOverride` 参数让方块物品用等距立方体图标（见下方物品系统）。
-- **Shader**（`scr/Shader.h/.cpp`）—— 着色器程序加载。
+- **Light**（`scr/light/`）—— 体素洪水填充块光照系统：
+  - `LightSource.h` —— 光源属性静态表（`LightDef`：color/intensity/radius），从 `BlockType` 派生（目前支持萤石和火把）。`kMaxLightRadius=16.0f`。压缩 16-bit 光源坐标（localX:4 + worldY:8 + localZ:4），存在 Section 的 `m_lightSources` 中。
+  - `LightCache.h` —— `SectionLightCache`：每 section（16³=4096 格）RGBA8 缓存。`set`/`get`/`maxSet`（逐分量 max-clamp 写入，多源混合用）/`writeRawData`（Task 3 整块回填）。A 通道存到最近光源的**曼哈顿距离**（0=光源格，255=无光照），供增量更新精确计算衰减。
+  - `LightPropagation.h/.cpp` —— 体素 BFS 传播引擎。`propagateMultiSource`（多光源同时入队，共享 visited+queue，每格仅访问一次）、`propagateSingle`/`propagateAll`/`propagateRegion`、`propagateOcclusion`/`propagateDeocclusion`（统一「清空+重传播」策略，不再依赖估算）。支持透明方块衰减（水+2，树叶+1 等效距离）。使用 `thread_local` ring buffer + per-source visited 数组。
+- **Shader**（`scr/Shader.h/.cpp`）—— 着色器程序加载。支持 **Program Binary 磁盘缓存**：缓存文件名 = 所有着色器路径拼接的 FNV-1a 哈希（`cache/shaders/<hash>.bin`），命中则直接灌入 GL 程序对象跳过编译链接；文件缺失/驱动变更/校验失败则从源码重编并重写缓存。`force_recompile_shaders` 配置字段（或命令行 `--rebuild-shaders`）可强制忽略缓存全量重编。
+- **DebugUI**（`scr/DebugUI.h/.cpp`）—— F1 开合的 Dear ImGui 调试面板。实时调整手持物品的 first-person TRS（`held_display.json`），值即时写进 `HeldDisplayRegistry`、下一帧生效。含 ImGui 官方 Demo 窗口开关。可见时释放鼠标光标，隐藏时恢复第一人称锁定。
 - **TextureMgr**（`scr/TextureMgr.h/.cpp`）—— 从 `assert/textures/` 加载纹理数组，由 `textures_config.json` 配置。
-- **RuntimeConfig**（`scr/RuntimeConfig.h/.cpp`）—— 单例，首次访问时加载 `assert/runtime_config.json`。改 JSON 即可调参，不必重编。当前字段见下。
+- **RuntimeConfig**（`scr/RuntimeConfig.h/.cpp`）—— 单例，首次访问时加载 `assert/runtime_config.json`。改 JSON 即可调参，不必重编。支持 **文件热重载**（`HotReload.h`）：每 0.25s 检测文件修改时间，变更时自动重新读入 JSON 覆盖运行时值，解析失败保留旧值自愈。仅对主线程消费的配置即时生效（渲染/光照/AO 等）；worker 线程读取的字段（线程数/渲染半径等启动期一次性值）重读后不生效。当前字段见下。
 - **Profiler**（`scr/Profiler.h/.cpp`）—— 轻量 CPU 分析器。`PROFILE_SCOPE("name")` 计时一个块；`Profiler::frame()`（主循环每次调）在 RuntimeConfig 启用时每秒打印聚合的 top section。
+- **HotReload**（`scr/HotReload.h`）—— 单例 header-only 通用文件热重载机制。`watch(path, callback)` 注册文件+变更回调，`poll()` 每帧主线程调用（0.25s 节流），文件修改时间变化时触发回调。用于 `runtime_config.json` 和 `held_display.json` 的改后即刻生效。
 
 ### 物品与掉落物系统（`scr/item/`、`scr/entity/`）
 
@@ -231,12 +246,20 @@ Minecraft Anvil 风格的区块持久化。目录结构：`saves/<worldName>/wor
 | `view_bob_scale` | 1.0 | 镜头抖动幅度总比例（调试旋钮），0=关 |
 | `view_bob_run_scale` | 1.6 | 奔跑时镜头抖动的额外幅度倍率 |
 | `disable_ime` | true | 启动时禁用输入法(IME)：解除窗口与 IME 关联，避免进游戏后输入法切拼音吞掉 WASD、要先按 Shift 才能移动 |
+| `light_budget` | 1.25 | 总光照预算（整体亮度旋钮），调大画面更亮 |
+| `ambient_day` | 0.55 | 白天环境光占比（背阳面底光），调大阴影里更亮 |
+| `ambient_night` | 0.40 | 夜晚环境光占比，调大夜里更亮 |
+| `sun_strength` | 0.70 | 阳光直射功率，调大受光面更亮、明暗对比更强 |
+| `time_scale` | 0.4 | 昼夜速度：1 现实秒 = 多少游戏小时（o/p 键运行时可调） |
+| `net_send_rate` | 60 | 网络位置同步频率（Hz） |
+| `net_interp_delay` | 0.10 | 远程玩家渲染落后最新快照的时间（秒） |
 
 ### 关键常量
 
 - **区块几何**（`scr/chunk/ChunkDimensions.h`）：`CHUNK_WIDTH=16`、`CHUNK_HEIGHT=256`、`CHUNK_DEPTH=16`、`CHUNK_VOLUME=65536`、`SECTION_HEIGHT=16`、`SECTION_COUNT=16`。**此头刻意独立于 `core.h`** 以最小化区块维度变动时的重编范围 —— 只有显式 include 它的文件受影响。
 - **ChunkManager 半径余量**（`scr/chunk/ChunkManager.h`）：`EVICT_MARGIN_CHUNKS=2`（超此释放 GPU slot，CPU 数据留）、`BLOCK_PRELOAD_MARGIN=1`（build 请求外扩一圈，让边缘 chunk 凑齐 4 邻居方块数据投 Task 2）、`UNLOAD_MARGIN_CHUNKS=6`（超此整体卸载 chunk）。
-- **每帧消化预算**（`scr/chunk/ChunkManager.h`）：`MAX_BLOCK_INTEGRATE_PER_FRAME=8`、`MAX_MESH_INTEGRATE_PER_FRAME=4`，把多 worker 同时完成的尖峰摊到多帧。`INFLIGHT_TIMEOUT_SEC=5.0`（在途超时重请求）。
+- **每帧消化预算**（`scr/chunk/ChunkManager.h`）：`MAX_BLOCK_INTEGRATE_PER_FRAME=8`、`MAX_MESH_INTEGRATE_PER_FRAME=4`、`MAX_LIGHT_INTEGRATE_PER_FRAME=2`，把多 worker 同时完成的尖峰摊到多帧。`INFLIGHT_TIMEOUT_SEC=5.0`（在途超时重请求）。
+- **光照**（`scr/light/LightSource.h`）：`kMaxLightRadius=16.0f`（已知光源最大传播半径，增量更新安全界）。光源属性：萤石（暖黄，半径 15）、火把（暖橙，半径 14）。`SectionLightCache::BYTES=16384`（每 section 光照数据 16KB）。
 - **World**（`scr/core.h` 的 `WorldConstants`）：`WORLD_SEED=114514`、`RENDER_RADIUS=8`（默认，运行时由 RuntimeConfig 覆盖）。注：`RenderConstants::MAX_INSTANCES` 已弃用。
 - **屏幕 / 阴影贴图**（`scr/Data.h`）：`SCR_WIDTH×SCR_HEIGHT = 1200×900`，`SHADOW_WIDTH×SHADOW_HEIGHT = 4096×4096`，`MAX_SHADOW_DISTANCE=180.0`。
 - **网络**（`scr/net/NetCommon.h`）：`MAX_MSG_PAYLOAD=32768`、`DEFAULT_MAX_CLIENTS=32`、`DEFAULT_PORT=60011`（与 CliManager 命令行/菜单默认端口一致）。
@@ -247,6 +270,7 @@ Minecraft Anvil 风格的区块持久化。目录结构：`saves/<worldName>/wor
 
 - `g_buffer.vert` 和 `shadow_mapping_depth.vert` 是 `#version 460 core`。两者解包逐实例 `packed` 属性（x/y/z/face）并从 `binding=0` 的 SSBO 读 `sectionBases[gl_DrawID].xyz` 还原世界空间方块中心。其余着色器保持原版本。
 - `g_buffer.frag` 丢弃 `BLOCK_ERRER` 占位面 —— 这让 section 可以把复用/释放的面 slot 留在原地而不必急着 compact。`Section::removeFaceLocal` 把 slot 标 ERRER 并把索引压入 `m_freeSlots` 供 `addFaceLocal` 回收。
+- `deferred_lighting.frag` —— 延迟光照 pass 的片段着色器。通过 `binding=2` 的 `LightCacheSSBO`（RGBA8 扁平数组）和 `binding=3` 的 `SectionMapSSBO`（相对 section 坐标 → lightData 偏移，-1=无数据）采样体素块光照。`sampleLightCache(worldPos)` 按世界坐标查表 → 解包 RGB → 乘 albedo×AO 叠加到最终光照。采样位置沿法线偏移 0.01 确保读取的是面外侧空气格的光照而非方块自身格。
 
 ### 线程模型
 
@@ -254,6 +278,7 @@ Minecraft Anvil 风格的区块持久化。目录结构：`saves/<worldName>/wor
 - **Worker 线程**（ChunkWorkerPool）：
   - `JOB_BUILD`（Task 1）：`ChunkSaveManager::loadChunk`（线程安全）或 `TerrainGenerator::fillChunkBuffer`，切片产出 16 个 `BlockBox`。worker 看不到任何 `Chunk` 对象。
   - `JOB_MESH`（Task 2）：共享 self 的 16 个 box（无锁，self 还没 LOADED 玩家碰不到），对邻居 box **持读锁拷边界一层**构建含边界的完整 mesh，产 `ChunkBuildResult`。
+  - `JOB_LIGHT`（Task 3）：收集 9 个 chunk 的 BlockBox（shared_ptr 零拷贝，含自身+8 Moore 邻居），扫描所有光源、per-source 独立 BFS（最多 31³ 格 visited，可跨邻居传播但仅写中心 chunk 结果）、max-clamp 多源混合写入 RGBA8 + 曼哈顿距离。走独立队列 `m_lightJobs` + `m_lightJobRunning` 原子互斥（同一时刻仅一个 worker 做 Task 3，避免多个 worker 同时竞争同一组光照缓存写入）。
 - **方块数据并发**（见「区块数据唯一来源」）：玩家改方块持 section 写锁，worker 读邻居边界持读锁；二者互斥但临界区极短（写=改一格，读=拷一层 256 格），读读共享。主线程内部读不加锁。
 - **无锁不变量**（设计快的根本）：
   - worker 永不触碰 `m_loadedChunks` 的 mesh；玩家交互与渲染只碰 `m_loadedChunks`。读写容器分离。worker 唯一会读到 LOADED chunk 数据的路径是「读邻居 box 边界」，已由 section 读写锁保护。
@@ -286,6 +311,7 @@ OpenGL 状态是全局的、跨 pass 持续的。**任何一个 pass / 渲染函
 - `scr/enet/enet.h` —— ENet（UDP 网络库，header-only，`iMc.cpp` 里 `#define ENET_IMPLEMENTATION`）
 - `scr/net/lz4.h` —— LZ4 压缩（网络 + 存档的方块数据压缩）
 - `scr/entt/` —— EnTT ECS 库（header-only，粒子系统用）
+- `scr/imgui/` —— Dear ImGui 即时模式 GUI 库（调试面板用，含 GLFW + OpenGL3 后端）
 - `scr/stb_image.h` / `scr/std_image.cpp` —— stb_image 纹理加载
 
 ## MSVC 增量编译陈旧产物问题

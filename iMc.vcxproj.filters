@@ -171,6 +171,34 @@
     <ClCompile Include="scr\Player.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="scr\light\LightPropagation.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\DebugUI.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\imgui\imgui.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\imgui\imgui_draw.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\imgui\imgui_tables.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\imgui\imgui_widgets.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\imgui\imgui_demo.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\imgui\imgui_impl_glfw.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\imgui\imgui_impl_opengl3.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="scr\chunk\BlockType.h">
@@ -365,6 +393,49 @@
     <ClInclude Include="scr\item\HeldDisplayRegistry.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="scr\DebugUI.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\HotReload.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\imgui\imconfig.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\imgui\imgui.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\imgui\imgui_internal.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\imgui\imstb_rectpack.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\imgui\imstb_textedit.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\imgui\imstb_truetype.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\imgui\imgui_impl_glfw.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\imgui\imgui_impl_opengl3.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\imgui\imgui_impl_opengl3_loader.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\light\LightSource.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\light\LightCache.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\light\LightPropagation.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+
   </ItemGroup>
   <ItemGroup>
     <None Include="shader\deferred_lighting.vert" />
@@ -530,5 +601,8 @@
     <Image Include="assert\textures\UI\inventory.png">
       <Filter>资源文件</Filter>
     </Image>
+  </ItemGroup>
+  <ItemGroup>
+    <Text Include="docs\新建 文本文档.txt" />
   </ItemGroup>
 </Project>

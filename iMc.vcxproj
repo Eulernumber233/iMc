@@ -147,6 +147,7 @@
     <ClCompile Include="scr\particle\GPUParticleSystem.cpp" />
     <ClCompile Include="scr\particle\ParticleManager.cpp" />
     <ClCompile Include="scr\Player.cpp" />
+
     <ClCompile Include="scr\RuntimeConfig.cpp" />
     <ClCompile Include="scr\Profiler.cpp" />
     <ClCompile Include="scr\render\BlockOutlineRenderer.cpp" />
@@ -206,6 +207,7 @@
     <ClInclude Include="scr\light\LightSource.h" />
     <ClInclude Include="scr\light\LightCache.h" />
     <ClInclude Include="scr\light\LightPropagation.h" />
+
     <ClInclude Include="scr\RuntimeConfig.h" />
     <ClInclude Include="scr\Profiler.h" />
     <ClInclude Include="scr\chunk\BlockType.h" />
@@ -349,6 +351,9 @@
     <Image Include="assert\textures\UI\hotbar_offhand_right.png" />
     <Image Include="assert\textures\UI\hotbar_selection.png" />
     <Image Include="assert\textures\UI\inventory.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <Text Include="docs\新建 文本文档.txt" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
