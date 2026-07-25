@@ -187,6 +187,9 @@
     <ClCompile Include="scr\imgui\imgui_demo.cpp" />
     <ClCompile Include="scr\imgui\imgui_impl_glfw.cpp" />
     <ClCompile Include="scr\imgui\imgui_impl_opengl3.cpp" />
+    <ClCompile Include="scr\jsoncpp\json_reader.cpp" />
+    <ClCompile Include="scr\jsoncpp\json_value.cpp" />
+    <ClCompile Include="scr\jsoncpp\json_writer.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="scr\Camera.h" />
@@ -268,6 +271,8 @@
     <ClInclude Include="scr\net\NetTransport.h" />
     <ClInclude Include="scr\World.h" />
     <ClInclude Include="scr\CliManager.h" />
+    <ClInclude Include="scr\jsoncpp\json_batchallocator.h" />
+    <ClInclude Include="scr\jsoncpp\json_valueiterator.inl" />
   </ItemGroup>
   <ItemGroup>
     <None Include=".gitattributes" />

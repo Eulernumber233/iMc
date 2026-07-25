@@ -9,7 +9,7 @@
   </PropertyGroup>
   <ItemDefinitionGroup>
     <Link>
-      <AdditionalDependencies>glew32.lib;glfw3.lib;opengl32.lib;unit.lib;assimp-vc143-mt.lib;json_vc71_libmt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>glew32.lib;glfw3.lib;opengl32.lib;unit.lib;assimp-vc143-mt.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PreBuildEvent>
       <Command>xcopy /y "$(ProjectDir)\bin\release\*.dll" "$(TargetDir)"</Command>

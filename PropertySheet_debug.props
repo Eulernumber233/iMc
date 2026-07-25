@@ -9,7 +9,7 @@
   </PropertyGroup>
   <ItemDefinitionGroup>
     <Link>
-      <AdditionalDependencies>glew32d.lib;glfw3.lib;opengl32.lib;assimp-vc143-mtd.lib;unit.lib;json_vc71_libmtd.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>glew32d.lib;glfw3.lib;opengl32.lib;assimp-vc143-mtd.lib;unit.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PreBuildEvent>
       <Command>xcopy /y "$(ProjectDir)\bin\debug\*.dll" "$(TargetDir)"</Command>

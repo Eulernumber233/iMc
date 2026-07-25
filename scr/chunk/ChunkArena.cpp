@@ -1,7 +1,6 @@
 ﻿#include "ChunkArena.h"
 #include <iostream>
 #include <algorithm>
-#include <ostream>
 #include <cstring>
 
 ChunkArena::ChunkArena() = default;
@@ -10,13 +9,10 @@ ChunkArena::~ChunkArena() {
     shutdown();
 }
 
-int ChunkArena::classFor(uint32_t needed) {
-    // oversize 1.5x，再选最小的够用 class
+uint32_t ChunkArena::oversizeTarget(uint32_t needed) {
     uint32_t target = needed + needed / 2;
-    for (int i = 0; i < CLASS_COUNT; ++i) {
-        if (SIZE_CLASSES[i] >= target) return i;
-    }
-    return -1;   // 超过最大 class
+    if (target > MAX_SLOT_INSTANCES) target = MAX_SLOT_INSTANCES;
+    return target;
 }
 
 bool ChunkArena::initialize(uint32_t initialInstances) {
@@ -32,7 +28,7 @@ bool ChunkArena::initialize(uint32_t initialInstances) {
     m_capacity = initialInstances;
     m_cursor = 0;
     m_inUse = 0;
-    for (auto& fl : m_freeLists) fl.clear();
+    m_freeIntervals.clear();
     return true;
 }
 
@@ -44,69 +40,106 @@ void ChunkArena::shutdown() {
     m_capacity = 0;
     m_cursor = 0;
     m_inUse = 0;
-    for (auto& fl : m_freeLists) fl.clear();
+    m_freeIntervals.clear();
 }
 
-//
-// TODO 还需要优化
-// 1. 目前 free list 是 vector，pop_back/push_back；如果频繁分配/释放，可能导致内存碎片化。
-// 2. 目前没有合并相邻空闲块的逻辑，可能导致大量小块空闲，无法满足大块请求。
-// 3. 可以考虑使用更复杂的数据结构（如 std::set 或自定义的 free list）来管理空闲块，支持合并和按大小查找。
-// 4. 可以考虑在 allocate 时，如果 free list 没有合适的块，尝试从 larger class 的 free list 中拆分一个块。
-// 5. 可以考虑在 free 时，如果相邻的块也空闲，尝试合并成一个更大的块。
-// 6. 没有VBO缩容的逻辑，可能导致VBO占用过大内存。可以考虑在一定条件下缩小VBO容量。
 ChunkArena::Slot ChunkArena::allocate(uint32_t requestedInstances) {
     Slot slot{};
     if (requestedInstances == 0) return slot;
-
-    int c = classFor(requestedInstances);
-    if (c < 0) {
+    if (requestedInstances > MAX_SLOT_INSTANCES) {
         std::cerr << "ChunkArena::allocate: request " << requestedInstances
                   << " exceeds MAX_SLOT_INSTANCES " << MAX_SLOT_INSTANCES << std::endl;
         return slot;
     }
-    uint32_t cls = SIZE_CLASSES[c];
 
-    // 1. 优先从对应 class 的 free list 取
-    auto& fl = m_freeLists[c];
-    if (!fl.empty()) {
-        slot.offset = fl.back();
-        fl.pop_back();
-        slot.capacity = cls;
+    uint32_t target = oversizeTarget(requestedInstances);
+
+    // ── 1. 区间空闲表 best-fit 搜索 ──
+    // 找 >= target 的最小空闲区间；没有则退而求 >= requestedInstances
+    auto tryAllocFromFree = [&](uint32_t minSize) -> bool {
+        // 线性扫描找 best-fit。区间数量通常很少（< 100），
+        // alloc/free 不在热路径上，O(n) 足够。
+        auto bestIt = m_freeIntervals.end();
+        for (auto it = m_freeIntervals.begin(); it != m_freeIntervals.end(); ++it) {
+            if (it->second >= minSize) {
+                if (bestIt == m_freeIntervals.end() || it->second < bestIt->second) {
+                    bestIt = it;
+                    if (it->second == minSize) break; // 精确匹配，已最优
+                }
+            }
+        }
+        if (bestIt == m_freeIntervals.end()) return false;
+
+        uint32_t off = bestIt->first;
+        uint32_t size = bestIt->second;
+        m_freeIntervals.erase(bestIt);
+
+        uint32_t allocSize = (size >= target) ? target : size;
+        if (size > allocSize) {
+            // 拆分：剩余部分放回空闲表
+            m_freeIntervals[off + allocSize] = size - allocSize;
+        }
+
+        slot.offset = off;
+        slot.capacity = allocSize;
         slot.count = 0;
-        slot.sizeClass = (int8_t)c;
-        m_inUse += cls;
-        return slot;
-    }
+        m_inUse += allocSize;
+        return true;
+    };
 
-    // 2. 从未切区 cursor 切一块
-    if (m_cursor + cls > m_capacity) {
-        // grow 到至少能容下当前请求的两倍
-        uint32_t newCap = std::max(m_capacity * 2, m_capacity + cls);
+    // 先尝试 oversize target
+    if (tryAllocFromFree(target)) return slot;
+
+    // target 不够时退而求 requestedInstances
+    if (target > requestedInstances && tryAllocFromFree(requestedInstances)) return slot;
+
+    // ── 2. 从 cursor 切一块 ──
+    if (m_cursor + target > m_capacity) {
+        uint32_t newCap = std::max(m_capacity * 2, m_capacity + target);
         if (!grow(newCap)) {
-            std::cerr << "ChunkArena: grow failed (cap=" << m_capacity << ", need=" << cls << ")\n";
+            std::cerr << "ChunkArena: grow failed (cap=" << m_capacity << ", need=" << target << ")\n";
             return Slot{};
         }
     }
     slot.offset = m_cursor;
-    slot.capacity = cls;
+    slot.capacity = target;
     slot.count = 0;
-    slot.sizeClass = (int8_t)c;
-    m_cursor += cls;
-    m_inUse += cls;
+    m_cursor += target;
+    m_inUse += target;
     return slot;
 }
 
 void ChunkArena::free(const Slot& slot) {
     if (!slot.valid()) return;
-    if (slot.sizeClass < 0 || slot.sizeClass >= CLASS_COUNT) 
-        return;
-    
-    m_freeLists[slot.sizeClass].push_back(slot.offset);
+
+    uint32_t off = slot.offset;
+    uint32_t size = slot.capacity;
+
+    // ── 与后继空闲区间合并 ──
+    auto next = m_freeIntervals.lower_bound(off);
+    if (next != m_freeIntervals.end() && next->first == off + size) {
+        size += next->second;
+        m_freeIntervals.erase(next);
+    }
+
+    // ── 与前驱空闲区间合并 ──
+    auto prev = m_freeIntervals.lower_bound(off);
+    if (prev != m_freeIntervals.begin()) {
+        --prev;
+        if (prev->first + prev->second == off) {
+            off = prev->first;
+            size += prev->second;
+            m_freeIntervals.erase(prev);
+        }
+    }
+
+    m_freeIntervals[off] = size;
+
     if (m_inUse >= slot.capacity) {
         m_inUse -= slot.capacity;
-    } 
-    else m_inUse = 0;
+    } else {
+        m_inUse = 0;
+    }
 }
 
 void ChunkArena::upload(Slot& slot, const InstanceData* data, uint32_t count) {
@@ -132,7 +165,6 @@ void ChunkArena::patch(Slot& slot, const InstanceData* data,
                        uint32_t newCount) {
     if (!slot.valid() || indexCount == 0 || data == nullptr || indices == nullptr) return;
     if (newCount > slot.capacity) {
-        // 容量不够 —— 调用方应该在上层 fallback 到全量 reupload，不该走到这里
         std::cerr << "ChunkArena::patch newCount " << newCount
                   << " > capacity " << slot.capacity << std::endl;
         return;
@@ -169,10 +201,9 @@ void ChunkArena::patch(Slot& slot, const InstanceData* data,
     }
 
     InstanceData* dst = reinterpret_cast<InstanceData*>(ptr);
-    // 仅写 dirty index 对应的位置；映射的相对偏移 = idx - minIdx
     for (uint32_t i = 0; i < indexCount; ++i) {
         uint32_t idx = indices[i];
-        if (idx >= slot.capacity) continue;          // 越界防御
+        if (idx >= slot.capacity) continue;
         dst[idx - minIdx] = data[idx];
     }
 
@@ -203,7 +234,8 @@ bool ChunkArena::grow(uint32_t newCapacity) {
         nullptr, GL_DYNAMIC_DRAW);
 
     if (m_vbo && m_capacity > 0) {
-        // 已使用的部分（[0, m_cursor)）拷贝过来。free list 的 offset 在 cursor 之前都还有效。
+        // 已使用的部分（[0, m_cursor)）拷贝过来。
+        // 空闲区间表中的 offset 都在 cursor 之前，仍然有效。
         glBindBuffer(GL_COPY_READ_BUFFER, m_vbo);
         glBindBuffer(GL_COPY_WRITE_BUFFER, newVBO);
         glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER,
@@ -220,27 +252,24 @@ bool ChunkArena::grow(uint32_t newCapacity) {
 }
 
 int ChunkArena::getFreeBlockCount() const {
-    int total = 0;
-    for (const auto& fl : m_freeLists) total += (int)fl.size();
-    return total;
+    return (int)m_freeIntervals.size();
 }
 
 uint32_t ChunkArena::getLargestFreeBlock() const {
-    // 最大空闲块 = 最大有空闲条目的 class 的 size，或 cursor 之后的连续空白
     uint32_t best = (m_cursor < m_capacity) ? (m_capacity - m_cursor) : 0;
-    for (int i = CLASS_COUNT - 1; i >= 0; --i) {
-        if (!m_freeLists[i].empty()) {
-            best = std::max(best, SIZE_CLASSES[i]);
-            break;   // 只看最大的有空闲的 class
-        }
+    for (const auto& kv : m_freeIntervals) {
+        if (kv.second > best) best = kv.second;
     }
     return best;
 }
 
 void ChunkArena::dumpClassStats(std::ostream& os) const {
-    os << "Arena classes:";
-    for (int i = 0; i < CLASS_COUNT; ++i) {
-        os << " [" << SIZE_CLASSES[i] << "]=" << m_freeLists[i].size();
+    os << "Arena free intervals(" << m_freeIntervals.size() << "):";
+    int count = 0;
+    for (const auto& kv : m_freeIntervals) {
+        os << " [" << kv.first << "+" << kv.second << "]";
+        if (++count >= 12) { os << " ..."; break; }
     }
-    os << " cursor=" << m_cursor << "/" << m_capacity;
+    os << " cursor=" << m_cursor << "/" << m_capacity
+       << " inUse=" << m_inUse;
 }

@@ -126,7 +126,13 @@
       "PowerShell(try { $word = New-Object -ComObject Word.Application; $word.Visible = $false; Write-Host \"Word COM available\"; $word.Quit\\(\\) } catch { Write-Host \"Word COM not available: $_\" })",
       "PowerShell($word = New-Object -ComObject Word.Application; $doc = $word.Documents.Open\\(\"D:\\\\CPP\\\\简历\\\\实习简历2.0.docx\"\\); $text = $doc.Content.Text; $doc.Close\\(\\); $word.Quit\\(\\); Write-Host $text.Substring\\(0, [Math]::Min\\(500, $text.Length\\)\\))",
       "PowerShell($f=\"E:\\\\opengl\\\\iMc\\\\iMc.vcxproj\"; $c=[IO.File]::ReadAllText\\($f\\); $u=New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f,$c,$u\\))",
-      "PowerShell($f=\"E:\\\\opengl\\\\iMc\\\\iMc.vcxproj.filters\"; $c=[IO.File]::ReadAllText\\($f\\); $u=New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f,$c,$u\\))"
+      "PowerShell($f=\"E:\\\\opengl\\\\iMc\\\\iMc.vcxproj.filters\"; $c=[IO.File]::ReadAllText\\($f\\); $u=New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f,$c,$u\\))",
+      "Bash(mkdir -p \"E:\\\\opengl\\\\iMc\\\\scr\\\\jsoncpp\")",
+      "Bash(cp \"D:\\\\library\\\\jsoncpp-src-0.5.0\\\\src\\\\lib_json\\\\json_reader.cpp\" \"E:\\\\opengl\\\\iMc\\\\scr\\\\jsoncpp\\\\\" && cp \"D:\\\\library\\\\jsoncpp-src-0.5.0\\\\src\\\\lib_json\\\\json_value.cpp\" \"E:\\\\opengl\\\\iMc\\\\scr\\\\jsoncpp\\\\\")",
+      "Bash(cp \"D:\\\\library\\\\jsoncpp-src-0.5.0\\\\src\\\\lib_json\\\\json_writer.cpp\" \"E:\\\\opengl\\\\iMc\\\\scr\\\\jsoncpp\\\\\" && cp \"D:\\\\library\\\\jsoncpp-src-0.5.0\\\\src\\\\lib_json\\\\json_batchallocator.h\" \"E:\\\\opengl\\\\iMc\\\\scr\\\\jsoncpp\\\\\")",
+      "Bash(cp \"D:\\\\library\\\\jsoncpp-src-0.5.0\\\\src\\\\lib_json\\\\json_valueiterator.inl\" \"E:\\\\opengl\\\\iMc\\\\scr\\\\jsoncpp\\\\\" && echo \"Done copying\")",
+      "PowerShell($f=\"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkArena.h\"; $c=[IO.File]::ReadAllText\\($f\\); $u=New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f,$c,$u\\))",
+      "PowerShell($f=\"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkArena.cpp\"; $c=[IO.File]::ReadAllText\\($f\\); $u=New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f,$c,$u\\))"
     ],
     "additionalDirectories": [
       "e:\\opengl\\iMc\\scr"

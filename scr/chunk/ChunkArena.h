@@ -2,25 +2,24 @@
 #include "../core.h"
 #include "BlockType.h"
 #include <vector>
-#include <array>
+#include <map>
+#include <cstdint>
+#include <ostream>
 
 // GPU 端的"段式"实例缓冲：所有 section 的 InstanceData 共用一块大 VBO，
 // 每个 section 占据其中一段 slot（offset, capacity）。
 //
-// 内部用 size-class allocator：把 slot 容量限制在固定的若干档位，
-// 每个 size class 维护一个独立 free list。这样：
-//  - alloc/free 都是 O(1) 操作；
-//  - 已 free 的块永远停留在原 class（不与相邻块合并），外部碎片受控；
-//  - section 实例数小幅波动（±50%）时不会触发跨 class 重分配；
-//  - 首次分配时按 1.5x 预留，进一步减少 grow 频率。
+// 使用区间空闲表（std::map<offset, size>）管理空闲块：
+//  - allocate: best-fit 搜索，大块自动拆分为小块
+//  - free: 自动与相邻空闲块合并，避免碎片化
+//  - 首次分配时按 1.5x 预留，减少 grow 频率
 class ChunkArena {
 public:
     struct Slot {
         uint32_t offset = 0;
-        uint32_t capacity = 0;     // 实例数；等于某个 size class 的固定值
+        uint32_t capacity = 0;     // 实例数
         uint32_t count = 0;        // 实际有效实例数
-        int8_t   sizeClass = -1;   // -1 = invalid；否则索引到 SIZE_CLASSES
-        bool valid() const { return capacity > 0 && sizeClass >= 0; }
+        bool valid() const { return capacity > 0; }
     };
 
     ChunkArena();
@@ -30,7 +29,7 @@ public:
     void shutdown();
 
     // 申请一段空间。requestedInstances 为真实需要的实例数；
-    // 内部会 oversize 到下一个 size class 提供缓冲。
+    // 内部会 oversize 1.5x 提供缓冲。
     Slot allocate(uint32_t requestedInstances);
 
     void free(const Slot& slot);
@@ -47,7 +46,7 @@ public:
     // - newCount 表示更新后 slot 的有效实例数（必须 <= slot.capacity）
     //
     // 实现策略：单次 glMapBufferRange 覆盖 [minIdx, maxIdx] 范围，
-    // 配 GL_MAP_INVALIDATE_RANGE_BIT | GL_MAP_UNSYNCHRONIZED_BIT，跳过驱动同步等待。
+    // 配 GL_MAP_UNSYNCHRONIZED_BIT，跳过驱动同步等待。
     // 调用方需保证：上一帧 GPU 已经画完这些位置（每帧帧首调用即可满足）。
     void patch(Slot& slot, const InstanceData* data,
                const uint32_t* indices, uint32_t indexCount,
@@ -57,32 +56,29 @@ public:
     uint32_t getCapacity() const { return m_capacity; }
     uint32_t getInUse() const { return m_inUse; }
 
-    // 各 size class 的当前空闲块数量
+    // 调试统计
     int getFreeBlockCount() const;
     uint32_t getLargestFreeBlock() const;
-    // 每个 class 的统计（调试用）
     void dumpClassStats(std::ostream& os) const;
 
-    // size class 表（实例数）。从小到大排列，最后一个是单 slot 上限。
-    // 选取依据：覆盖空（64）→ 普通地形 section (200~1500) → 复杂(2000~5000) → 极端(>5000)
-    static constexpr std::array<uint32_t, 7> SIZE_CLASSES = {
-        64, 256, 768, 1536, 3072, 6144, 12288
-    };
-    static constexpr int CLASS_COUNT = (int)SIZE_CLASSES.size();
-    // 超过最大 class 的请求被拒绝（实际不应发生 —— 一个 section 最多 16³*6 = 24576 面，
+    // 超出此值的请求被拒绝（实际不应发生 —— 一个 section 最多 16³*6 = 24576 面，
     // 但最坏情况是棋盘格地形，普通游戏中不会出现）。
     static constexpr uint32_t MAX_SLOT_INSTANCES = 12288;
 
 private:
     // VBO 总容量不足时扩容。
     bool grow(uint32_t newCapacity);
-    static int classFor(uint32_t needed);
+
+    // oversize 1.5x，上限 MAX_SLOT_INSTANCES
+    static uint32_t oversizeTarget(uint32_t needed);
 
     GLuint m_vbo = 0;
     uint32_t m_capacity = 0;       // VBO 总容量（实例）
     uint32_t m_cursor = 0;         // 未切区起点：[m_cursor, m_capacity) 是从未分配过的空间
-    uint32_t m_inUse = 0;          // 已经使用的容量
+    uint32_t m_inUse = 0;          // 已分配的总容量
 
-    // 每个 size class 一个 free list，存 offset
-    std::array<std::vector<uint32_t>, CLASS_COUNT> m_freeLists;
+    // 空闲区间表：offset → size，按 offset 排序
+    // allocate: best-fit（选 >= 需求的最小区间），大块拆分
+    // free: 插入后自动与前后相邻空闲区间合并
+    std::map<uint32_t, uint32_t> m_freeIntervals;
 };
