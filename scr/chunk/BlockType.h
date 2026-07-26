@@ -162,10 +162,6 @@ namespace std {
 //   blockType    (16-bit)
 //   textureLayer (16-bit)
 //
-// orient 当前 shader 不读：Section::addFaceLocal 已经在 CPU 端按 orient 把面映射成
-// "方块本地坐标系下的逻辑面"再去查 textureLayer，因此端面/侧面的纹理选择已经正确。
-// 保留 orient 字段（4 bit 几乎零成本）是为了将来在 frag 里旋转 UV，让横躺原木的
-// 侧面木纹方向也跟着轴转 —— 那时无需再改 InstanceData 二进制布局。
 //
 // 世界坐标在着色器里用 sectionBase[gl_DrawID].xyz + (localX,localY,localZ) + 0.5 还原。
 // CPU 不再保留 vec3 position，节省 16 字节并把整个结构降到 24B → 8B (3x)。

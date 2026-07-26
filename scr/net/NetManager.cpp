@@ -253,9 +253,6 @@ void NetManager::leave() {
     // worker 本身不碰 ENet（只产 payload），故顺序上先 stop 最安全。
     m_chunkSync.shutdown();
 
-    // 阶段 2：先停网络线程，之后 ENetHost 由主线程独占，disconnectAll/destroyHost 才安全。
-    m_transport.stopNetThread();
-
     if (m_isHost) {
         // 关服前持久化所有在线远程玩家的背包
         if (m_playerPersistCb) {
@@ -263,9 +260,14 @@ void NetManager::leave() {
                 if (p->peer) persistPlayerInventory(id, p->playerName);
             }
         }
-        // 通知所有客户端断开（线程已停，主线程直接发 + flush，同步推出 disconnect 包）
+        // 通知所有客户端断开（网络线程仍在运行，确保断开通知送达对端）
         m_transport.disconnectAll();
+        // 给网络线程一小段时间把断开包发出去
+        std::this_thread::sleep_for(std::chrono::milliseconds(80));
     }
+
+    // 阶段 2：停网络线程，之后 ENetHost 由主线程独占，后续清理才安全。
+    m_transport.stopNetThread();
 
     m_players.clear();
     m_peerToPlayer.clear();
@@ -363,7 +365,7 @@ void NetManager::updateSerializeThreadCount() {
 }
 
 void NetManager::dispatchEvents() {
-    // 阶段 2：网络线程已把事件解析好放进入站队列，主线程在此取走 dispatch（不再直接碰 ENet）。
+    // 网络线程已把事件解析好放进入站队列，主线程在此取走 dispatch（不再直接碰 ENet）。
     std::vector<NetEvent> events;
     // 先消费握手期暂存的入站事件（JOIN_ACCEPT 同批次里 PLAYER_LIST 等），再取本帧新事件，保序。
     if (!m_deferredInbound.empty()) {
@@ -381,6 +383,7 @@ void NetManager::dispatchEvents() {
             break;
 
         case NetEvent::Disconnected: {
+            // 服务端侧：某客户端断开
             auto it = m_peerToPlayer.find(ev.peer);
             if (it != m_peerToPlayer.end()) {
                 uint16_t pid = it->second;
@@ -403,6 +406,12 @@ void NetManager::dispatchEvents() {
                     // 客户端减少 → 缩小序列化线程池
                     updateSerializeThreadCount();
                 }
+            }
+            // 客户端侧：与服务端的连接断开（Host 退出或网络中断）
+            else if (!m_isHost && m_serverPeer && ev.peer == m_serverPeer) {
+                printf("[NetManager] 与服务端的连接已断开\n");
+                m_connected = false;
+                m_serverPeer = nullptr;
             }
             break;
         }
@@ -960,7 +969,7 @@ void NetManager::handleBlockChangeServer(ENetPeer* peer, MemoryStream& payload) 
     int32_t wz = payload.readPod<int32_t>();
     uint16_t bits = payload.readPod<uint16_t>();
 
-    // TODO(校验): 距离/权限/冷却。当前局域网受信环境，先直接应用。
+    // TODO(校验): 距离/权限/冷却。
     if (m_chunkManager) {
         bool applied = m_chunkManager->applyBlockChange(
             glm::ivec3(wx, wy, wz), BlockState(bits));

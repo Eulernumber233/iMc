@@ -369,7 +369,8 @@ void ChunkManager::updateActiveChunks(const glm::vec3& cameraPos) {
     if ((int)m_inFlight.size() < m_maxInflightRequests) {
         requestMissingChunks();
     }
-
+    
+    // 重新检查 m_loadedChunks 中的 chunk，踢出超出卸载半径的 GPU slot
     evictFarChunkSlots();
 }
 
@@ -417,10 +418,6 @@ void ChunkManager::requestMissingChunks() {
     }
 
     // 所有模式：踢出"玩家已跑远"的在途请求（超出 render + retain）。
-    // 这些 chunk 即使生成回来也会被卸载逻辑回收，提前从 m_inFlight 移除可腾出槽位
-    // 给真正需要的 chunk。用 retain 半径（而非 data 半径）做阈值，避免温存区边界抖动
-    // 反复踢/补。注意：被踢后 worker 仍会算完并进 m_blockDone，主线程 drain 时若仍不相关
-    // 会进 block-ready 由卸载逻辑统一处理（生成成本已发生，不浪费数据）。
     for (auto it = m_inFlight.begin(); it != m_inFlight.end(); ) {
         int cx = (int32_t)(it->first >> 32);
         int cz = (int32_t)(it->first & 0xFFFFFFFFLL);
@@ -459,7 +456,7 @@ void ChunkManager::requestMissingChunks() {
     }
 
     // 本地模式（含 Host）：投递 Task 1（方块数据生成/加载）。
-    // 阶段 B + per-center：围绕所有加载中心（Host + 远程玩家，各带自己的半径）补数据。
+    // per-center：围绕所有加载中心（Host + 远程玩家，各带自己的半径）补数据。
     //
     // 投递顺序 = 全局"由近及远"：外层环 r 从 0 递增，对每个 r 只处理"r 落在自己半径内"
     // 的中心的那一环。这样：
@@ -1292,7 +1289,7 @@ void ChunkManager::checkAndSubmitLightBFS(Chunk* newChunk) {
         Chunk* nb = getChunk(nbPos);
         if (nb) toCheck.push_back(nbPos);
     }
-    //printf("checkAndSubmitLightBFS: new chunk (%d,%d), toCheck %zu\n", np.x, np.y, toCheck.size());
+
     for (const auto& cp : toCheck) {
         Chunk* c = getChunk(cp);
         if (!c) continue;

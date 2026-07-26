@@ -90,7 +90,7 @@
     "worker_threads": 4,
     //   0 = 自动（hardware_concurrency）；正数 = 指定线程数
 
-    "max_inflight_requests": 32,
+    "max_inflight_requests":  64,
     //   同时投递的最大 build 任务数，超过则暂停请求新 chunk
 
 

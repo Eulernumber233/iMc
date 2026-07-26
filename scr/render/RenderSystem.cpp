@@ -1323,7 +1323,7 @@ void RenderSystem::geometryPass(const ChunkManager& chunkManager,
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
 
-    // arena 可能因扩容换了底层 VBO，每帧重绑（内部已做相等短路）
+    // 绑定 VBO
     m_blockRenderer.bindArenaVBO(chunkManager.getArenaVBO());
 
     // section base SSBO 绑到 binding=0，shader 用 gl_DrawID 索引还原方块世界坐标

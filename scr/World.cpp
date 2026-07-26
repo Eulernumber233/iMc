@@ -177,14 +177,14 @@ int World::run() {
                     worldPos.x, worldPos.y, worldPos.z, state.bits);
             });
 
-        // 世界时间同步（需求 3）：
+        // 世界时间同步：
         //  Host —— 权威在本地 RenderSystem，注册 handler 应用客户端发来的 WORLD_CMD；
         //          每帧把 RenderSystem 时间镜像进 WorldState 复制给客户端。
         //  Join —— 时间由网络驱动，RenderSystem 不本地推进；890opl 键改发 WORLD_CMD。
         if (m_netMode == NetMode::Host) {
             m_netManager->setWorldCmdHandler(
                 [this](WorldCmdType t, float p) { applyTimeCommand(t, p); });
-            // 背包持久化（需求 2）：按玩家名存独立文件 saves/<world>/players/<name>.inv
+            // 背包持久化：按玩家名存独立文件 saves/<world>/players/<name>.inv
             m_netManager->setPlayerPersistCallbacks(
                 [this](const std::string& name, const InventoryData& inv) {
                     savePlayerInventoryFile(name, inv);
@@ -341,6 +341,12 @@ int World::run() {
         // 网络：帧首 poll + dispatch
         if (m_netManager) {
             m_netManager->update();
+
+            // 客户端断连检测：Host 退出或网络中断 → 退出世界回到主菜单
+            if (!m_netManager->isConnected()) {
+                std::cout << "[World] 与服务端的连接已断开，返回主菜单" << std::endl;
+                break;
+            }
         }
 
         // 更新玩家状态（包括移动、交互等）
