@@ -64,6 +64,7 @@ ChunkManager::~ChunkManager() {
     }
     m_lightCaches.clear();
     m_lightSlotMap.clear();
+    m_lightFreeSlots.clear();
     m_dirtyLightSections.clear();
     m_lightNextSlot = 0;
     m_lightSSBOSize = 0;
@@ -565,9 +566,10 @@ void ChunkManager::integrateBlockData() {
         if (m_loadedChunks.find(key) != m_loadedChunks.end()) continue;
         if (m_blockReady.find(key) != m_blockReady.end()) continue;
 
-        // 进入 BLOCK_READY（直接 move worker 产出的 16 个 box）
+        // 进入 BLOCK_READY（直接 move worker 产出的 16 个 box + 光源缓存）
         BlockReadyEntry entry;
         entry.boxes = std::move(r->boxes);
+        entry.lightSources = std::move(r->lightSources);
         m_blockReady[key] = std::move(entry);
 
         notePromotedChunk(r->pos);
@@ -720,6 +722,19 @@ void ChunkManager::loadMeshResult(ChunkBuildResult& result) {
     // adoptSections 把 worker 产出的 Section（已持有 self 的 BlockBox）move 进 chunk。
     // 方块数据的所有权从 block-ready entry 经 worker 一路 move 到这里，全程同一份 box。
     chunk->adoptSections(std::move(result.sections));
+
+    // 转移光源缓存到 Section（供 Task 3 复用，避免重复扫描 9 区块）
+    {
+        auto brIt = m_blockReady.find(key);
+        if (brIt != m_blockReady.end()) {
+            for (int sy = 0; sy < CHUNK_SECTION_COUNT; ++sy) {
+                if (brIt->second.lightSources[sy]) {
+                    chunk->getSection(sy).setLightSources(
+                        std::move(brIt->second.lightSources[sy]));
+                }
+            }
+        }
+    }
 
     // block-ready entry 的使命完成，清除（它持有的 box shared_ptr 释放，引用计数交给 Section）
     m_blockReady.erase(key);
@@ -1312,22 +1327,24 @@ void ChunkManager::submitLightBFS(const glm::ivec2& pos) {
     if (!center) return;
     if (center->isLightBfsDone()) return;
 
-    // 构建 LightBuildInput：收集 9 个 chunk 的 BlockBox
+    // 构建 LightBuildInput：收集 9 个 chunk 的 BlockBox + 光源缓存
     LightBuildInput input;
     input.pos = pos;
 
-    // self boxes
+    // self boxes + 光源
     for (int sy = 0; sy < CHUNK_SECTION_COUNT; ++sy) {
         input.self[sy] = center->getSectionBox(sy);
+        input.selfSources[sy] = center->getSection(sy).getLightSources();
     }
 
-    // 8 Moore 邻居 boxes
+    // 8 Moore 邻居 boxes + 光源
     for (int mi = 0; mi < 8; ++mi) {
         glm::ivec2 nbPos(pos.x + MOORE_OFFSETS[mi].x, pos.y + MOORE_OFFSETS[mi].y);
         Chunk* nb = getChunk(nbPos);
         if (nb) {
             for (int sy = 0; sy < CHUNK_SECTION_COUNT; ++sy) {
                 input.neighbors[mi][sy] = nb->getSectionBox(sy);
+                input.neighborSources[mi][sy] = nb->getSection(sy).getLightSources();
             }
         }
         // 缺失的 chunk 留在 neighbors[mi] 全 nullptr → BFS 视为不透明墙
@@ -1536,11 +1553,17 @@ void ChunkManager::uploadLightSSBOs(const glm::ivec3& camSecMin, const glm::ivec
         }
     };
 
-    // ── 辅助：为新 section 分配槽位（追加到 SSBO 末尾，无全量重建）──
+    // ── 辅助：为新 section 分配槽位（优先回收空闲槽位，free list 空时才增长）──
     auto assignSlot = [&](uint64_t secKey) -> int {
         auto it = m_lightSlotMap.find(secKey);
         if (it != m_lightSlotMap.end()) return it->second;
-        int slot = m_lightNextSlot++;
+        int slot;
+        if (!m_lightFreeSlots.empty()) {
+            slot = m_lightFreeSlots.back();
+            m_lightFreeSlots.pop_back();
+        } else {
+            slot = m_lightNextSlot++;
+        }
         m_lightSlotMap[secKey] = slot;
         GLsizeiptr needed = (GLsizeiptr)(slot + 1) * SectionLightCache::BYTES;
         ensureSSBOCapacity(needed);
@@ -1615,6 +1638,8 @@ void ChunkManager::uploadLightSSBOs(const glm::ivec3& camSecMin, const glm::ivec
             m_dirtyLightSections.clear();
         }
     }
+    // 光照槽位变化后必须重建 draw list（sectionLightOffsets 依赖最新槽位映射）
+    markDrawListDirty();
 }
 
 void ChunkManager::notifyLightChange(const glm::ivec3& worldPos,
@@ -1688,6 +1713,7 @@ void ChunkManager::updateLighting() {
             if (!box) return BlockState{};
             return box->blocks[(ly * 16 + lz) * 16 + lx];
         };
+        
         // 局部脏集合：BFS 过程中所有被访问（清空/写入）的 section 都会记录于此。
         // BFS 结束后合并到 m_dirtyLightSections，实现精确脏跟踪。
         std::unordered_set<uint64_t> bfsDirtySections;
@@ -1727,6 +1753,8 @@ void ChunkManager::updateLighting() {
             }
             return result;
         };
+        
+        
         // ── 按 8×8×8 网格去重后，逐条按类型分派 ──
         std::unordered_set<uint64_t> processed;
         for (const auto& ch : m_pendingLightChanges) {
@@ -1803,12 +1831,17 @@ void ChunkManager::updateLighting() {
 void ChunkManager::unregisterChunkLightSources(const glm::ivec2& chunkPos) {
     int cx = chunkPos.x, cz = chunkPos.y;
 
-    // 清理该 chunk 所有 section 的光照缓存和 SSBO 槽位
+    // 清理该 chunk 所有 section 的光照缓存和 SSBO 槽位。
     // 光源列表随 Section 生命周期自动释放（shared_ptr），无需单独清理。
+    // 释放的槽位回收到 free list，供后续新 section 复用，避免 SSBO 无限增长。
     for (int sy = 0; sy < Chunk::SECTION_COUNT; ++sy) {
         uint64_t key = makeSectionKey(cx, cz, sy);
         m_lightCaches.erase(key);
-        m_lightSlotMap.erase(key);
+        auto slotIt = m_lightSlotMap.find(key);
+        if (slotIt != m_lightSlotMap.end()) {
+            m_lightFreeSlots.push_back(slotIt->second);
+            m_lightSlotMap.erase(slotIt);
+        }
         m_lightSectionMapDirty = true;  // 槽位变化，下帧重建查找表
     }
 }

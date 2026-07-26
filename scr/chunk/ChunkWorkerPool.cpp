@@ -241,7 +241,7 @@ void ChunkWorkerPool::buildOne(const glm::ivec2& pos, BlockDataResult& out) cons
         m_generator->fillChunkBuffer(tmp.get(), pos);
     }
 
-    splitChunkBufferToBoxes(tmp.get(), out.boxes);
+    splitChunkBufferToBoxes(tmp.get(), out.boxes, out.lightSources);
 }
 
 // ============================================================================
@@ -262,7 +262,7 @@ void ChunkWorkerPool::netImportOne(const glm::ivec2& pos,
     size_t p = 0;
 
     if (len < 9) {
-        splitChunkBufferToBoxes(blockBuf.get(), out.boxes);
+        splitChunkBufferToBoxes(blockBuf.get(), out.boxes, out.lightSources);
         return;
     }
     p += 8;  // 4+4 字节 chunkX/Z
@@ -300,9 +300,8 @@ void ChunkWorkerPool::netImportOne(const glm::ivec2& pos,
         }
     }
 
-    splitChunkBufferToBoxes(blockBuf.get(), out.boxes);
+    splitChunkBufferToBoxes(blockBuf.get(), out.boxes, out.lightSources);
 }
-
 // ============================================================================
 // Task 2：完整可见面生成（内部 + 全部边界，纯几何，不涉及光照）
 // ============================================================================
@@ -451,51 +450,6 @@ struct ChunkGrid {
     }
 };
 
-// 扫描 9 个 chunk 中所有发光方块，产出 self chunk 的 per-section 光源列表 + 光源世界坐标
-void scanAllLightSources(const ChunkGrid& grid,
-    std::vector<glm::ivec3>& worldSources,
-    std::array<std::shared_ptr<std::vector<uint16_t>>, BSEC_COUNT>& outSelfSources) {
-    for (int sy = 0; sy < BSEC_COUNT; ++sy) {
-        outSelfSources[sy] = std::make_shared<std::vector<uint16_t>>();
-    }
-
-    for (int gi = 0; gi < 9; ++gi) {
-        const ChunkBoxes* cb = grid.boxes[gi];
-        if (!cb) continue;
-        int chunkOriginX = grid.originX + gridX[gi] * BW;
-        int chunkOriginZ = grid.originZ + gridZ[gi] * BD;
-
-        for (int sy = 0; sy < BSEC_COUNT; ++sy) {
-            const auto& box = (*cb)[sy];
-            if (!box) continue;
-            int baseY = sy * BSEC_H;
-            for (int y = 0; y < BSEC_H; ++y) {
-                for (int z = 0; z < BD; ++z) {
-                    for (int x = 0; x < BW; ++x) {
-                        BlockState state = box->blocks[(y * BD + z) * BW + x];
-                        if (!isEmissive(state.type())) continue;
-
-                        int wx = chunkOriginX + x;
-                        int wy = baseY + y;
-                        int wz = chunkOriginZ + z;
-                        worldSources.push_back(glm::ivec3(wx, wy, wz));
-
-                        // 仅 self chunk 的光源加入 per-section 列表
-                        if (gi == SELF_IDX) {
-                            outSelfSources[sy]->push_back(packChunkLightPos(x, wy, z));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // 清除全空 section 的 shared_ptr
-    for (int sy = 0; sy < BSEC_COUNT; ++sy) {
-        if (outSelfSources[sy]->empty()) outSelfSources[sy].reset();
-    }
-}
-
 } // namespace
 
 void ChunkWorkerPool::lightBuildOne(const LightBuildInput& in, LightBuildResult& out) {
@@ -515,9 +469,43 @@ void ChunkWorkerPool::lightBuildOne(const LightBuildInput& in, LightBuildResult&
         grid.boxes[gi] = &in.neighbors[mi];
     }
 
-    // ── 2. 扫描光源 ──────────────────────────────────────────────
+    // ── 2. 从缓存收集光源（Task 1 产出，避免重复扫描 9×4096 格）──
     std::vector<glm::ivec3> worldSources;
-    scanAllLightSources(grid, worldSources, out.sectionLightSources);
+    {
+        // 中心 chunk：共享 shared_ptr + 解包到世界坐标
+        int cx = grid.originX;
+        int cz = grid.originZ;
+        for (int sy = 0; sy < BSEC_COUNT; ++sy) {
+            out.sectionLightSources[sy] = in.selfSources[sy]; // shared_ptr 拷贝
+            if (in.selfSources[sy]) {
+                int baseY = sy * BSEC_H;
+                for (uint16_t p : *in.selfSources[sy]) {
+                    worldSources.push_back(glm::ivec3(
+                        cx + unpackLightX(p), unpackLightY(p), cz + unpackLightZ(p)));
+                }
+            }
+        }
+        // 8 邻居：仅解包到世界坐标
+        for (int mi = 0; mi < 8; ++mi) {
+            int gi = (mi < 4) ? mi : (mi + 1);
+            if (!grid.boxes[gi]) continue;
+            int nx = cx + gridX[gi] * BW;
+            int nz = cz + gridZ[gi] * BD;
+            for (int sy = 0; sy < BSEC_COUNT; ++sy) {
+                if (!in.neighborSources[mi][sy]) continue;
+                int baseY = sy * BSEC_H;
+                for (uint16_t p : *in.neighborSources[mi][sy]) {
+                    worldSources.push_back(glm::ivec3(
+                        nx + unpackLightX(p), unpackLightY(p), nz + unpackLightZ(p)));
+                }
+            }
+        }
+        // 清理全空 section 的 shared_ptr
+        for (int sy = 0; sy < BSEC_COUNT; ++sy) {
+            if (out.sectionLightSources[sy] && out.sectionLightSources[sy]->empty())
+                out.sectionLightSources[sy].reset();
+        }
+    }
 
     if (worldSources.empty()) return;  // 无光源 → 全零光照
 

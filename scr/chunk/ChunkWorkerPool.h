@@ -20,16 +20,16 @@
 class TerrainGenerator;
 class Chunk;
 
-// 每个 chunk 的 section 数量
-static constexpr int CHUNK_SECTION_COUNT =
-    ChunkConstants::CHUNK_HEIGHT / ChunkConstants::SECTION_HEIGHT;
+// ──────────────────────────────────────────────────────────────────────
+// 通用类型
+// ChunkBoxes / ChunkLightSources / CHUNK_SECTION_COUNT 定义见 BlockBox.h
+// ──────────────────────────────────────────────────────────────────────
 
-// ChunkBoxes 定义见 BlockBox.h
-
-// Task 1 输出：方块数据（无光照）
+// Task 1 输出：方块数据 + per-section 光源位置缓存（Task 1 扫描，Task 3 直接复用）
 struct BlockDataResult {
     glm::ivec2 pos;
-    ChunkBoxes boxes;    // 16 个 section 的方块数据 + 锁（shared_ptr）
+    ChunkBoxes boxes;            // 16 个 section 的方块数据 + 锁（shared_ptr）
+    ChunkLightSources lightSources; // 发光方块位置缓存（空 section 为 nullptr）
 };
 
 // Task 2 输入：自身 + 4 横向邻居的 BlockBox（shared_ptr，仅拷指针）
@@ -48,19 +48,20 @@ struct ChunkBuildResult {
 
 // ── Task 3 光照 BFS ──────────────────────────────────────────────────
 
-// Task 3 输入：中心区块 + 8 个 Moore 邻居的 BlockBox（shared_ptr 共享，仅拷指针）
+// Task 3 输入：中心区块 + 8 个 Moore 邻居的 BlockBox + 光源缓存（shared_ptr 共享，仅拷指针）
 struct LightBuildInput {
     glm::ivec2 pos;
-    ChunkBoxes self;              // 中心区块的 16 个 box
-    ChunkBoxes neighbors[8];      // 8 个 Moore 邻居的 box（缺失方向各 ptr 为 nullptr）
+    ChunkBoxes self;                   // 中心区块的 16 个 box
+    ChunkBoxes neighbors[8];           // 8 个 Moore 邻居的 box（缺失方向各 ptr 为 nullptr）
+    ChunkLightSources selfSources;     // 中心区块 per-section 光源缓存（Task 1 产出）
+    ChunkLightSources neighborSources[8]; // 8 邻居 per-section 光源缓存
 };
 
 // Task 3 输出：中心区块的完整光照（3×3 区域完整 BFS）
 struct LightBuildResult {
     glm::ivec2 pos;
-    ChunkLightData sectionLightData; // 最终光照（shared_ptr 共享）
-    // 中心区块 per-section 光源位置（从 9 区块扫描而来）
-    std::array<std::shared_ptr<std::vector<uint16_t>>, CHUNK_SECTION_COUNT> sectionLightSources;
+    ChunkLightData sectionLightData;    // 最终光照（shared_ptr 共享）
+    ChunkLightSources sectionLightSources; // 中心区块 per-section 光源位置（复用 Task 1 缓存）
 };
 
 class ChunkWorkerPool {

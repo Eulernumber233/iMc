@@ -1,8 +1,12 @@
 ﻿#pragma once
 #include "BlockType.h"
 #include "ChunkDimensions.h"
+#include "../light/LightSource.h"
 #include <array>
 #include <shared_mutex>
+#include <memory>
+#include <vector>
+#include <cstdint>
 
 // BlockBox：一个 section（16×16×16）的方块数据 + 一把读写锁，打包在一起。
 //
@@ -40,29 +44,41 @@ struct BlockBox {
 using ChunkBoxes = std::array<std::shared_ptr<BlockBox>,
                               ChunkConstants::CHUNK_HEIGHT / ChunkConstants::SECTION_HEIGHT>;
 
+constexpr int CHUNK_SECTION_COUNT = ChunkConstants::CHUNK_HEIGHT / ChunkConstants::SECTION_HEIGHT;
+
+// 一个 chunk 的 per-section 光源位置缓存（shared_ptr 共享，uint16_t 压缩坐标）
+using ChunkLightSources = std::array<std::shared_ptr<std::vector<uint16_t>>, CHUNK_SECTION_COUNT>;
+
 // 把一段「整 chunk 连续 buffer」（地形生成器 / 存档 / 网络反序列化的布局
-// (worldY*DEPTH+z)*WIDTH+x）切分为 CHUNK_SECTION_COUNT 个 section BlockBox。
+// (worldY*DEPTH+z)*WIDTH+x）切分为 CHUNK_SECTION_COUNT 个 section BlockBox，
+// 同时扫描每 section 的发光方块，产出 per-section 光源位置缓存。
 // 不加锁：调用时 box 都是新建、尚未对外共享。
 inline void splitChunkBufferToBoxes(
     const BlockState* src,
-    std::array<std::shared_ptr<BlockBox>,
-               ChunkConstants::CHUNK_HEIGHT / ChunkConstants::SECTION_HEIGHT>& out)
+    ChunkBoxes& out,
+    ChunkLightSources& outLightSources)
 {
     constexpr int W = ChunkConstants::CHUNK_WIDTH;
     constexpr int D = ChunkConstants::CHUNK_DEPTH;
     constexpr int SEC_H = ChunkConstants::SECTION_HEIGHT;
-    constexpr int SEC_COUNT = ChunkConstants::CHUNK_HEIGHT / SEC_H;
+    constexpr int SEC_COUNT = CHUNK_SECTION_COUNT;
     for (int sy = 0; sy < SEC_COUNT; ++sy) {
         auto box = std::make_shared<BlockBox>();
+        auto srcList = std::make_shared<std::vector<uint16_t>>();
         BlockState* dst = box->blocks.data();
         for (int y = 0; y < SEC_H; ++y) {
             int worldY = sy * SEC_H + y;
             for (int z = 0; z < D; ++z) {
                 for (int x = 0; x < W; ++x) {
-                    dst[(y * D + z) * W + x] = src[(worldY * D + z) * W + x];
+                    BlockState state = src[(worldY * D + z) * W + x];
+                    dst[(y * D + z) * W + x] = state;
+                    if (isEmissive(state.type())) {
+                        srcList->push_back(packChunkLightPos(x, worldY, z));
+                    }
                 }
             }
         }
         out[sy] = std::move(box);
+        outLightSources[sy] = srcList->empty() ? nullptr : std::move(srcList);
     }
 }

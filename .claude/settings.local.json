@@ -132,7 +132,19 @@
       "Bash(cp \"D:\\\\library\\\\jsoncpp-src-0.5.0\\\\src\\\\lib_json\\\\json_writer.cpp\" \"E:\\\\opengl\\\\iMc\\\\scr\\\\jsoncpp\\\\\" && cp \"D:\\\\library\\\\jsoncpp-src-0.5.0\\\\src\\\\lib_json\\\\json_batchallocator.h\" \"E:\\\\opengl\\\\iMc\\\\scr\\\\jsoncpp\\\\\")",
       "Bash(cp \"D:\\\\library\\\\jsoncpp-src-0.5.0\\\\src\\\\lib_json\\\\json_valueiterator.inl\" \"E:\\\\opengl\\\\iMc\\\\scr\\\\jsoncpp\\\\\" && echo \"Done copying\")",
       "PowerShell($f=\"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkArena.h\"; $c=[IO.File]::ReadAllText\\($f\\); $u=New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f,$c,$u\\))",
-      "PowerShell($f=\"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkArena.cpp\"; $c=[IO.File]::ReadAllText\\($f\\); $u=New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f,$c,$u\\))"
+      "PowerShell($f=\"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkArena.cpp\"; $c=[IO.File]::ReadAllText\\($f\\); $u=New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f,$c,$u\\))",
+      "PowerShell($files = @\\(\"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.h\", \"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.cpp\"\\); foreach \\($f in $files\\) { $c = [IO.File]::ReadAllText\\($f\\); $u = New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f, $c, $u\\); Write-Host \"Fixed: $f\" })",
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Community/MSBuild/Current/Bin/MSBuild.exe\" iMc.sln /p:Configuration=Debug /p:Platform=x64 /m /v:minimal)",
+      "Bash(\"/d/visual studio/IDE/devenv.com\" iMc.sln /Build \"Debug|x64\")",
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" iMc.sln /p:Configuration=Debug /p:Platform=x64 /m /v:minimal 2>&1 | Select-Object -Last 30)",
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" iMc.sln /p:Configuration=Release /p:Platform=x64 /m /v:minimal 2>&1 | Select-Object -Last 15)",
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" iMc.sln /p:Configuration=Debug /p:Platform=x64 /m /v:minimal 2>&1 | Select-Object -Last 35)",
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" iMc.sln /p:Configuration=Release /p:Platform=x64 /m /v:minimal 2>&1 | Select-Object -Last 10)",
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" iMc.sln /p:Configuration=Debug /p:Platform=x64 /m /v:minimal 2>&1 | Select-Object -Last 5)",
+      "PowerShell($f=\"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.cpp\"; $c=[IO.File]::ReadAllText\\($f\\); $u=New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f,$c,$u\\); & \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" iMc.sln /p:Configuration=Debug /p:Platform=x64 /m /v:minimal 2>&1 | Select-Object -Last 5)",
+      "PowerShell($files = @\\(\"E:\\\\opengl\\\\iMc\\\\shader\\\\g_buffer.vert\", \"E:\\\\opengl\\\\iMc\\\\shader\\\\g_buffer.frag\"\\); foreach \\($f in $files\\) { $c = [IO.File]::ReadAllText\\($f\\); $u = New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f, $c, $u\\) }; & \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" iMc.sln /p:Configuration=Debug /p:Platform=x64 /m /v:minimal 2>&1 | Select-Object -Last 5)",
+      "Bash(git checkout *)",
+      "PowerShell($files = @\\(\"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.h\", \"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.cpp\"\\); foreach \\($f in $files\\) { $c = [IO.File]::ReadAllText\\($f\\); $u = New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f, $c, $u\\) }; & \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" iMc.sln /p:Configuration=Debug /p:Platform=x64 /m /v:minimal 2>&1 | Select-Object -Last 8)"
     ],
     "additionalDirectories": [
       "e:\\opengl\\iMc\\scr"

@@ -36,6 +36,7 @@ class ChunkSaveManager;
 // BLOCK_READY 状态：方块数据就绪，等待邻居完成以投递 Task 2
 struct BlockReadyEntry {
     ChunkBoxes boxes;               // 16 个 section 的方块数据 + 锁（见 BlockBox.h）
+    ChunkLightSources lightSources; // per-section 光源位置缓存（Task 1 产出，供 Task 3 复用）
     uint8_t neighborBlockReady = 0; // 4-bit: bit[i]=1 表示 m_neighbors[i] 方向已完成 Task 1
 };
 
@@ -354,7 +355,8 @@ private:
 
     // 槽位分配器：sectionKey → SSBO slot index
     std::unordered_map<uint64_t, int> m_lightSlotMap;
-    int m_lightNextSlot = 0;  // 下一个可用的 SSBO 槽位索引（只增不减，append 分配）
+    int m_lightNextSlot = 0;        // 下一个全新槽位索引（仅在 free list 空时增长）
+    std::vector<int> m_lightFreeSlots; // 被卸载 section 回收的空闲槽位（后进先出）
 
     // ── Task 3 光照 BFS 管理 ─────────────────────────────────────
     // 已投递 Task 3 的 chunk（避免重复投递）
