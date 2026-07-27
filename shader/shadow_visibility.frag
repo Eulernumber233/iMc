@@ -107,7 +107,7 @@ float PCSS_PCF_Filter(vec2 uv, float filterRadiusUV, float currentDepth, mat2 ro
 }
 
 // 在指定级联里跑完整 PCSS，返回阳光可见度 [0,1]：1=受光，0=阴影。
-// 与阶段 2 单张逻辑完全一致，只是采样多了 cascade layer 维度。
+// 与单张逻辑完全一致。
 float ShadowVisibilityCascade(vec3 worldPos, vec3 normal, vec3 lightDir, vec2 screenUV, int cascade) {
     vec4 fragPosLightSpace = cascadeLightMatrix[cascade] * vec4(worldPos, 1.0);
     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
@@ -195,7 +195,7 @@ void main() {
     vec3 worldPos = worldPosFromDepth(vTexCoord, depth);
     vec3 normal = normalize(texture(gNormal, vTexCoord).xyz);
     vec3 dirLightDir = normalize(-sunShineDir);
-
+/*
 #if CSM_DEBUG_TINT
     // debug：把可见度按级联编号偏置输出（配合外部把 R 通道映射成伪彩看环带），
     // 验证完把 CSM_DEBUG_TINT 设回 0。此处直接用可见度叠加级联序号的小阶梯，肉眼可辨切分。
@@ -207,6 +207,6 @@ void main() {
     FragColor = float(dbgCascade) / float(max(cascadeCount - 1, 1));
     return;
 #endif
-
+*/
     FragColor = ShadowVisibility(worldPos, normal, dirLightDir, gl_FragCoord.xy);
 }

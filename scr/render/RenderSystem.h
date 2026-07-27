@@ -244,6 +244,10 @@ private:
         { GL_VERTEX_SHADER,   "shader/deferred_lighting.vert" },
         { GL_FRAGMENT_SHADER, "shader/deferred_lighting.frag" }
     } };
+    Shader m_modelDepthShader{ {
+        { GL_VERTEX_SHADER,   "shader/model_depth.vert" },
+        { GL_FRAGMENT_SHADER, "shader/model_depth.frag" }
+    } };
     Shader m_modeShader{ {
         { GL_VERTEX_SHADER,   "shader/mode.vert" },
         { GL_FRAGMENT_SHADER, "shader/mode.frag" }
@@ -345,8 +349,10 @@ private:
     // CSM：逐级联算光锥 + 渲染深度到 m_csmDepth 各 layer。结果写入成员
     // m_cascadeLightMatrix[] / m_cascadeSplitView[]（不再走出参）。
     // camView/camProj 用未抖动的相机矩阵，按视距切子视锥。
+    // player / netManager 用于把人物模型也渲染到阴影贴图（caster）。
     void sunShineShadowMap(const ChunkManager& chunkManager, const std::shared_ptr<Camera>camera,
-        const glm::mat4& camView, const glm::mat4& camProj);
+        const glm::mat4& camView, const glm::mat4& camProj,
+        Player* player, NetManager* netManager);
     // 单帧 PCSS 可见度 → m_shadowVisCurr（按视距选级联，采 m_csmDepth）
     void shadowVisibilityPass(const glm::mat4& view, const glm::mat4& projection);
     // 时域累积：重投影历史 + 邻域 clamp + 混合 → m_shadowAccum[curr]
@@ -393,6 +399,10 @@ private:
     std::unordered_map<std::string, GLuint> m_skinTextures;
     GLuint loadSkinTexture(const std::string& skinName);
     void loadAllSkinTextures();
+
+    // 把当前阳光参数（环境光/直射光）+ CSM 阴影贴图 + PCSS 参数，一次设置到任意 Shader。
+    // 用于 renderModel / renderRemotePlayers 等正向模型渲染。
+    void setSunlightUniforms(Shader& shader, const glm::mat4& view);
 
     // 物品自定义 OBJ 模型缓存（modelPath → Model），按需懒加载（如望远镜）
     std::unordered_map<std::string, std::unique_ptr<Model>> m_itemModels;

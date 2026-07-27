@@ -303,14 +303,6 @@ bool RenderSystem::initialize() {
     m_deferredLightingShader.setInt("aoTex", 4);
     m_deferredLightingShader.setInt("shadowVisibility", 5);
 
-    m_modeShader.use();
-
-    m_modeShader.setVec3("light.direction", lightDir);
-    m_modeShader.setVec3("light.ambient", 0.4f, 0.4f, 0.4f);
-    m_modeShader.setVec3("light.diffuse", 0.9f, 0.9f, 0.9f);
-    m_modeShader.setVec3("light.specular", 1.0f, 1.0f, 1.0f);
-    m_modeShader.setFloat("shininess", 256.0f);
-
     // Sample kernel
     std::uniform_real_distribution<GLfloat> randomFloats(0.0, 1.0);
     std::default_random_engine generator;
@@ -1171,7 +1163,7 @@ void RenderSystem::render(const ChunkManager& chunkManager,
     // 级联子视锥切分用未抖动的相机 projection（jitter 是亚像素平移，不影响切分）。
     {
         PROFILE_SCOPE("sunShineShadowMap");
-        sunShineShadowMap(chunkManager, camera, view, projection);
+        sunShineShadowMap(chunkManager, camera, view, projection, player, netManager);
     }
 
     // 3.5 阴影可见度（单帧 PCSS，按视距选级联）+ 时域累积。
@@ -1489,10 +1481,6 @@ glm::mat4 RenderSystem::computeCascadeMatrix(float splitNear, float splitFar,
     // frustumCorners 现在是整个相机视锥（真实 near..far）的 8 角点。把它沿 near→far 方向
     // 重新插值到本级联的 [splitNear, splitFar] 区间。循环里 z 最内层，故 index 偶数=near 面、
     // 奇数=far 面，相邻配对（i*2 与 i*2+1 是同一条棱的两端）。
-    //
-    // 关键：插值参数必须相对相机的【真实】near/far（投影 far=1000，见 World.cpp），而非阴影
-    // 覆盖距离——nearC/farC 这条棱跨越的是真实 0.1→1000，用 180 当 far 会把级联角点算错位。
-    // 真实 near/far 直接从角点的视图空间深度取，免去对 World.cpp 投影参数的硬编码耦合。
     glm::vec3 splitCorners[8];
     {
         glm::vec3 n0 = frustumCorners[0], f0 = frustumCorners[1];
@@ -1516,7 +1504,7 @@ glm::mat4 RenderSystem::computeCascadeMatrix(float splitNear, float splitFar,
     float radius = 0.0f;
     for (int i = 0; i < 8; ++i) {
         float d = glm::length(splitCorners[i] - center);
-        if (d > radius) radius = d;     // 避开 windows.h 的 max 宏（NOMINMAX 未定义）
+        if (d > radius) radius = d;  
     }
     radius = std::ceil(radius);   // 取整，进一步减少半径随相机的微抖
 
@@ -1548,7 +1536,8 @@ glm::mat4 RenderSystem::computeCascadeMatrix(float splitNear, float splitFar,
 }
 
 void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std::shared_ptr<Camera>camera,
-    const glm::mat4& camView, const glm::mat4& camProj)
+    const glm::mat4& camView, const glm::mat4& camProj,
+    Player* player, NetManager* netManager)
 {
     const RuntimeConfig& rc = RuntimeConfig::get();
     const int cascadeCount = glm::clamp(rc.csmCascadeCount, 1, CASCADE_COUNT);
@@ -1601,6 +1590,39 @@ void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std
                 m_cascadeLightMatrix[i], 0.0f, 1.0f);
             m_drawCalls++;
         }
+
+        // ── 渲染人物模型到本级联阴影贴图 ────────────────────────────────
+        // drawPosed 内部有纹理绑定
+        m_modelDepthShader.use();
+        m_modelDepthShader.setMat4("lightSpaceMatrix", m_cascadeLightMatrix[i]);
+
+        // 本机玩家模型（第三人称时渲染；第一人称相机在头部内，自己看不到自己的影子）
+        if (player && player->shouldRenderOwnModel()) {
+            PlayerModel* pm = player->getModel();
+            if (pm) {
+                pm->drawPosed(m_modelDepthShader,
+                    player->getModelFootPosition(), player->getPose());
+            }
+        }
+
+        // 远程玩家模型
+        if (netManager && netManager->isConnected()) {
+            const auto& players = netManager->getPlayers();
+            uint16_t localId = netManager->getLocalPlayerId();
+            for (const auto& [id, rp] : players) {
+                if (id == localId) continue;
+                glm::vec3 pos = rp->getRenderPosition();
+                if (pos.x == 0.0f && pos.y == 0.0f && pos.z == 0.0f) continue;
+                glm::vec3 footPos = pos;
+                footPos.y -= PhysicsConstants::PLAYER_HEIGHT_STANDING * 0.5f;
+                m_remotePlayerModel.drawPosed(m_modelDepthShader,
+                    footPos, rp->animator.getPose());
+            }
+        }
+
+        // 解绑 drawPosed 内部绑定的纹理，还原 GL 状态
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, 0);
     }
     // 未使用的级联槽（cascadeCount < CASCADE_COUNT）：矩阵留旧值，splitView 设很大，
     // consumer 的选级联循环不会选到它们（viewDepth < splits[last] 必先命中有效级联）。
@@ -1891,6 +1913,59 @@ void RenderSystem::renderDroppedItems(const glm::mat4& view, const glm::mat4& pr
     glBindVertexArray(0);
 }
 
+// 把当前阳光环境光/直射光 + CSM 阴影贴图 + PCSS 参数，一次设置到任意 Shader。
+// 用于 renderModel / renderRemotePlayers 等正向模型渲染，与 lightingPass 保持相同计算。
+void RenderSystem::setSunlightUniforms(Shader& shader, const glm::mat4& view) {
+    const RuntimeConfig& rc = RuntimeConfig::get();
+
+    // ── 阳光能量（与 lightingPass 相同计算）──
+    float ambientWeight = rc.lightBudget * glm::mix(rc.ambientNight, rc.ambientDay, m_sunIntensity);
+    float sunWeight     = rc.lightBudget * rc.sunStrength * m_sunIntensity;
+
+    glm::vec3 dayAmbient(1.00f, 1.00f, 1.00f);
+    glm::vec3 nightAmbient(0.64f, 0.73f, 1.00f);
+    glm::vec3 ambientColor = glm::mix(nightAmbient, dayAmbient, m_sunIntensity);
+
+    shader.setVec3("sunShineAmbient", ambientColor * ambientWeight);
+    shader.setVec3("sunShineDiffuse", m_sunDiffuseColor * sunWeight);
+    shader.setVec3("sunShineDir", lightDir);
+    shader.setFloat("sunShineIntensity", m_sunIntensity);
+
+    // ── CSM 阴影 ──
+    const int cascadeCount = glm::clamp(rc.csmCascadeCount, 1, CASCADE_COUNT);
+
+    glActiveTexture(GL_TEXTURE6);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, m_csmDepth);
+    shader.setInt("shadowMap", 6);
+
+    shader.setInt("cascadeCount", cascadeCount);
+    shader.setMat4("view", view);
+    shader.setFloat("uShadowMapSize", float(m_csmSize));
+    shader.setFloat("uRefWorldExtent", m_cascadeWorldExtent[cascadeCount - 1]);
+
+    // 数组 uniform：逐元素上传
+    GLint locMat = glGetUniformLocation(shader.programID, "cascadeLightMatrix");
+    if (locMat >= 0)
+        glUniformMatrix4fv(locMat, CASCADE_COUNT, GL_FALSE, &m_cascadeLightMatrix[0][0][0]);
+    GLint locSplit = glGetUniformLocation(shader.programID, "cascadeSplitView");
+    if (locSplit >= 0)
+        glUniform1fv(locSplit, CASCADE_COUNT, m_cascadeSplitView);
+    GLint locExtent = glGetUniformLocation(shader.programID, "cascadeWorldExtent");
+    if (locExtent >= 0)
+        glUniform1fv(locExtent, CASCADE_COUNT, m_cascadeWorldExtent);
+
+    // ── 蓝噪声 + PCSS 参数 ──
+    glActiveTexture(GL_TEXTURE7);
+    glBindTexture(GL_TEXTURE_2D, m_blueNoiseTex);
+    shader.setInt("blueNoiseTex", 7);
+    shader.setInt("blueNoiseSize", m_blueNoiseSize);
+    shader.setInt("frameIndex", (int)m_frameIndex);
+
+    shader.setInt("uBlockerSamples", rc.shadowBlockerSamples);
+    shader.setInt("uFilterSamples", rc.shadowFilterSamples);
+    shader.setFloat("uLightSizeUV", rc.shadowLightSize);
+}
+
 void RenderSystem::renderModel(const std::shared_ptr<Camera> camera,
     const glm::mat4& view, const glm::mat4& projection, Player* player)
 {
@@ -1915,8 +1990,7 @@ void RenderSystem::renderModel(const std::shared_ptr<Camera> camera,
     m_modeShader.use();
     m_modeShader.setMat4("projection", projection);
     m_modeShader.setMat4("view", view);
-    m_modeShader.setVec3("viewPos", camera->Position);
-    m_modeShader.setVec3("light.direction", lightDir);
+    setSunlightUniforms(m_modeShader, view);
 
     // 使用动画姿态绘制
     model->drawPosed(m_modeShader, player->getModelFootPosition(), player->getPose());
@@ -1989,13 +2063,37 @@ void RenderSystem::renderFirstPersonHand(Player* player, float deltaTime)
         m_modeShader.use();
         m_modeShader.setMat4("projection", handProj);
         m_modeShader.setMat4("view", handView);
-        m_modeShader.setVec3("viewPos", glm::vec3(0.0f));
-        m_modeShader.setVec3("light.direction", lightDir);
+        // 第一人称手在相机空间，不参与 CSM 阴影（FragPos 非世界坐标）。
+        // 仅设阳光参数让手部亮度随昼夜变化。
+        const RuntimeConfig& rc = RuntimeConfig::get();
+        float ambientWeight = rc.lightBudget * glm::mix(rc.ambientNight, rc.ambientDay, m_sunIntensity);
+        float sunWeight     = rc.lightBudget * rc.sunStrength * m_sunIntensity;
+        glm::vec3 ambientColor = glm::mix(
+            glm::vec3(0.64f, 0.73f, 1.00f),
+            glm::vec3(1.00f, 1.00f, 1.00f), m_sunIntensity);
+        m_modeShader.setVec3("sunShineAmbient", ambientColor * ambientWeight);
+        m_modeShader.setVec3("sunShineDiffuse", m_sunDiffuseColor * sunWeight);
+        m_modeShader.setVec3("sunShineDir", lightDir);
+        m_modeShader.setFloat("sunShineIntensity", 0.0f); // 手在相机空间跳过 PCSS
         // 摆放/挥手/model 矩阵均由模型内部按 handConfig 完成（点击一次、长按循环）
         model->drawFirstPersonHand(m_modeShader, player->isLeftMousePressed(), deltaTime);
     }
 
     if (!holdingItem) return;
+
+    // 手持物品可能使用 m_modeShader（自定义 OBJ 模型），需先设好阳光参数。
+    // 手在相机空间 → sunShineIntensity=0 跳过 PCSS；sunShineDir 用相机空间方向。
+    {
+        const RuntimeConfig& rc = RuntimeConfig::get();
+        float ambW = rc.lightBudget * glm::mix(rc.ambientNight, rc.ambientDay, m_sunIntensity);
+        float sunW = rc.lightBudget * rc.sunStrength * m_sunIntensity;
+        glm::vec3 ambC = glm::mix(glm::vec3(0.64,0.73,1), glm::vec3(1,1,1), m_sunIntensity);
+        m_modeShader.use();
+        m_modeShader.setVec3("sunShineAmbient", ambC * ambW);
+        m_modeShader.setVec3("sunShineDiffuse", m_sunDiffuseColor * sunW);
+        m_modeShader.setVec3("sunShineDir", glm::vec3(0.3f, -0.6f, -0.7f));
+        m_modeShader.setFloat("sunShineIntensity", 0.0f);
+    }
 
     // 挥手矩阵（相机空间，绕镜头原点做弧线摆动 + 上抬），叠加到物品基础摆放上，
     // 使物品与手臂共享同一挥手动画（破坏方块时长按左键即持续挥）。
@@ -2008,7 +2106,7 @@ void RenderSystem::renderFirstPersonHand(Player* player, float deltaTime)
     const ItemDefinition* def = held->def;
     const HeldItemDisplay& disp = HeldDisplayRegistry::instance().resolve(*def);
     glm::mat4 handMat = swingMat * disp.firstPerson.matrix();
-    // 相机空间上下文：view=单位阵、viewPos=0、光方向用相机空间固定值。
+    // 相机空间上下文：view=单位阵、viewPos=0
     drawHeldItem(def, handMat, handView, handProj, glm::vec3(0.0f), glm::vec3(0.3f, -0.6f, -0.7f));
 }
 
@@ -2028,7 +2126,6 @@ void RenderSystem::drawHeldItem(const ItemDefinition* def, const glm::mat4& mode
         m_modeShader.setMat4("projection", projection);
         m_modeShader.setMat4("view", view);
         m_modeShader.setVec3("viewPos", viewPos);
-        m_modeShader.setVec3("light.direction", itemLightDir);
         m_modeShader.setMat4("model", model);
         im->Draw(m_modeShader);
         glBindVertexArray(0);
@@ -2142,12 +2239,7 @@ void RenderSystem::renderRemotePlayers(NetManager* netManager,
         m_modeShader.use();
         m_modeShader.setMat4("projection", projection);
         m_modeShader.setMat4("view", view);
-        m_modeShader.setVec3("viewPos", camera->Position);
-        m_modeShader.setVec3("light.direction", lightDir);
-        m_modeShader.setVec3("light.ambient", 0.4f, 0.4f, 0.4f);
-        m_modeShader.setVec3("light.diffuse", 0.9f, 0.9f, 0.9f);
-        m_modeShader.setVec3("light.specular", 1.0f, 1.0f, 1.0f);
-        m_modeShader.setFloat("shininess", 256.0f);
+        setSunlightUniforms(m_modeShader, view);
 
         // 查找并绑定该玩家的皮肤纹理
         GLuint skinTex = 0;
