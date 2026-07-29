@@ -8,6 +8,7 @@
 #include <array>
 #include <iostream>
 #include <algorithm>
+#include <cstring>
 #include <thread>
 #include <shared_mutex>
 #include <GLFW/glfw3.h>
@@ -61,6 +62,10 @@ ChunkManager::~ChunkManager() {
     if (m_sectionMapSSBO) {
         glDeleteBuffers(1, &m_sectionMapSSBO);
         m_sectionMapSSBO = 0;
+    }
+    if (m_cullParamsUBO) {
+        glDeleteBuffers(1, &m_cullParamsUBO);
+        m_cullParamsUBO = 0;
     }
     m_lightCaches.clear();
     m_lightSlotMap.clear();
@@ -879,12 +884,10 @@ void ChunkManager::rebuildDrawCommands() {
 
     {
         PROFILE_SCOPE("rdc.uploadPass");
-        // 只遍历 active chunk（渲染半径内、会被实际绘制的）。原先遍历整个 m_loadedChunks
-        // （范围到卸载半径，约 2000+ chunk × 16 section）每帧空扫。
-        // 进一步：用 chunk 的脏掩码（getDirtySectionMask）跳过整块干净 chunk，
+        // 只遍历 active chunk（渲染半径内、会被实际绘制的）
+        // 用 chunk 的脏掩码（getDirtySectionMask）跳过整块干净 chunk，
         // 稳态零脏时本 pass 每个 chunk 只做一次位运算判 0，整体接近 0 开销。
         // 非 active 的脏 section 不会被绘制，dirty 标记+掩码位都保留，待 chunk 进入
-        // active 半径后由本 pass 上传，仅延迟 1 帧，肉眼无感。
         for (Chunk* chunk : m_activeChunks) {
             uint32_t dirtyMask = chunk->getDirtySectionMask();
             if (dirtyMask == 0) continue;          // 整块干净 → 一次位运算跳过
@@ -914,11 +917,133 @@ void ChunkManager::rebuildDrawCommands() {
     // 有 section 上传 → 可见 slot 的 count/offset 可能变了，draw list 需重建。
     if (uploadedCount > 0) m_drawListDirty = true;
 
-    // draw command 缓存：相机未移动（visGeneration 不变）且可见集合未变（!dirty）时，
-    // m_drawCommands / m_sectionBases / GPU buffer 与上一帧完全相同，直接复用，
-    // 跳过遍历全部 active chunk 的 cull pass 与 GPU 重传。这是稳态静止帧的主要省时点。
-    if (!m_drawListDirty && m_visGeneration == m_lastBuiltVisGeneration) {
-        // 复用上一帧结果：m_visibleInstanceCount / m_drawCommands 保持不变。
+    //
+    // CPU 剔除路径（原始实现）
+    if constexpr (!kUseGpuFrustumCulling) {
+        // draw command 缓存：相机未移动（visGeneration 不变）且可见集合未变（!dirty）时，
+        // m_drawCommands / m_sectionBases / GPU buffer 与上一帧完全相同，直接复用。
+        if (!m_drawListDirty && m_visGeneration == m_lastBuiltVisGeneration) {
+            Profiler::addCounter("rdc.drawCmdCount", (int64_t)m_drawCommands.size());
+            Profiler::addCounter("rdc.visibleInstances", (int64_t)m_visibleInstanceCount);
+            Profiler::addCounter("rdc.rebuildSkipped", 1);
+            return;
+        }
+        Profiler::addCounter("rdc.rebuildSkipped", 0);
+
+        m_drawCommands.clear();
+        m_sectionBases.clear();
+        m_visibleInstanceCount = 0;
+
+        {
+            PROFILE_SCOPE("rdc.cullPass");
+            const auto& cfg = RuntimeConfig::get();
+            const bool detailed = cfg.profileDetailed;
+            const Camera* cam = m_camera.get();
+            int cameraSectionY = (int)(cam->Position.y / Section::HEIGHT);
+            int maxDownSections = cfg.verticalCullRatio > 0.0f
+                ? (int)(m_renderRadius * cfg.verticalCullRatio)
+                : 0;
+
+            std::array<glm::vec4, 6> frustumPlanes;
+            const std::array<glm::vec4, 6>* pPlanes = nullptr;
+            if (cam->FrustumCullingEnabled) {
+                frustumPlanes = cam->GetFrustumPlanes();
+                pPlanes = &frustumPlanes;
+            }
+
+            int chunkTotal = 0, chunkCoarseCull = 0;
+            int64_t coarseVisUs = 0, getMaskUs = 0, emitCmdUs = 0;
+
+            for (Chunk* chunk : m_activeChunks) {
+                if (!chunk->isMeshReady()) continue;
+                ++chunkTotal;
+
+                // 细分计时仅在 detailed 时调 steady_clock::now()（否则每 chunk 4 次时钟读是纯开销）
+                std::chrono::steady_clock::time_point t0, t1, t2, t3;
+                if (detailed) t0 = std::chrono::steady_clock::now();
+                bool visible = chunk->isChunkPotentiallyVisible(cam);
+                if (detailed) {
+                    t1 = std::chrono::steady_clock::now();
+                    coarseVisUs += std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+                }
+                if (!visible) { ++chunkCoarseCull; continue; }
+
+                uint32_t mask = chunk->getVisibleSectionMask(cam, cameraSectionY, maxDownSections, pPlanes, detailed);
+                if (detailed) {
+                    t2 = std::chrono::steady_clock::now();
+                    getMaskUs += std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+                }
+
+                while (mask) {
+                    int sy = lowestBitIndex(mask);
+                    mask &= mask - 1u;
+
+                    const ChunkArena::Slot& slot = chunk->getSection(sy).getGpuSlot();
+                    if (!slot.valid() || slot.count == 0) continue;
+
+                    DrawElementsIndirectCommand cmd{};
+                    cmd.count = 6;
+                    cmd.instanceCount = slot.count;
+                    cmd.firstIndex = 0;
+                    cmd.baseVertex = 0;
+                    cmd.baseInstance = slot.offset;
+                    m_drawCommands.push_back(cmd);
+
+                    glm::ivec2 cp = chunk->getPosition();
+                    m_sectionBases.emplace_back(
+                        float(cp.x * Chunk::WIDTH),
+                        float(sy * Section::HEIGHT),
+                        float(cp.y * Chunk::DEPTH),
+                        0.0f);
+
+                    m_visibleInstanceCount += slot.count;
+                }
+                if (detailed) {
+                    t3 = std::chrono::steady_clock::now();
+                    emitCmdUs += std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count();
+                }
+            }
+
+            if (detailed) {
+                Profiler::addSample("rdc.cull.coarseVis", "rdc.cullPass", coarseVisUs);
+                Profiler::addSample("rdc.cull.getMask", "rdc.cullPass", getMaskUs);
+                Profiler::addSample("rdc.cull.emitCmd", "rdc.cullPass", emitCmdUs);
+                Profiler::addCounter("rdc.chunkTotal", chunkTotal);
+                Profiler::addCounter("rdc.chunkCoarseCull", chunkCoarseCull);
+            }
+        }
+
+        Profiler::addCounter("rdc.drawCmdCount", (int64_t)m_drawCommands.size());
+        Profiler::addCounter("rdc.visibleInstances", (int64_t)m_visibleInstanceCount);
+
+        {
+            PROFILE_SCOPE("rdc.syncGpuBuffers");
+            syncIndirectBuffer();
+            syncSectionBaseSSBO();
+        }
+
+        m_lastBuiltVisGeneration = m_visGeneration;
+        m_drawListDirty = false;
+        return;
+    }
+
+    //
+    // GPU 剔除路径
+    // chunk 级粗剔（isChunkPotentiallyVisible）在 CPU 侧做，per-section 细剔
+    // 留给 compute shader。全量模板在相机移动或 section 变动时均重建。
+    // 静止帧（相机未动 + 无 mesh 变动）全跳过。
+    bool cameraMoved = (m_visGeneration != m_lastBuiltVisGeneration);
+    bool needRebuild = m_drawListDirty || cameraMoved;
+
+    if (needRebuild) {
+        PROFILE_SCOPE("rdc.rebuildFull");
+        rebuildFullDrawList();
+        {
+            PROFILE_SCOPE("rdc.syncGpuBuffers");
+            syncIndirectBuffer();
+            syncSectionBaseSSBO();
+        }
+    } else {
         Profiler::addCounter("rdc.drawCmdCount", (int64_t)m_drawCommands.size());
         Profiler::addCounter("rdc.visibleInstances", (int64_t)m_visibleInstanceCount);
         Profiler::addCounter("rdc.rebuildSkipped", 1);
@@ -926,102 +1051,121 @@ void ChunkManager::rebuildDrawCommands() {
     }
     Profiler::addCounter("rdc.rebuildSkipped", 0);
 
-    m_drawCommands.clear();
-    m_sectionBases.clear();
-    m_visibleInstanceCount = 0;
-
-    {
-        PROFILE_SCOPE("rdc.cullPass");
-        const auto& cfg = RuntimeConfig::get();
-        const bool detailed = cfg.profileDetailed;  // 细分计时/计数总开关（默认关 → 零开销）
-        const Camera* cam = m_camera.get();
-        int cameraSectionY = (int)(cam->Position.y / Section::HEIGHT);
-        int maxDownSections = cfg.verticalCullRatio > 0.0f
-            ? (int)(m_renderRadius * cfg.verticalCullRatio)
-            : 0;
-
-        std::array<glm::vec4, 6> frustumPlanes;
-        const std::array<glm::vec4, 6>* pPlanes = nullptr;
-        if (cam->FrustumCullingEnabled) {
-            frustumPlanes = cam->GetFrustumPlanes();
-            pPlanes = &frustumPlanes;
-        }
-
-        int chunkTotal = 0, chunkCoarseCull = 0;
-        int64_t coarseVisUs = 0, getMaskUs = 0, emitCmdUs = 0;
-
-        for (Chunk* chunk : m_activeChunks) {
-            if (!chunk->isMeshReady()) continue;
-            ++chunkTotal;
-
-            // 细分计时仅在 detailed 时调 steady_clock::now()（否则每 chunk 4 次时钟读是纯开销）
-            std::chrono::steady_clock::time_point t0, t1, t2, t3;
-            if (detailed) t0 = std::chrono::steady_clock::now();
-            bool visible = chunk->isChunkPotentiallyVisible(cam);
-            if (detailed) {
-                t1 = std::chrono::steady_clock::now();
-                coarseVisUs += std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-            }
-            if (!visible) { ++chunkCoarseCull; continue; }
-
-            uint32_t mask = chunk->getVisibleSectionMask(cam, cameraSectionY, maxDownSections, pPlanes, detailed);
-            if (detailed) {
-                t2 = std::chrono::steady_clock::now();
-                getMaskUs += std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
-            }
-
-            while (mask) {
-                int sy = lowestBitIndex(mask);
-                mask &= mask - 1u;
-
-                const ChunkArena::Slot& slot = chunk->getSection(sy).getGpuSlot();
-                if (!slot.valid() || slot.count == 0) continue;
-
-                DrawElementsIndirectCommand cmd{};
-                cmd.count = 6;
-                cmd.instanceCount = slot.count;
-                cmd.firstIndex = 0;
-                cmd.baseVertex = 0;
-                cmd.baseInstance = slot.offset;
-                m_drawCommands.push_back(cmd);
-
-                glm::ivec2 cp = chunk->getPosition();
-                m_sectionBases.emplace_back(
-                    float(cp.x * Chunk::WIDTH),
-                    float(sy * Section::HEIGHT),
-                    float(cp.y * Chunk::DEPTH),
-                    0.0f);
-
-                m_visibleInstanceCount += slot.count;
-            }
-            if (detailed) {
-                t3 = std::chrono::steady_clock::now();
-                emitCmdUs += std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count();
-            }
-        }
-
-        // 细分计时/计数仅在 detailed 开启时输出（显式指定父为 "rdc.cullPass" 以缩进）。
-        if (detailed) {
-            Profiler::addSample("rdc.cull.coarseVis", "rdc.cullPass", coarseVisUs);
-            Profiler::addSample("rdc.cull.getMask", "rdc.cullPass", getMaskUs);
-            Profiler::addSample("rdc.cull.emitCmd", "rdc.cullPass", emitCmdUs);
-            Profiler::addCounter("rdc.chunkTotal", chunkTotal);
-            Profiler::addCounter("rdc.chunkCoarseCull", chunkCoarseCull);
-        }
+    if (!m_drawCommands.empty()) {
+        PROFILE_SCOPE("rdc.gpuCull");
+        dispatchGpuCull();
     }
 
     Profiler::addCounter("rdc.drawCmdCount", (int64_t)m_drawCommands.size());
     Profiler::addCounter("rdc.visibleInstances", (int64_t)m_visibleInstanceCount);
 
-    {
-        PROFILE_SCOPE("rdc.syncGpuBuffers");
-        syncIndirectBuffer();
-        syncSectionBaseSSBO();
-    }
-
-    // 重建完成：记录本次基于的 visGeneration，清除脏标记。
     m_lastBuiltVisGeneration = m_visGeneration;
     m_drawListDirty = false;
+}
+
+void ChunkManager::rebuildFullDrawList() {
+    PROFILE_SCOPE("rebuildFullDrawList");
+
+    m_drawCommands.clear();
+    m_sectionBases.clear();
+    m_visibleInstanceCount = 0;
+
+    // 遍历所有活跃 chunk：chunk 级做视锥 + 距离粗剔（isChunkPotentiallyVisible，
+    // 结果按 visGeneration 缓存，极便宜），per-section 细剔留给 compute shader。
+    const Camera* cam = m_camera.get();
+
+    for (Chunk* chunk : m_activeChunks) {
+        if (!chunk->isMeshReady()) continue;
+        if (cam && !chunk->isChunkPotentiallyVisible(cam)) continue;
+
+        uint32_t mask = chunk->getNonEmptyMask();
+        while (mask) {
+            int sy = lowestBitIndex(mask);
+            mask &= mask - 1u;
+
+            const ChunkArena::Slot& slot = chunk->getSection(sy).getGpuSlot();
+            if (!slot.valid() || slot.count == 0) continue;
+
+            DrawElementsIndirectCommand cmd{};
+            cmd.count = 6;
+            cmd.instanceCount = slot.count;
+            cmd.firstIndex = 0;
+            cmd.baseVertex = 0;
+            cmd.baseInstance = slot.offset;
+            m_drawCommands.push_back(cmd);
+
+            glm::ivec2 cp = chunk->getPosition();
+            // 把原始 instanceCount 的 uint32 位模式存进 float（floatBitsToUint 在 shader 端还原）
+            float countBits;
+            uint32_t countVal = slot.count;
+            std::memcpy(&countBits, &countVal, sizeof(float));
+            m_sectionBases.emplace_back(
+                float(cp.x * Chunk::WIDTH),
+                float(sy * Section::HEIGHT),
+                float(cp.y * Chunk::DEPTH),
+                countBits);   // .w = instanceCount 的 uint 位模式（compute shader 用 floatBitsToUint 还原）
+
+            m_visibleInstanceCount += slot.count;
+        }
+    }
+}
+
+void ChunkManager::dispatchGpuCull() {
+    const Camera* cam = m_camera.get();
+    if (!cam) return;
+
+    const auto& cfg = RuntimeConfig::get();
+    const int numCommands = (int)m_drawCommands.size();
+
+    // 准备 UBO
+    if (m_cullParamsUBO == 0) {
+        glGenBuffers(1, &m_cullParamsUBO);
+        glBindBuffer(GL_UNIFORM_BUFFER, m_cullParamsUBO);
+        glBufferData(GL_UNIFORM_BUFFER, sizeof(GpuCullParams), nullptr, GL_DYNAMIC_DRAW);
+        glBindBuffer(GL_UNIFORM_BUFFER, 0);
+    }
+
+    // 构建剔除参数
+    GpuCullParams cullParams{};
+    if (cam->FrustumCullingEnabled) {
+        auto planes = cam->GetFrustumPlanes();
+        for (int i = 0; i < 6; ++i)
+            cullParams.frustumPlanes[i] = planes[i];
+    } else {
+        // 禁用视锥剔除：填充始终包含全空间的平面（normal=0 表示平面退化为无关）
+        for (int i = 0; i < 6; ++i)
+            cullParams.frustumPlanes[i] = glm::vec4(0.0f);
+    }
+    cullParams.cameraPosDist = glm::vec4(cam->Position, 300.0f); // w = maxRenderDistance
+
+    int cameraSectionY = (int)(cam->Position.y / Section::HEIGHT);
+    int maxDownSections = cfg.verticalCullRatio > 0.0f
+        ? (int)(m_renderRadius * cfg.verticalCullRatio)
+        : 0;
+    cullParams.cullSettings = glm::ivec4(maxDownSections, cameraSectionY, numCommands, 0);
+
+    // 上传 UBO
+    glBindBuffer(GL_UNIFORM_BUFFER, m_cullParamsUBO);
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(GpuCullParams), &cullParams);
+    glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+    // Dispatch compute shader
+    m_frustumCullShader.use();
+    // binding=0: sectionBases SSBO（与顶点着色器共用，只读）
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, m_sectionBaseSSBO);
+    // binding=1: indirect buffer（compute 写 instanceCount）
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_indirectBuffer);
+    // binding=2: cull params UBO
+    glBindBufferBase(GL_UNIFORM_BUFFER, 2, m_cullParamsUBO);
+
+    GLuint numGroups = (GLuint)((numCommands + 63) / 64);
+    glDispatchCompute(numGroups, 1, 1);
+
+    // 生产者自保：全量解绑所有 binding，不假设下游会用什么
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, 0);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, 0);
+    glBindBufferBase(GL_UNIFORM_BUFFER, 2, 0);
+    glUseProgram(0);
 }
 
 void ChunkManager::syncIndirectBuffer() {

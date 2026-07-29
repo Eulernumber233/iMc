@@ -491,6 +491,7 @@
     <None Include="assert\held_display.json" />
     <None Include="shader\model_depth.vert" />
     <None Include="shader\model_depth.frag" />
+    <None Include="shader\frustum_cull.comp" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="assert\textures\block\birch_log.png">

@@ -1,0 +1,94 @@
+#version 460 core
+
+// section 级 GPU 视锥剔除：测试每条 draw command 对应的 section AABB
+// 不可见 → instanceCount = 0（glMultiDrawElementsIndirect 自动跳过）
+// 可见   → 恢复原始 instanceCount（从 sectionBases[idx].w 读取）
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// 布局与 CPU 端 DrawElementsIndirectCommand 一一对应
+// count:4 | instanceCount:4 | firstIndex:4 | baseVertex:4 | baseInstance:4
+struct DrawCommand {
+    uint count;
+    uint instanceCount;
+    uint firstIndex;
+    int  baseVertex;
+    uint baseInstance;
+};
+
+layout(std430, binding = 1) buffer CommandBuffer {
+    DrawCommand commands[];
+};
+
+// 与顶点着色器 binding=0 共用同一个 SSBO
+// .xyz = section 世界空间原点 (chunkX*16, sectionY*16, chunkZ*16)
+// .w   = 原始 instanceCount（float 表示，compute shader 用 floatBitsToUint 还原）
+layout(std430, binding = 0) readonly buffer SectionBases {
+    vec4 sectionBases[];
+};
+
+// 剔除参数 UBO
+layout(std140, binding = 2) uniform CullParams {
+    vec4  frustumPlanes[6];  // 视锥体 6 平面 (normal.xyz, distance)
+    vec4  cameraPos_dist;    // xyz = 相机位置, w = 最大渲染距离
+    ivec4 params;            // x = maxDownSections, y = cameraSectionY, z = numDrawCommands
+};
+
+// AABB 对视锥测试，与 CPU 端 Chunk::aabbInFrustum 算法完全一致：
+// 对每个平面取 p-vertex（最靠近平面外侧的角），若 dot(n,p)+d < 0 则在平面外。
+bool aabbInFrustum(vec3 aabbMin, vec3 aabbMax) {
+    for (int i = 0; i < 6; ++i) {
+        vec4 plane = frustumPlanes[i];
+        vec3 p = aabbMin;
+        if (plane.x >= 0.0) p.x = aabbMax.x;
+        if (plane.y >= 0.0) p.y = aabbMax.y;
+        if (plane.z >= 0.0) p.z = aabbMax.z;
+        if (dot(plane.xyz, p) + plane.w < 0.0) return false;
+    }
+    return true;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= uint(params.z)) return;
+
+    vec4 base = sectionBases[idx];
+    uint origCount = floatBitsToUint(base.w);
+
+    // 空 section 保持 instanceCount = 0
+    if (origCount == 0u) {
+        commands[idx].instanceCount = 0u;
+        return;
+    }
+
+    vec3 origin = base.xyz;
+
+    // 纵向裁剪
+    // section 的 Y 坐标 = origin.y / 16，太靠下的不画
+    int sectionY = int(origin.y) / 16;
+    if (sectionY < params.y - params.x) {
+        commands[idx].instanceCount = 0u;
+        return;
+    }
+
+    // 距离裁剪
+    // section 中心到相机的欧氏距离，用平方避免 sqrt
+    vec3 center = origin + vec3(8.0);
+    vec3 d = center - cameraPos_dist.xyz;
+    float maxDist = cameraPos_dist.w;
+    if (dot(d, d) > maxDist * maxDist) {
+        commands[idx].instanceCount = 0u;
+        return;
+    }
+
+    // 视锥裁剪
+    vec3 aabbMin = origin;
+    vec3 aabbMax = origin + vec3(16.0);
+    if (!aabbInFrustum(aabbMin, aabbMax)) {
+        commands[idx].instanceCount = 0u;
+        return;
+    }
+
+    // 可见：恢复原始 instanceCount
+    commands[idx].instanceCount = origCount;
+}

@@ -284,6 +284,7 @@
     <None Include="shader\ao_accumulate.frag" />
     <None Include="shader\deferred_lighting.frag" />
     <None Include="shader\deferred_lighting.vert" />
+    <None Include="shader\frustum_cull.comp" />
     <None Include="shader\g_buffer.frag" />
     <None Include="shader\g_buffer.vert" />
     <None Include="shader\mode.frag" />

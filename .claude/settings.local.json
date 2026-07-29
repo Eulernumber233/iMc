@@ -144,7 +144,10 @@
       "PowerShell($f=\"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.cpp\"; $c=[IO.File]::ReadAllText\\($f\\); $u=New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f,$c,$u\\); & \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" iMc.sln /p:Configuration=Debug /p:Platform=x64 /m /v:minimal 2>&1 | Select-Object -Last 5)",
       "PowerShell($files = @\\(\"E:\\\\opengl\\\\iMc\\\\shader\\\\g_buffer.vert\", \"E:\\\\opengl\\\\iMc\\\\shader\\\\g_buffer.frag\"\\); foreach \\($f in $files\\) { $c = [IO.File]::ReadAllText\\($f\\); $u = New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f, $c, $u\\) }; & \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" iMc.sln /p:Configuration=Debug /p:Platform=x64 /m /v:minimal 2>&1 | Select-Object -Last 5)",
       "Bash(git checkout *)",
-      "PowerShell($files = @\\(\"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.h\", \"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.cpp\"\\); foreach \\($f in $files\\) { $c = [IO.File]::ReadAllText\\($f\\); $u = New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f, $c, $u\\) }; & \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" iMc.sln /p:Configuration=Debug /p:Platform=x64 /m /v:minimal 2>&1 | Select-Object -Last 8)"
+      "PowerShell($files = @\\(\"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.h\", \"E:\\\\opengl\\\\iMc\\\\scr\\\\chunk\\\\ChunkManager.cpp\"\\); foreach \\($f in $files\\) { $c = [IO.File]::ReadAllText\\($f\\); $u = New-Object Text.UTF8Encoding\\($true\\); [IO.File]::WriteAllText\\($f, $c, $u\\) }; & \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" iMc.sln /p:Configuration=Debug /p:Platform=x64 /m /v:minimal 2>&1 | Select-Object -Last 8)",
+      "PowerShell(& \"D:\\\\visual studio\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"E:\\\\opengl\\\\iMc\\\\iMc.sln\" /p:Configuration=Debug /p:Platform=x64 /t:Build /m /nologo /v:minimal 2>&1)",
+      "Bash(git --no-pager log --oneline -5)",
+      "Bash(git --no-pager show 9681ace:scr/chunk/ChunkManager.cpp)"
     ],
     "additionalDirectories": [
       "e:\\opengl\\iMc\\scr"

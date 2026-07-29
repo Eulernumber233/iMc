@@ -11,6 +11,7 @@
 #include "ChunkArena.h"
 #include "ChunkWorkerPool.h"
 #include "../Camera.h"
+#include "../Shader.h"
 #include "../light/LightSource.h"
 #include "../light/LightCache.h"
 #include "../light/LightPropagation.h"
@@ -54,6 +55,9 @@ public:
 
     void initialize(int renderRadius, const glm::vec3& cameraPos);
     void update(std::shared_ptr<Camera> camera);
+
+    // GPU 视锥剔除开关：true = compute shader 剔除，false = CPU 剔除（原始路径）
+    static constexpr bool kUseGpuFrustumCulling = true;
 
     const std::vector<DrawElementsIndirectCommand>& getDrawCommands() const {
         return m_drawCommands;
@@ -240,11 +244,22 @@ private:
     GLsizeiptr m_indirectBufferCapacityBytes = 0;
     int m_visibleInstanceCount = 0;
 
-    // draw command 缓存：cull pass 的结果（m_drawCommands / m_sectionBases）仅在
-    // 相机移动（m_visGeneration 变）或可见 section 集合变化（上传/加载/驱逐/卸载）时改变。
-    // 静止帧直接复用上一帧结果，跳过遍历全部 active chunk 的 cull pass + GPU 重传。
-    uint32_t m_lastBuiltVisGeneration = 0;  // 上次重建 cull 时的 visGeneration（0=从未建）
-    bool m_drawListDirty = true;            // 可见 section 集合发生变化，需重建
+    // ── GPU 视锥剔除 ────────────────────────────────────────────────
+    // 全量模板（所有非空 section，不含剔除）仅在 section 集合变动时重建 + 上传；
+    // 每帧由 compute shader 改写 indirect buffer 的 instanceCount 做视锥/距离/纵向剔除。
+    // 相机移动不再触发 CPU 侧 draw command 重建，大幅减轻相机移动时的 CPU 开销。
+    Shader m_frustumCullShader{ { GL_COMPUTE_SHADER, "shader/frustum_cull.comp" } };
+    GLuint m_cullParamsUBO = 0;             // frustum 平面 + 相机参数 UBO
+
+    // GPU 剔除参数布局（std140，与 frustum_cull.comp 的 CullParams 一致）
+    struct GpuCullParams {
+        glm::vec4 frustumPlanes[6];          // offset 0:   6×16 = 96 bytes
+        glm::vec4 cameraPosDist;             // offset 96:  xyz=相机位置, w=最大距离
+        glm::ivec4 cullSettings;             // offset 112: x=maxDownSections, y=camSectionY, z=numCommands
+    };
+
+    uint32_t m_lastBuiltVisGeneration = 0;  // 上次 GPU 剔除时的 visGeneration（0=从未建）
+    bool m_drawListDirty = true;            // section 集合发生变化，需重建全量模板
     // 标记 draw list 需重建（section 上传/chunk 加载/驱逐/卸载时调用）。
     void markDrawListDirty() { m_drawListDirty = true; }
 
@@ -404,6 +419,8 @@ private:
     void loadMeshResult(ChunkBuildResult& result);
 
     void rebuildDrawCommands();
+    void rebuildFullDrawList();     // 重建全量模板（无剔除，所有非空 section）
+    void dispatchGpuCull();         // dispatch compute shader 改写 instanceCount
     void uploadSection(int chunkX, int chunkZ, int sectionY, Section& section, int& uploadBudget);
     void releaseSectionSlot(SectionKey key);
     void syncIndirectBuffer();

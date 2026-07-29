@@ -1323,6 +1323,8 @@ void RenderSystem::geometryPass(const ChunkManager& chunkManager,
 
     const auto& cmds = chunkManager.getDrawCommands();
     if (!cmds.empty()) {
+        if constexpr (ChunkManager::kUseGpuFrustumCulling)
+            glMemoryBarrier(GL_COMMAND_BARRIER_BIT);
         m_blockRenderer.render(chunkManager.getIndirectBuffer(), (int)cmds.size(), view, projection);
         m_drawCalls++;     // 一次 MDI 算一次 draw call
         m_totalInstances += chunkManager.getVisibleInstanceCount();
@@ -1572,6 +1574,11 @@ void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std
     m_blockRenderer.bindArenaVBO(chunkManager.getArenaVBO());
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, chunkManager.getSectionBaseSSBO());
     const auto& cmds = chunkManager.getDrawCommands();
+
+    // 确保 compute shader 对 indirect buffer 的写入对 MDI 可见
+    if constexpr (ChunkManager::kUseGpuFrustumCulling)
+        if (!cmds.empty())
+            glMemoryBarrier(GL_COMMAND_BARRIER_BIT);
 
     glViewport(0, 0, m_csmSize, m_csmSize);
     float prevSplit = nearP;
