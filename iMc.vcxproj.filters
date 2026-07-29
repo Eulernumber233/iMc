@@ -198,7 +198,15 @@
     <ClCompile Include="scr\imgui\imgui_impl_opengl3.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
-
+    <ClCompile Include="scr\jsoncpp\json_reader.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\jsoncpp\json_value.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="scr\jsoncpp\json_writer.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="scr\chunk\BlockType.h">
@@ -435,7 +443,12 @@
     <ClInclude Include="scr\light\LightPropagation.h">
       <Filter>头文件</Filter>
     </ClInclude>
-
+    <ClInclude Include="scr\jsoncpp\json_batchallocator.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\jsoncpp\json_valueiterator.inl">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="shader\deferred_lighting.vert" />
@@ -476,6 +489,8 @@
     <None Include="shader\item.frag" />
     <None Include="shader\item.vert" />
     <None Include="assert\held_display.json" />
+    <None Include="shader\model_depth.vert" />
+    <None Include="shader\model_depth.frag" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="assert\textures\block\birch_log.png">

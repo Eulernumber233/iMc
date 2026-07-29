@@ -140,7 +140,7 @@ float ShadowVisibilityCascade(vec3 worldPos, vec3 normal, vec3 lightDir, vec2 sc
 
     float penumbraUV = (currentDepth - blocker) / max(blocker, 1e-4) * lightSizeUV;
     // 半影上限同样按级联跨度放大：否则固定的 MAX_FILTER_TEXELS 纹素上限会把近级联放大后的
-    // 半影重新夹窄，归一化白做。放大后单帧采样更稀疏，靠蓝噪声 + 时域累积补（与阶段 2 同理）。
+    // 半影重新夹窄，归一化白做。放大后单帧采样更稀疏，靠蓝噪声 + 时域累积补。
     float extentScale = uRefWorldExtent / max(cascadeWorldExtent[cascade], 1e-3);
     float filterRadiusUV = clamp(penumbraUV,
                                  MIN_FILTER_TEXELS * texelUV,

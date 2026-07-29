@@ -414,7 +414,7 @@ int World::run() {
             }
         }
 
-        // 阶段 B：服务端每帧把所有玩家（Host + 远程）的位置作为"数据相关"加载中心，
+        // 服务端每帧把所有玩家（Host + 远程）的位置作为"数据相关"加载中心，
         // 灌给 ChunkManager（决定生成/落盘/卸载/推送；mesh 仍只看本机相机）。
         // 必须在 chunkManager->update() 之前。客户端/单机不灌（内部退化为本机相机）。
         if (m_netManager && m_netMode == NetMode::Host) {

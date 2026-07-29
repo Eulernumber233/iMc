@@ -187,24 +187,36 @@ void ChunkArena::patch(Slot& slot, const InstanceData* data,
     GLintptr off = (GLintptr(slot.offset) + GLintptr(minIdx)) * (GLintptr)sizeof(InstanceData);
     GLsizeiptr len = (GLsizeiptr)(maxIdx - minIdx + 1) * (GLsizeiptr)sizeof(InstanceData);
 
+    // 两种 glMapBufferRange 策略对比（切换此 bool 即可）
+    constexpr bool USE_INVALIDATE_RANGE = true;
+
     glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-    // 不带 INVALIDATE_RANGE：未触及的位置保留旧数据；只写 dirty index 处的 8 字节。
-    // UNSYNCHRONIZED：跳过驱动的隐式同步等待，调用方需保证 GPU 当前不在读这段
-    // （ChunkManager::update 在帧首调用，上一帧已经画完，安全）。
-    void* ptr = glMapBufferRange(GL_ARRAY_BUFFER, off, len,
-        GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT);
+
+    GLbitfield mapFlags = GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT;
+    if (USE_INVALIDATE_RANGE) {
+        mapFlags |= GL_MAP_INVALIDATE_RANGE_BIT;
+    }
+
+    void* ptr = glMapBufferRange(GL_ARRAY_BUFFER, off, len, mapFlags);
     if (!ptr) {
         std::cerr << "ChunkArena::patch glMapBufferRange failed (off=" << off
-                  << " len=" << len << ")\n";
+                  << " len=" << len << " flags=" << mapFlags << ")\n";
         glBindBuffer(GL_ARRAY_BUFFER, 0);
         return;
     }
 
-    InstanceData* dst = reinterpret_cast<InstanceData*>(ptr);
-    for (uint32_t i = 0; i < indexCount; ++i) {
-        uint32_t idx = indices[i];
-        if (idx >= slot.capacity) continue;
-        dst[idx - minIdx] = data[idx];
+    if (USE_INVALIDATE_RANGE) {
+        // 临时内存未初始化 → memcpy 填满整个 [minIdx, maxIdx] 范围
+        uint32_t rangeCount = maxIdx - minIdx + 1;
+        std::memcpy(ptr, data + minIdx, rangeCount * sizeof(InstanceData));
+    } else {
+        // 直接映射 VBO 真实页 → 稀疏写入，只改脏位置
+        InstanceData* dst = reinterpret_cast<InstanceData*>(ptr);
+        for (uint32_t i = 0; i < indexCount; ++i) {
+            uint32_t idx = indices[i];
+            if (idx >= slot.capacity) continue;
+            dst[idx - minIdx] = data[idx];
+        }
     }
 
     glUnmapBuffer(GL_ARRAY_BUFFER);

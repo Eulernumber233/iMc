@@ -147,7 +147,6 @@
     <ClCompile Include="scr\particle\GPUParticleSystem.cpp" />
     <ClCompile Include="scr\particle\ParticleManager.cpp" />
     <ClCompile Include="scr\Player.cpp" />
-
     <ClCompile Include="scr\RuntimeConfig.cpp" />
     <ClCompile Include="scr\Profiler.cpp" />
     <ClCompile Include="scr\render\BlockOutlineRenderer.cpp" />
@@ -210,7 +209,6 @@
     <ClInclude Include="scr\light\LightSource.h" />
     <ClInclude Include="scr\light\LightCache.h" />
     <ClInclude Include="scr\light\LightPropagation.h" />
-
     <ClInclude Include="scr\RuntimeConfig.h" />
     <ClInclude Include="scr\Profiler.h" />
     <ClInclude Include="scr\chunk\BlockType.h" />
@@ -294,6 +292,8 @@
     <None Include="shader\item.vert" />
     <None Include="shader\block_item.frag" />
     <None Include="shader\block_item.vert" />
+    <None Include="shader\model_depth.frag" />
+    <None Include="shader\model_depth.vert" />
     <None Include="shader\outline.frag" />
     <None Include="shader\outline.vert" />
     <None Include="assert\textures\Minecraft砖块贴图 %282%29.7z" />
