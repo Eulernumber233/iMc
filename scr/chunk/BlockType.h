@@ -46,7 +46,8 @@ enum BlockOrient : uint8_t {
 // 方块状态：CPU 端 16 bit 紧凑布局，Section 的 m_blocks 单元格用它。
 //   bits  0..7  type     (BlockType)
 //   bits  8..11 orient   (BlockOrient，4 bit；0xF 表示无轴向)
-//   bits 12..15 reserved (水位/生长阶段/亮度等，后续扩展)
+//   bits 12..15 variant  (per-type 状态位，含义由方块类型自行解释：
+//                          火把暂时不用；楼梯可表示上半/下半；门可表示开关/铰链等)
 //
 // 区块层（Section / Chunk / ChunkManager / Ray::HitResult 等）对外接口
 // 统一传 BlockState；调用方拿到后用 state.type() / state.orient() 自取。
@@ -60,12 +61,16 @@ struct BlockState {
 
     constexpr BlockType type() const noexcept { return BlockType(bits & 0xFFu); }
     constexpr uint8_t   orient() const noexcept { return uint8_t((bits >> 8) & 0xFu); }
+    constexpr uint8_t   variant() const noexcept { return uint8_t((bits >> 12) & 0xFu); }
 
     void setType(BlockType t) noexcept {
         bits = uint16_t((bits & 0xFF00u) | uint16_t(t));
     }
     void setOrient(uint8_t o) noexcept {
         bits = uint16_t((bits & 0xF0FFu) | (uint16_t(o & 0xFu) << 8));
+    }
+    void setVariant(uint8_t v) noexcept {
+        bits = uint16_t((bits & 0x0FFFu) | (uint16_t(v & 0xFu) << 12));
     }
 
     bool operator==(const BlockState& other) const noexcept { return bits == other.bits; }
@@ -170,6 +175,14 @@ struct InstanceData {
     uint16_t blockType;
     uint16_t textureLayer;
 
+    // 模型方块（MODEL_FLAG 置位）时 packed 的另一种解释：
+    //   bits 0–11 : lx/ly/lz
+    //   bits 12–30: 全局 quadId（最多 2^19 条 quad）
+    //   bit  31   : MODEL_FLAG
+    // textureLayer 在模型实例里存 localQuadIndex（给增量 map / compact 用）。
+    static constexpr uint32_t MODEL_FLAG = 0x80000000u;
+    static constexpr uint32_t MODEL_QUAD_ID_MASK = 0x7FFFFu;
+
     InstanceData() = default;
     InstanceData(uint32_t packed_, uint16_t blockType_, uint16_t textureLayer_)
         : packed(packed_), blockType(blockType_), textureLayer(textureLayer_)
@@ -185,6 +198,20 @@ struct InstanceData {
               | (uint32_t(face & 0x7u) << 12)
               | (uint32_t(orient & 0xFu) << 15);
     }
+
+    // 模型 quad 实例：位置 + 全局 quadId + MODEL_FLAG
+    static constexpr uint32_t makeModelPacked(uint8_t lx, uint8_t ly, uint8_t lz,
+                                               uint32_t quadId) noexcept
+    {
+        return  (uint32_t(lx & 0xFu))
+              | (uint32_t(ly & 0xFu) << 4)
+              | (uint32_t(lz & 0xFu) << 8)
+              | ((quadId & MODEL_QUAD_ID_MASK) << 12)
+              | MODEL_FLAG;
+    }
+
+    static constexpr bool      isModel(uint32_t p)     noexcept { return (p & MODEL_FLAG) != 0u; }
+    static constexpr uint32_t  unpackQuadId(uint32_t p) noexcept { return (p >> 12) & MODEL_QUAD_ID_MASK; }
 
     static constexpr uint8_t   unpackX(uint32_t p)     noexcept { return  uint8_t(p        & 0xFu); }
     static constexpr uint8_t   unpackY(uint32_t p)     noexcept { return  uint8_t((p >> 4) & 0xFu); }
@@ -214,6 +241,8 @@ struct BlockProperties {
     bool isTransparent;   // 是否透明
     bool isSolid;         // 是否是固体
     bool hasAxis;         // 是否记录朝向（如原木需要按放置方向旋转纹理；泥土/石头等无轴向）
+    bool isFullCube;      // 是否填满整格（模型方块/楼梯/火把等为 false）
+    bool orientOnPlace;   // 放置时是否用 hitFace 决定 orient（火把等部件型方块）
     glm::vec3 color;      // 基础颜色
     float emissive;       // 自发光强度
 };
@@ -222,26 +251,41 @@ struct BlockProperties {
 inline BlockProperties GetBlockProperties(BlockType type) {
     switch (type) {
     case BLOCK_AIR:
-        return { true,  false, false, glm::vec3(0.0f), 0.0f };
+        return { true,  false, false, false, false, glm::vec3(0.0f), 0.0f };
     case BLOCK_STONE:
-        return { false, true,  false, glm::vec3(0.5f, 0.5f, 0.5f), 0.0f };
+        return { false, true,  false, true,  false, glm::vec3(0.5f, 0.5f, 0.5f), 0.0f };
     case BLOCK_DIRT:
-        return { false, true,  false, glm::vec3(0.4f, 0.3f, 0.2f), 0.0f };
+        return { false, true,  false, true,  false, glm::vec3(0.4f, 0.3f, 0.2f), 0.0f };
     case BLOCK_GRASS:
-        return { false, true,  false, glm::vec3(0.2f, 0.6f, 0.3f), 0.0f };
+        return { false, true,  false, true,  false, glm::vec3(0.2f, 0.6f, 0.3f), 0.0f };
     case BLOCK_WATER:
-        return { true,  false, false, glm::vec3(0.0f, 0.3f, 0.8f), 0.1f };
+        return { true,  false, false, false, false, glm::vec3(0.0f, 0.3f, 0.8f), 0.1f };
     case BLOCK_SAND:
-        return { false, true,  false, glm::vec3(0.9f, 0.8f, 0.6f), 0.0f };
+        return { false, true,  false, true,  false, glm::vec3(0.9f, 0.8f, 0.6f), 0.0f };
     case BLOCK_WOOD:
-        return { false, true,  true,  glm::vec3(0.5f, 0.35f, 0.2f), 0.0f };
+        return { false, true,  true,  true,  false, glm::vec3(0.5f, 0.35f, 0.2f), 0.0f };
     case BLOCK_LEAVES:
-        return { true,  true,  false, glm::vec3(0.2f, 0.5f, 0.2f), 0.0f };
+        return { true,  true,  false, false, false, glm::vec3(0.2f, 0.5f, 0.2f), 0.0f };
     case BLOCK_GLOWSTONE:
-        return { false, true,  false, glm::vec3(1.0f, 0.95f, 0.65f), 1.0f };  // 暖黄色自发光
+        return { false, true,  false, true,  false, glm::vec3(1.0f, 0.95f, 0.65f), 1.0f };  // 暖黄色自发光
     case BLOCK_TORCH:
-        return { true,  false, false, glm::vec3(0.98f, 0.85f, 0.35f), 0.8f }; // 火把：透明不挡光，自发光
+        // 火把：透明不挡光、不自成实体、非满格；放置时按击中面选 orient（地面/挂墙）
+        return { true,  false, false, false, true,  glm::vec3(0.98f, 0.85f, 0.35f), 0.8f };
     default:
-        return { false, true,  false, glm::vec3(1.0f, 0.0f, 1.0f), 0.0f }; // 错误颜色
+        return { false, true,  false, true,  false, glm::vec3(1.0f, 0.0f, 1.0f), 0.0f }; // 错误颜色
     }
+}
+
+// 方块是否阻挡玩家（AABB 碰撞）。非固体方块（火把等部件型方块）可以穿过。
+inline bool BlockHasCollision(BlockType type) {
+    if (type == BLOCK_AIR) return false;
+    return GetBlockProperties(type).isSolid;
+}
+
+// 邻居方块是否会挡住相邻方块的面。
+// 只有「不透明 + 固体 + 填满整格」的方块才遮面：
+// 火把 / 水 / 树叶 / 楼梯等都不会让邻居的面消失。
+inline bool BlockOccludesFace(BlockType type) {
+    BlockProperties p = GetBlockProperties(type);
+    return p.isSolid && !p.isTransparent && p.isFullCube;
 }

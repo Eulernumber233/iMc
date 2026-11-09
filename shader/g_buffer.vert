@@ -3,13 +3,28 @@
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aTexCoord;
-layout(location = 5) in uint aPacked;        // x4|y4|z4|face3|orient4|reserved13
+layout(location = 5) in uint aPacked;        // CUBE: x4|y4|z4|face3|orient4|… / MODEL: x4|y4|z4|quadId19|flag
 layout(location = 7) in uint aBlockType;     // 16-bit
-layout(location = 8) in uint aTextureLayer;  // 16-bit
+layout(location = 8) in uint aTextureLayer;  // CUBE: 纹理层 / MODEL: localQuadIndex（GPU 不用）
 
 // 与 m_drawCommands 同序：第 i 条 indirect 命令对应 sectionBases[i]
 layout(std430, binding = 0) readonly buffer SectionBases {
     vec4 sectionBases[];   // xyz = (chunkX*16, sectionY*16, chunkZ*16); w 保留
+};
+
+// 模型 quad 表（BlockModelRegistry 烘焙）。布局与 C++ GpuQuad 严格一致。
+struct Quad {
+    vec4 p0;      // xyz = corner0
+    vec4 p1;
+    vec4 p2;
+    vec4 p3;
+    vec4 n;       // xyz = normal
+    vec4 uv01;    // (u0, v0, u1, v1)
+    vec4 uv23;    // (u2, v2, u3, v3)
+    uvec4 meta;   // x = textureLayer, y = flags
+};
+layout(std430, binding = 4) readonly buffer QuadTable {
+    Quad quads[];
 };
 
 out vec3 vWorldPos;
@@ -18,6 +33,7 @@ out vec2 vTexCoord;
 flat out int vBlockType;
 flat out int vFaceIndex;
 flat out int vTextureLayer;
+flat out int vFlags;
 
 uniform mat4 uView;
 uniform mat4 uProjection;
@@ -68,16 +84,43 @@ bool shouldRotateUV(int face, int orient) {
 }
 
 void main() {
-    // 解包局部坐标 + 面索引 + 朝向
-    int lx     = int( aPacked        & 0xFu);
-    int ly     = int((aPacked >> 4)  & 0xFu);
-    int lz     = int((aPacked >> 8)  & 0xFu);
+    int lx = int( aPacked        & 0xFu);
+    int ly = int((aPacked >> 4)  & 0xFu);
+    int lz = int((aPacked >> 8)  & 0xFu);
+
+    vec3 sectionBase = sectionBases[gl_DrawID].xyz;
+    vec3 blockOrigin = sectionBase + vec3(float(lx), float(ly), float(lz));
+
+    if ((aPacked & 0x80000000u) != 0u) {
+        // ── 模型 quad 路径（火把等）────────────────────────────────
+        // 几何完全由 quad 表给出：4 个角点按 gl_VertexID 取，法线/UV/纹理层也在表里。
+        uint qid = (aPacked >> 12) & 0x7FFFu;
+        Quad q = quads[qid];
+
+        vec4 corner;
+        vec2 uv;
+        if (gl_VertexID == 0)      { corner = q.p0; uv = q.uv01.xy; }
+        else if (gl_VertexID == 1) { corner = q.p1; uv = q.uv01.zw; }
+        else if (gl_VertexID == 2) { corner = q.p2; uv = q.uv23.xy; }
+        else                       { corner = q.p3; uv = q.uv23.zw; }
+
+        vWorldPos     = blockOrigin + corner.xyz;
+        vNormal       = q.n.xyz;
+        vTexCoord     = uv;
+        vBlockType    = int(aBlockType);
+        vFaceIndex    = -1;
+        vTextureLayer = int(q.meta.x);
+        vFlags        = int(q.meta.y);
+        gl_Position = uProjection * uView * vec4(vWorldPos, 1.0);
+        return;
+    }
+
+    // ── 立方体快速路径（原有逻辑）──────────────────────────────────
     int face   = int((aPacked >> 12) & 0x7u);
     int orient = int((aPacked >> 15) & 0xFu);
 
     // 还原方块中心世界坐标：sectionBase + 局部 + 0.5
-    vec3 sectionBase = sectionBases[gl_DrawID].xyz;
-    vec3 blockPos = sectionBase + vec3(float(lx), float(ly), float(lz)) + vec3(0.5);
+    vec3 blockPos = blockOrigin + vec3(0.5);
 
     mat4 faceMatrix = faceMatrices[face];
     mat4 translation = mat4(1.0);
@@ -105,6 +148,7 @@ void main() {
         if (endLayer >= 0) layer = endLayer;
     }
     vTextureLayer = layer;
+    vFlags = 0;
 
     gl_Position = uProjection * uView * vec4(vWorldPos, 1.0);
 }

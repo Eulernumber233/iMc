@@ -18,6 +18,9 @@
     <ClCompile Include="scr\chunk\BlockType.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="scr\chunk\BlockModel.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="scr\chunk\Chunk.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
@@ -396,6 +399,9 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="scr\chunk\BlockBox.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="scr\chunk\BlockModel.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="scr\item\HeldDisplayRegistry.h">

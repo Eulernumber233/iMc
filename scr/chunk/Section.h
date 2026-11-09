@@ -1,6 +1,7 @@
 ﻿#pragma once
 #include "../core.h"
 #include "BlockType.h"
+#include "BlockModel.h"
 #include "BlockBox.h"
 #include "ChunkArena.h"
 #include "ChunkDimensions.h"
@@ -86,6 +87,50 @@ public:
     // getBlock(x,y,z) 重新读一遍。
     void addFaceLocal(int x, int y, int z, BlockFace face, BlockState state);
     void removeFaceLocal(int x, int y, int z, BlockFace face);
+
+    // ── 模型方块（火把等）─────────────────────────────────────────
+    // 一个模型方块由若干 quad 组成，每个 quad 一条实例，localQuad 是模型内的序号。
+    // gpuQuadId 指向 BlockModelRegistry 的全局 quad 表。
+    void addModelQuadLocal(int x, int y, int z, uint8_t localQuad,
+                           BlockState state, uint32_t gpuQuadId);
+    void removeModelQuadLocal(int x, int y, int z, uint8_t localQuad);
+
+    // 依据方块状态删除该格产生的全部渲染实例（立方体 6 面 / 模型 quad 列表）。
+    void removeBlockInstances(int x, int y, int z, BlockState oldState);
+
+    // 依据方块状态生成该格的全部可见实例。
+    // neighbor(face) 返回该方向邻居的 BlockState；越界/未知请返回 BlockState{}
+    // （透空，面可见）。模型方块的 quad 不依赖邻居，直接全部生成。
+    template <typename NeighborFn>
+    void addBlockInstances(int x, int y, int z, BlockState state, NeighborFn neighbor) {
+        BlockType type = state.type();
+        if (type == BLOCK_AIR) return;
+
+        const BlockModelRegistry& reg = BlockModelRegistry::instance();
+        if (reg.isModelBlock(type)) {
+            const ModelState* ms = reg.getState(type, state.orient(), state.variant());
+            if (!ms) return;
+            for (uint8_t q = 0; q < ms->quadCount; ++q) {
+                addModelQuadLocal(x, y, z, q, state, ms->firstQuad + q);
+            }
+            return;
+        }
+
+        BlockProperties props = GetBlockProperties(type);
+        if (props.isTransparent) {
+            for (int f = 0; f < 6; ++f) addFaceLocal(x, y, z, (BlockFace)f, state);
+            return;
+        }
+        if (!props.isSolid) return;
+
+        // 只有邻居不遮挡时该面才可见
+        for (int f = 0; f < 6; ++f) {
+            BlockFace face = (BlockFace)f;
+            if (!BlockOccludesFace(neighbor(face).type())) {
+                addFaceLocal(x, y, z, face, state);
+            }
+        }
+    }
 
     // 压缩 BLOCK_ERRER 占位面
     void compact();
@@ -183,4 +228,7 @@ private:
 
     // 内部辅助
     static int idx(int x, int y, int z) { return (y * DEPTH + z) * WIDTH + x; }
+    // 实例插入/删除的公共逻辑（free slot 复用、dirty 索引累积）
+    void insertInstance(const BlockFaceLocKey& key, const InstanceData& data);
+    void eraseInstance(const BlockFaceLocKey& key);
 };

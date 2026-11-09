@@ -127,6 +127,7 @@
   <ItemGroup>
     <ClCompile Include="scr\Camera.cpp" />
     <ClCompile Include="scr\chunk\BlockType.cpp" />
+    <ClCompile Include="scr\chunk\BlockModel.cpp" />
     <ClCompile Include="scr\chunk\Chunk.cpp" />
     <ClCompile Include="scr\chunk\ChunkManager.cpp" />
     <ClCompile Include="scr\chunk\ChunkArena.cpp" />
@@ -204,6 +205,7 @@
     <ClInclude Include="scr\imgui\imgui_impl_opengl3.h" />
     <ClInclude Include="scr\imgui\imgui_impl_opengl3_loader.h" />
     <ClInclude Include="scr\chunk\BlockBox.h" />
+    <ClInclude Include="scr\chunk\BlockModel.h" />
     <ClInclude Include="scr\enet\enet.h" />
     <ClInclude Include="scr\item\HeldDisplayRegistry.h" />
     <ClInclude Include="scr\light\LightSource.h" />

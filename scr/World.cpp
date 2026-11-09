@@ -2,6 +2,7 @@
 #include "UI/UIManager.h"
 #include "Data.h"
 #include "chunk/Chunk.h"
+#include "chunk/BlockModel.h"
 #include "chunk/ChunkDimensions.h"
 #include "collision/PhysicsConstants.h"
 #include "mode/SkinManager.h"
@@ -110,6 +111,8 @@ World::~World() {
 int World::run() {
     // 纹理已在持久化 GL 上下文中加载，所有窗口共享，无需重复加载
     BlockFaceType::init_type_map();
+    // 模型方块：把 (type, orient, variant) 的模型烘焙成全局 quad 表（依赖纹理层已就绪）
+    BlockModelRegistry::instance().initialize();
 
     // 初始化渲染系统
     RenderSystem renderSystem(SCR_WIDTH, SCR_HEIGHT);

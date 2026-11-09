@@ -11,6 +11,19 @@ static uint8_t orientFromHitFace(BlockFace face) {
     return static_cast<uint8_t>(face);
 }
 
+// 以方块格为单位的六个方向（+X/-X/+Z/-Z/+Y/-Y）。
+static glm::ivec3 faceDir(BlockFace face) {
+    switch (face) {
+    case RIGHT: return { 1, 0, 0 };
+    case LEFT:  return { -1, 0, 0 };
+    case FRONT: return { 0, 0, 1 };
+    case BACK:  return { 0, 0, -1 };
+    case UP:    return { 0, 1, 0 };
+    case DOWN:  return { 0, -1, 0 };
+    }
+    return { 0, 0, 0 };
+}
+
 bool BlockItem::onRightClick(ItemStack& stack, const PlacementContext& ctx,
                              class ChunkManager* chunkManager) {
     if (!chunkManager || stack.empty() || !stack.def) return false;
@@ -24,7 +37,19 @@ bool BlockItem::onRightClick(ItemStack& stack, const PlacementContext& ctx,
         return false; // 位置非空气，不放置
     }
 
-    uint8_t orient = GetBlockProperties(blockType).hasAxis
+    BlockProperties props = GetBlockProperties(blockType);
+
+    // 部件型方块（火把等）必须依附在一个固体方块上，且不允许挂天花板。
+    // 注意 hitFace 的语义（见 Ray.cpp）：它是【放置格指向支撑方块】的方向，
+    // 即 hitFace == UP 表示支撑在上方（天花板），hitFace == DOWN 表示支撑在下方（地面）。
+    if (props.orientOnPlace) {
+        if (ctx.hitFace == UP) return false;   // 不允许挂天花板
+        glm::ivec3 supportPos = ctx.adjacentPos + faceDir(ctx.hitFace);
+        BlockState support = chunkManager->getBlockAt(supportPos);
+        if (!GetBlockProperties(support.type()).isSolid) return false;
+    }
+
+    uint8_t orient = (props.hasAxis || props.orientOnPlace)
         ? orientFromHitFace(ctx.hitFace)
         : ORIENT_NONE;
     chunkManager->setBlock(ctx.adjacentPos, BlockState(blockType, orient));

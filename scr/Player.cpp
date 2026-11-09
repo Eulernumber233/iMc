@@ -125,7 +125,7 @@ void Player::placeOnGround(ChunkManager& chunkManager) {
         glm::ivec3 blockPos = worldToBlockCoord(glm::vec3(m_position.x, y, m_position.z));
         BlockType blockType = chunkManager.getBlockAt(blockPos).type();
 
-        if (blockType != BLOCK_AIR) {
+        if (BlockHasCollision(blockType)) {
             // 找到地面，将玩家放置在地面上方
             float groundY = blockPos.y + 1.0f; // 方块顶部Y坐标
             // 玩家中心Y坐标 = 地面Y坐标 + 玩家碰撞箱高度的一半
@@ -183,7 +183,7 @@ void Player::getAllCollisions(ChunkManager& chunkManager, std::vector<CollisionR
         for (int y = minBlock.y; y <= maxBlock.y; y++) {
             for (int z = minBlock.z; z <= maxBlock.z; z++) {
                 glm::ivec3 blockPos(x, y, z);
-                if (chunkManager.getBlockAt(blockPos).type() == BLOCK_AIR) continue;
+                if (!BlockHasCollision(chunkManager.getBlockAt(blockPos).type())) continue;
 
                 CollisionResult collision = calculateBlockCollision(playerAABB, blockPos);
                 if (collision.collided) {
@@ -211,7 +211,7 @@ void Player::moveAxis(int axis, float displacement, ChunkManager& chunkManager) 
         for (int by = minBlock.y; by <= maxBlock.y; by++) {
             for (int bz = minBlock.z; bz <= maxBlock.z; bz++) {
                 glm::ivec3 blockPos(bx, by, bz);
-                if (chunkManager.getBlockAt(blockPos).type() == BLOCK_AIR) continue;
+                if (!BlockHasCollision(chunkManager.getBlockAt(blockPos).type())) continue;
 
                 AABB blockAABB = getBlockAABB(blockPos);
                 // 重新获取当前玩家AABB（位置可能已被之前的block修正）
@@ -749,6 +749,7 @@ static const char* dropItemIdForBlock(BlockType t) {
     case BLOCK_GRASS:  return "dirt";     // 草方块破坏掉泥土（原版行为）
     case BLOCK_SAND:   return "sand";
     case BLOCK_WOOD:   return "oak_log";
+    case BLOCK_TORCH:  return "torch";
     case BLOCK_LEAVES: return nullptr;    // 树叶暂不掉落
     default:           return nullptr;
     }

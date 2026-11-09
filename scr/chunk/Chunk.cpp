@@ -131,21 +131,16 @@ BlockState Chunk::setBlockAndUpdate(int x, int y, int z, BlockState newState) {
     int ly = y % Section::HEIGHT;
     Section& s = m_sections[sy];
 
-    // 1. 删除旧方块的所有面（在所属 section）
+    // 1. 删除旧方块产生的所有实例（立方体 6 面 / 模型 quad 列表）
     if (oldType != BLOCK_AIR) {
-        BlockFace allFaces[6] = { RIGHT, LEFT, FRONT, BACK, UP, DOWN };
-        for (int f = 0; f < 6; ++f) s.removeFaceLocal(x, ly, z, allFaces[f]);
+        s.removeBlockInstances(x, ly, z, oldState);
     }
 
-    // 2. 添加新方块的可见面
+    // 2. 添加新方块的可见实例。邻居遮挡规则：只有不透明满方块才挡面，
+    //    所以火把/水/树叶旁边的方块面不会被误删。
     if (newType != BLOCK_AIR) {
-        BlockFace allFaces[6] = { RIGHT, LEFT, FRONT, BACK, UP, DOWN };
-        for (int f = 0; f < 6; ++f) {
-            BlockState nb = neighborBlock(x, y, z, allFaces[f]);
-            if (nb.type() == BLOCK_AIR) {
-                s.addFaceLocal(x, ly, z, allFaces[f], newState);
-            }
-        }
+        auto neighborFn = [&](BlockFace f) { return neighborBlock(x, y, z, f); };
+        s.addBlockInstances(x, ly, z, newState, neighborFn);
     }
 
     // 3. 6 邻居的反向面也要重新算

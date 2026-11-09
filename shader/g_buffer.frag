@@ -23,6 +23,7 @@ in vec2 vTexCoord;
 flat in int vBlockType;
 flat in int vFaceIndex;
 flat in int vTextureLayer;
+flat in int vFlags;          // 模型 quad 标志（bit0 = alpha test）
 
 layout(location = 0) out vec4 gPosition;
 layout(location = 1) out vec4 gNormal;
@@ -45,7 +46,11 @@ void main() {
     gNormal = vec4(normalize(vNormal), 0.0);
 
     // 从纹理数组采样，层索引由 vTextureLayer 指定
-    gAlbedo = texture(uTextureArray, vec3(vTexCoord, vTextureLayer));
+    vec4 albedo = texture(uTextureArray, vec3(vTexCoord, vTextureLayer));
+
+    // 模型方块（火把等）贴图带透明区域：alpha 测试丢弃
+    if ((vFlags & 1) != 0 && albedo.a < 0.5) discard;
+    gAlbedo = albedo;
 
     // 草方块顶面特殊颜色调制
     if (vBlockType == BLOCK_GRASS && vFaceIndex == FACEUP) {

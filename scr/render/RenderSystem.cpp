@@ -16,6 +16,7 @@
 #include "../item/ItemDefinition.h"
 #include "../item/BlockItemModel.h"
 #include "../item/ItemRegistry.h"
+#include "../chunk/BlockModel.h"
 #include "../item/HeldDisplayRegistry.h"
 #include "../entity/DroppedItemManager.h"
 #include <random>
@@ -27,7 +28,10 @@ BlockRenderer::BlockRenderer()
 }
 
 BlockRenderer::~BlockRenderer() {
-
+    if (m_quadTableSSBO) {
+        glDeleteBuffers(1, &m_quadTableSSBO);
+        m_quadTableSSBO = 0;
+    }
 }
 
 bool BlockRenderer::initialize() {
@@ -64,7 +68,27 @@ bool BlockRenderer::initialize() {
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
+    // 模型 quad 表（火把等）：静态数据，上传一次
+    uploadQuadTable();
+
     return true;
+}
+
+void BlockRenderer::uploadQuadTable() {
+    const auto& quads = BlockModelRegistry::instance().gpuQuads();
+    glGenBuffers(1, &m_quadTableSSBO);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_quadTableSSBO);
+    glBufferData(GL_SHADER_STORAGE_BUFFER,
+                 (GLsizeiptr)(quads.size() * sizeof(GpuQuad)),
+                 quads.empty() ? nullptr : quads.data(),
+                 GL_STATIC_DRAW);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+}
+
+void BlockRenderer::bindQuadTable() {
+    if (m_quadTableSSBO) {
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, m_quadTableSSBO);
+    }
 }
 
 void BlockRenderer::uploadEndLayerLookup() {
@@ -123,6 +147,7 @@ void BlockRenderer::render(GLuint indirectBuffer, int cmdCount,
     m_shader.setInt("uTextureArray", 0);
 
     glBindVertexArray(VAO);
+    bindQuadTable();
     glBindBuffer(GL_DRAW_INDIRECT_BUFFER, indirectBuffer);
     glMultiDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_INT,
         (const void*)0, cmdCount, 0);
@@ -141,6 +166,7 @@ void BlockRenderer::renderDepth(GLuint indirectBuffer, int cmdCount,
     m_depthShader.setFloat("dir_far", farPlane);
 
     glBindVertexArray(VAO);
+    bindQuadTable();
     glBindBuffer(GL_DRAW_INDIRECT_BUFFER, indirectBuffer);
     glMultiDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_INT,
         (const void*)0, cmdCount, 0);

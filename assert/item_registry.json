@@ -9083,8 +9083,8 @@
     "max_durability": 0,
     "model_type": "custom_model",
     "model_path": "assert/mode/template_torch/template_torch.obj",
-    "block_type": "air",
-    "behavior": "generic",
+    "block_type": "torch",
+    "behavior": "block",
     "load_in_debug": true
   },
   {

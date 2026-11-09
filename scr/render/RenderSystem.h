@@ -45,10 +45,14 @@ public:
 private:
     void createFaceVertices();
     void bindInstanceAttribs();
+    // 模型 quad 表（binding=4）：静态只读，启动时上传一次
+    void uploadQuadTable();
+    void bindQuadTable();
 
     GLuint VAO;
     GLuint VBO;
     GLuint EBO;
+    GLuint m_quadTableSSBO = 0;
     GLuint m_currentArenaVBO = 0;
     GLuint m_textureArray = 0;
     std::vector<unsigned int> m_indices;

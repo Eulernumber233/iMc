@@ -23,6 +23,17 @@
             "mag_filter": "nearest"
         },
         {
+            "name": "torch",
+            "path": "../minecraft/textures/block/torch.png",
+            "category": "block",
+            "is_srgb": false,
+            "index": 1,
+            "wrap_s": "clamp_to_edge",
+            "wrap_t": "clamp_to_edge",
+            "min_filter": "nearest_mipmap_nearest",
+            "mag_filter": "nearest"
+        },
+        {
             "name": "crosshair_1",
             "path": "UI/crosshair_1.png",
             "category": "ui",
