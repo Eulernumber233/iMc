@@ -306,6 +306,7 @@ void ChunkWorkerPool::netImportOne(const glm::ivec2& pos,
 // Task 2：完整可见面生成（内部 + 全部边界，纯几何，不涉及光照）
 // ============================================================================
 
+#ifndef IMC_BAKED_SECTION_MESH
 namespace {
     // 从邻居 section 的 BlockBox 持读锁拷出一个横向边界面（一层）。
     void copyBoundaryLayerFromBox(const std::shared_ptr<BlockBox>& box,
@@ -338,6 +339,7 @@ namespace {
         }
     }
 } // namespace
+#endif // !IMC_BAKED_SECTION_MESH
 
 void ChunkWorkerPool::meshBuildOne(const MeshBuildInput& in, ChunkBuildResult& out) const {
     constexpr int W = ChunkConstants::CHUNK_WIDTH;
@@ -350,6 +352,21 @@ void ChunkWorkerPool::meshBuildOne(const MeshBuildInput& in, ChunkBuildResult& o
         out.sections[sy].setBox(in.self[sy]);
     }
 
+#ifdef IMC_BAKED_SECTION_MESH
+    // ── 烘焙路径：直接从方块数据展开顶点流（不经过实例列表）──
+    (void)W; (void)D; (void)SEC_H;
+    for (int sy = 0; sy < ChunkBuildResult::SECTION_COUNT; ++sy) {
+        // 上下 section 在同一 chunk 的 self 数组里；横向 4 个来自邻居 chunk。
+        const BlockBox* aboveBox = (sy + 1 < ChunkBuildResult::SECTION_COUNT)
+            ? in.self[sy + 1].get() : nullptr;
+        const BlockBox* belowBox = (sy > 0) ? in.self[sy - 1].get() : nullptr;
+        const BlockBox* nb[4] = {
+            in.neighbors[0][sy].get(), in.neighbors[1][sy].get(),
+            in.neighbors[2][sy].get(), in.neighbors[3][sy].get()
+        };
+        out.sections[sy].rebuildBakedMeshFromBlocks(aboveBox, belowBox, nb);
+    }
+#else
     // 邻居边界层临时缓冲
     BlockState layer[SEC_H * (W > D ? W : D)];
 
@@ -393,6 +410,7 @@ void ChunkWorkerPool::meshBuildOne(const MeshBuildInput& in, ChunkBuildResult& o
                     sec.updateFaceWithNeighbor(x, y, 0, BACK, layer[y * W + x]);
         }
     }
+#endif
 }
 
 // ============================================================================

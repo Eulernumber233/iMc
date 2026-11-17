@@ -67,6 +67,12 @@ ChunkManager::~ChunkManager() {
         glDeleteBuffers(1, &m_cullParamsUBO);
         m_cullParamsUBO = 0;
     }
+#ifdef IMC_BAKED_SECTION_MESH
+    if (m_bakedUploadVAO) {
+        glDeleteVertexArrays(1, &m_bakedUploadVAO);
+        m_bakedUploadVAO = 0;
+    }
+#endif
     m_lightCaches.clear();
     m_lightSlotMap.clear();
     m_lightFreeSlots.clear();
@@ -96,9 +102,12 @@ void ChunkManager::initialize(int renderRadius, const glm::vec3& cameraPos) {
         (int)std::floor(cameraPos.z / Chunk::DEPTH)
     );
 
+#ifndef IMC_BAKED_SECTION_MESH
+    // 烘焙路径不经过 arena（每 section 自有 VBO/EBO），不预分配这块显存。
     const uint32_t initialInstances = std::max<uint32_t>(1u << 16,
         (uint32_t)((2 * renderRadius + 1) * (2 * renderRadius + 1) * 1024));
     m_arena.initialize(initialInstances);
+#endif
 
     // 预分配 hash map 容量，防止 rehash 导致 BlockReadyEntry 地址变化
     // （MeshBuildInput 持有指向 BlockReadyEntry::blocks 的原始指针）
@@ -121,6 +130,11 @@ void ChunkManager::initialize(int renderRadius, const glm::vec3& cameraPos) {
     m_sectionBaseCapacityBytes = sizeof(glm::vec4) * 256;
     glBufferData(GL_SHADER_STORAGE_BUFFER, m_sectionBaseCapacityBytes, nullptr, GL_DYNAMIC_DRAW);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+
+#ifdef IMC_BAKED_SECTION_MESH
+    // 烘焙路径：上传 EBO 时需要一个 VAO（core profile 下 VAO 0 不能绑定 EBO）。
+    glGenVertexArrays(1, &m_bakedUploadVAO);
+#endif
 
     // 初始化光照缓存 GPU 资源
     // 光照 SSBO 延迟初始化（首次 upload 时创建）
@@ -388,6 +402,18 @@ void ChunkManager::evictFarChunkSlots() {
         glm::ivec2 cp = chunk->getPosition();
         if (isWithinEvictRadius(cp, m_currentCenterChunk)) continue;
 
+#ifdef IMC_BAKED_SECTION_MESH
+        // 烘焙模式没有 arena slot，驱逐对象是 section 自己的 VBO/EBO。
+        // CPU 顶点流保留，重入渲染半径时由 uploadPass 重新上传。
+        for (int sy = 0; sy < Chunk::SECTION_COUNT; ++sy) {
+            Section& sec = chunk->getSection(sy);
+            if (!sec.bakedGpu().valid()) continue;
+            sec.releaseBakedGpu();
+            sec.notifyGpuSlotReleased();  // 内部置 m_dirty，重入界时重新上传
+            chunk->markSectionDirty(sy);
+            m_drawListDirty = true;
+        }
+#else
         for (int sy = 0; sy < Chunk::SECTION_COUNT; ++sy) {
             Section& sec = chunk->getSection(sy);
             ChunkArena::Slot slot = sec.getGpuSlot();
@@ -399,6 +425,7 @@ void ChunkManager::evictFarChunkSlots() {
             chunk->markSectionDirty(sy);  // 同步脏掩码，重入 active 时 uploadPass 才会重传
             m_drawListDirty = true;  // 该 section 不再有 GPU slot → draw list 需重建
         }
+#endif
     }
 }
 
@@ -837,6 +864,19 @@ void ChunkManager::uploadSection(int chunkX, int chunkZ, int sectionY,
     Section& section, int& uploadBudget) {
     if (uploadBudget <= 0) return;
 
+#ifdef IMC_BAKED_SECTION_MESH
+    // ── 烘焙路径 ──────────────────────────────────────────────────────
+    // 与 GPU arena / 实例数据完全无关：
+    //   1) CPU 顶点流过期的（玩家改过方块）先用当前方块数据整 section 重建；
+    //   2) 把整条顶点/索引流上传到该 section 自己的 VBO/EBO。
+    if (section.isBakedDirty()) {
+        rebuildBakedForSection(chunkX, chunkZ, sectionY, section);
+    }
+    uploadBakedMesh(section);
+    section.clearDirty();
+    --uploadBudget;
+    return;
+#else
     SectionKey key = makeSectionKey(chunkX, chunkZ, sectionY);
     const auto& data = section.getInstanceData();
     const auto& dirtyIdx = section.getDirtyIndices();
@@ -874,7 +914,71 @@ void ChunkManager::uploadSection(int chunkX, int chunkZ, int sectionY,
 
     section.clearDirty();
     --uploadBudget;
+#endif
 }
+
+#ifdef IMC_BAKED_SECTION_MESH
+void ChunkManager::rebuildBakedForSection(int chunkX, int chunkZ, int sectionY,
+                                          Section& section) {
+    // 上下 section：同一 chunk 内的相邻 section（可空 → 世界边界）。
+    const BlockBox* above = nullptr;
+    const BlockBox* below = nullptr;
+    if (Chunk* chunk = getChunk(chunkX, chunkZ)) {
+        if (sectionY + 1 < Chunk::SECTION_COUNT) above = chunk->getSectionBox(sectionY + 1).get();
+        if (sectionY > 0)                         below = chunk->getSectionBox(sectionY - 1).get();
+    }
+
+    // 4 个横向邻居：优先 loaded，其次 block-ready（渲染半径外的预载数据），
+    // 都没有就按世界边界（空气）处理。ChunkBoxes 持有 shared_ptr，保证重建期间
+    // 邻居 box 不被释放。
+    ChunkBoxes bxPosX, bxNegX, bxPosZ, bxNegZ;
+    const bool okPosX = getChunkBoxes({ chunkX + 1, chunkZ }, bxPosX);
+    const bool okNegX = getChunkBoxes({ chunkX - 1, chunkZ }, bxNegX);
+    const bool okPosZ = getChunkBoxes({ chunkX, chunkZ + 1 }, bxPosZ);
+    const bool okNegZ = getChunkBoxes({ chunkX, chunkZ - 1 }, bxNegZ);
+
+    const BlockBox* nb[4] = {
+        okPosX ? bxPosX[sectionY].get() : nullptr,
+        okNegX ? bxNegX[sectionY].get() : nullptr,
+        okPosZ ? bxPosZ[sectionY].get() : nullptr,
+        okNegZ ? bxNegZ[sectionY].get() : nullptr,
+    };
+
+    section.rebuildBakedMeshFromBlocks(above, below, nb);
+}
+
+void ChunkManager::uploadBakedMesh(Section& section) {
+    const auto& verts = section.getBakedVertices();
+    const auto& indices = section.getBakedIndices();
+    BakedGpuMesh& gpu = section.bakedGpu();
+
+    if (verts.empty() || indices.empty()) {
+        gpu.release();
+        return;
+    }
+
+    // EBO 绑定属于 VAO 状态，core profile 下必须先绑一个 VAO。
+    glBindVertexArray(m_bakedUploadVAO);
+
+    if (gpu.vbo == 0) glGenBuffers(1, &gpu.vbo);
+    if (gpu.ebo == 0) glGenBuffers(1, &gpu.ebo);
+
+    glBindBuffer(GL_ARRAY_BUFFER, gpu.vbo);
+    glBufferData(GL_ARRAY_BUFFER,
+                 (GLsizeiptr)(verts.size() * sizeof(BakedVertex)),
+                 verts.data(), GL_DYNAMIC_DRAW);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpu.ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                 (GLsizeiptr)(indices.size() * sizeof(uint32_t)),
+                 indices.data(), GL_DYNAMIC_DRAW);
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+
+    gpu.indexCount = (uint32_t)indices.size();
+}
+#endif // IMC_BAKED_SECTION_MESH
 
 void ChunkManager::rebuildDrawCommands() {
     PROFILE_SCOPE("rebuildDrawCommands");
@@ -893,6 +997,9 @@ void ChunkManager::rebuildDrawCommands() {
             if (dirtyMask == 0) continue;          // 整块干净 → 一次位运算跳过
             if (!chunk->isMeshReady()) continue;
             glm::ivec2 cp = chunk->getPosition();
+#ifdef IMC_BAKED_SECTION_MESH
+            bool nonEmptyMaskStale = false;
+#endif
             while (dirtyMask) {
                 int sy = lowestBitIndex(dirtyMask);
                 dirtyMask &= dirtyMask - 1u;
@@ -906,9 +1013,16 @@ void ChunkManager::rebuildDrawCommands() {
                 if (before != uploadBudget) {
                     ++uploadedCount;
                     chunk->clearSectionDirtyBit(sy);  // 上传成功 → 清掩码位
+#ifdef IMC_BAKED_SECTION_MESH
+                    // 烘焙模式 isEmpty() 看的是重建后的顶点流，掩码要在这之后刷新
+                    nonEmptyMaskStale = true;
+#endif
                 }
                 if (uploadBudget <= 0) break;
             }
+#ifdef IMC_BAKED_SECTION_MESH
+            if (nonEmptyMaskStale) chunk->refreshNonEmptyMask();
+#endif
             if (uploadBudget <= 0) break;
         }
     }
@@ -919,7 +1033,13 @@ void ChunkManager::rebuildDrawCommands() {
 
     //
     // CPU 剔除路径（原始实现）
-    if constexpr (!kUseGpuFrustumCulling) {
+    // 烘焙路径也走这里：GPU 剔除只改写 indirect 命令的 instanceCount，
+    // 而烘焙绘制需要 CPU 端可遍历的 section 列表。
+#ifdef IMC_BAKED_SECTION_MESH
+    if (true) {
+#else
+    if (!kUseGpuFrustumCulling) {
+#endif
         // draw command 缓存：相机未移动（visGeneration 不变）且可见集合未变（!dirty）时，
         // m_drawCommands / m_sectionBases / GPU buffer 与上一帧完全相同，直接复用。
         if (!m_drawListDirty && m_visGeneration == m_lastBuiltVisGeneration) {
@@ -932,6 +1052,9 @@ void ChunkManager::rebuildDrawCommands() {
 
         m_drawCommands.clear();
         m_sectionBases.clear();
+#ifdef IMC_BAKED_SECTION_MESH
+        m_visibleSections.clear();
+#endif
         m_visibleInstanceCount = 0;
 
         {
@@ -978,7 +1101,15 @@ void ChunkManager::rebuildDrawCommands() {
                     int sy = lowestBitIndex(mask);
                     mask &= mask - 1u;
 
-                    const ChunkArena::Slot& slot = chunk->getSection(sy).getGpuSlot();
+                    Section& section = chunk->getSection(sy);
+#ifdef IMC_BAKED_SECTION_MESH
+                    // 烘焙路径的绘制单位：一个可见 section 一条 glDrawElements。
+                    // 不看 arena slot —— 烘焙模式根本不做 arena 分配。
+                    if (!section.bakedGpu().valid()) continue;
+                    m_visibleSections.push_back(&section);
+                    m_visibleInstanceCount += (int)section.bakedGpu().indexCount;
+#else
+                    const ChunkArena::Slot& slot = section.getGpuSlot();
                     if (!slot.valid() || slot.count == 0) continue;
 
                     DrawElementsIndirectCommand cmd{};
@@ -997,6 +1128,7 @@ void ChunkManager::rebuildDrawCommands() {
                         0.0f);
 
                     m_visibleInstanceCount += slot.count;
+#endif
                 }
                 if (detailed) {
                     t3 = std::chrono::steady_clock::now();

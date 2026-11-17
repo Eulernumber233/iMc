@@ -102,7 +102,7 @@
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;_CONSOLE;IMC_BAKED_SECTION_MESH;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
     </ClCompile>
     <Link>
@@ -289,6 +289,7 @@
     <None Include="shader\frustum_cull.comp" />
     <None Include="shader\g_buffer.frag" />
     <None Include="shader\g_buffer.vert" />
+    <None Include="shader\g_buffer_baked.vert" />
     <None Include="shader\mode.frag" />
     <None Include="shader\mode.vert" />
     <None Include="shader\item.frag" />
@@ -307,6 +308,8 @@
     <None Include="shader\shadow_accumulate.frag" />
     <None Include="shader\shadow_mapping_depth.frag" />
     <None Include="shader\shadow_mapping_depth.vert" />
+    <None Include="shader\shadow_mapping_depth_baked.frag" />
+    <None Include="shader\shadow_mapping_depth_baked.vert" />
     <None Include="shader\shadow_visibility.frag" />
     <None Include="shader\hbao.frag" />
     <None Include="shader\hbao.vert" />

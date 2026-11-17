@@ -17,6 +17,7 @@
 #include "../item/BlockItemModel.h"
 #include "../item/ItemRegistry.h"
 #include "../chunk/BlockModel.h"
+#include "../chunk/Section.h"
 #include "../item/HeldDisplayRegistry.h"
 #include "../entity/DroppedItemManager.h"
 #include <random>
@@ -32,6 +33,12 @@ BlockRenderer::~BlockRenderer() {
         glDeleteBuffers(1, &m_quadTableSSBO);
         m_quadTableSSBO = 0;
     }
+#ifdef IMC_BAKED_SECTION_MESH
+    if (m_bakedVAO) {
+        glDeleteVertexArrays(1, &m_bakedVAO);
+        m_bakedVAO = 0;
+    }
+#endif
 }
 
 bool BlockRenderer::initialize() {
@@ -71,8 +78,42 @@ bool BlockRenderer::initialize() {
     // 模型 quad 表（火把等）：静态数据，上传一次
     uploadQuadTable();
 
+#ifdef IMC_BAKED_SECTION_MESH
+    // 烘焙路径的顶点格式（属性布局只建一次，顶点缓冲逐 section 换）
+    createBakedVAO();
+#endif
+
     return true;
 }
+
+#ifdef IMC_BAKED_SECTION_MESH
+void BlockRenderer::createBakedVAO() {
+    glGenVertexArrays(1, &m_bakedVAO);
+    glBindVertexArray(m_bakedVAO);
+
+    // 与 BakedVertex 的内存布局一一对应。
+    // 注意用 glVertexAttribFormat + glVertexAttribBinding（可分离格式），
+    // 这样绘制时只需 glBindVertexBuffer(0, section->vbo, 0, stride) 换源，
+    // 不必为每个 section 重建 VAO / 重设顶点属性指针。
+    glVertexAttribFormat(0, 3, GL_FLOAT, GL_FALSE, offsetof(BakedVertex, position));
+    glVertexAttribBinding(0, 0);
+    glEnableVertexAttribArray(0);
+
+    glVertexAttribFormat(1, 3, GL_FLOAT, GL_FALSE, offsetof(BakedVertex, normal));
+    glVertexAttribBinding(1, 0);
+    glEnableVertexAttribArray(1);
+
+    glVertexAttribFormat(2, 2, GL_FLOAT, GL_FALSE, offsetof(BakedVertex, uv));
+    glVertexAttribBinding(2, 0);
+    glEnableVertexAttribArray(2);
+
+    glVertexAttribIFormat(3, 1, GL_UNSIGNED_INT, offsetof(BakedVertex, meta));
+    glVertexAttribBinding(3, 0);
+    glEnableVertexAttribArray(3);
+
+    glBindVertexArray(0);
+}
+#endif // IMC_BAKED_SECTION_MESH
 
 void BlockRenderer::uploadQuadTable() {
     const auto& quads = BlockModelRegistry::instance().gpuQuads();
@@ -173,6 +214,86 @@ void BlockRenderer::renderDepth(GLuint indirectBuffer, int cmdCount,
     glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
     glBindVertexArray(0);
 }
+
+#ifdef IMC_BAKED_SECTION_MESH
+// 烘焙路径：每个可见 section 一条 glDrawElements。
+// 顶点流在 CPU 侧已经展开好（BakedVertex），shader 只做「section 原点 + 局部坐标」。
+int BlockRenderer::renderBakedSections(const std::vector<Section*>& sections,
+    const glm::mat4& view, const glm::mat4& projection)
+{
+    if (sections.empty()) return 0;
+
+    m_bakedShader.use();
+    m_bakedShader.setMat4("uView", view);
+    m_bakedShader.setMat4("uProjection", projection);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, m_textureArray);
+    m_bakedShader.setInt("uTextureArray", 0);
+
+    glBindVertexArray(m_bakedVAO);
+
+    // 逐 section 改的 uniform 位置只查一次（Shader::setVec3 每次都会 glGetUniformLocation）
+    const GLint baseLoc = glGetUniformLocation(m_bakedShader.programID, "uSectionBase");
+
+    int drawCalls = 0;
+    for (Section* sec : sections) {
+        if (!sec) continue;
+        const BakedGpuMesh& gpu = sec->bakedGpu();
+        if (!gpu.valid()) continue;
+
+        // 换顶点/索引缓冲源（VAO 的顶点格式保持不变）
+        glBindVertexBuffer(0, gpu.vbo, 0, (GLsizei)sizeof(BakedVertex));
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpu.ebo);
+
+        // 整个 section 共用一个原点 uniform，而不是把世界坐标写进每个顶点。
+        glUniform3f(baseLoc,
+            float(sec->getChunkX() * Section::WIDTH),
+            float(sec->getSectionY() * Section::HEIGHT),
+            float(sec->getChunkZ() * Section::DEPTH));
+
+        glDrawElements(GL_TRIANGLES, (GLsizei)gpu.indexCount, GL_UNSIGNED_INT, nullptr);
+        ++drawCalls;
+    }
+
+    glBindVertexArray(0);
+    return drawCalls;
+}
+
+int BlockRenderer::renderBakedDepth(const std::vector<Section*>& sections,
+    const glm::mat4& lightSpaceMatrix)
+{
+    if (sections.empty()) return 0;
+
+    m_bakedDepthShader.use();
+    m_bakedDepthShader.setMat4("lightSpaceMatrix", lightSpaceMatrix);
+
+    glBindVertexArray(m_bakedVAO);
+
+    // 逐 section 改的 uniform 位置只查一次（Shader::setVec3 每次都会 glGetUniformLocation）
+    const GLint baseLoc = glGetUniformLocation(m_bakedDepthShader.programID, "uSectionBase");
+
+    int drawCalls = 0;
+    for (Section* sec : sections) {
+        if (!sec) continue;
+        const BakedGpuMesh& gpu = sec->bakedGpu();
+        if (!gpu.valid()) continue;
+
+        glBindVertexBuffer(0, gpu.vbo, 0, (GLsizei)sizeof(BakedVertex));
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpu.ebo);
+        glUniform3f(baseLoc,
+            float(sec->getChunkX() * Section::WIDTH),
+            float(sec->getSectionY() * Section::HEIGHT),
+            float(sec->getChunkZ() * Section::DEPTH));
+
+        glDrawElements(GL_TRIANGLES, (GLsizei)gpu.indexCount, GL_UNSIGNED_INT, nullptr);
+        ++drawCalls;
+    }
+
+    glBindVertexArray(0);
+    return drawCalls;
+}
+#endif // IMC_BAKED_SECTION_MESH
 
 void BlockRenderer::createFaceVertices() {
     // 创建一个单位正方形的面（+Z方向，即正面）
@@ -1341,20 +1462,33 @@ void RenderSystem::geometryPass(const ChunkManager& chunkManager,
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
 
-    // 绑定 VBO
-    m_blockRenderer.bindArenaVBO(chunkManager.getArenaVBO());
-
-    // section base SSBO 绑到 binding=0，shader 用 gl_DrawID 索引还原方块世界坐标
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, chunkManager.getSectionBaseSSBO());
-
-    const auto& cmds = chunkManager.getDrawCommands();
-    if (!cmds.empty()) {
-        if constexpr (ChunkManager::kUseGpuFrustumCulling)
-            glMemoryBarrier(GL_COMMAND_BARRIER_BIT);
-        m_blockRenderer.render(chunkManager.getIndirectBuffer(), (int)cmds.size(), view, projection);
-        m_drawCalls++;     // 一次 MDI 算一次 draw call
-        m_totalInstances += chunkManager.getVisibleInstanceCount();
+    // ── 两条几何路径二选一（开关：VS 项目属性 → C/C++ → 预处理器定义 IMC_BAKED_SECTION_MESH）──
+    //   实例化：MDI + 每面一条 InstanceData + gl_DrawID 还原 section 原点
+    //   烘焙：  每 section 一条 glDrawElements，draw call 数 = 可见 section 数
+#ifdef IMC_BAKED_SECTION_MESH
+    {
+        m_drawCalls += m_blockRenderer.renderBakedSections(
+            chunkManager.getVisibleSections(), view, projection);
+        m_totalInstances += (int)chunkManager.getVisibleSections().size();
     }
+#else
+    {
+        // 绑定 VBO
+        m_blockRenderer.bindArenaVBO(chunkManager.getArenaVBO());
+
+        // section base SSBO 绑到 binding=0，shader 用 gl_DrawID 索引还原方块世界坐标
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, chunkManager.getSectionBaseSSBO());
+
+        const auto& cmds = chunkManager.getDrawCommands();
+        if (!cmds.empty()) {
+            if constexpr (ChunkManager::kUseGpuFrustumCulling)
+                glMemoryBarrier(GL_COMMAND_BARRIER_BIT);
+            m_blockRenderer.render(chunkManager.getIndirectBuffer(), (int)cmds.size(), view, projection);
+            m_drawCalls++;     // 一次 MDI 算一次 draw call
+            m_totalInstances += chunkManager.getVisibleInstanceCount();
+        }
+    }
+#endif
     // 解绑FBO
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
@@ -1597,14 +1731,16 @@ void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std
     glEnable(GL_DEPTH_TEST);
     glDepthMask(GL_TRUE);
     glCullFace(GL_BACK);
+#ifndef IMC_BAKED_SECTION_MESH
     m_blockRenderer.bindArenaVBO(chunkManager.getArenaVBO());
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, chunkManager.getSectionBaseSSBO());
     const auto& cmds = chunkManager.getDrawCommands();
 
     // 确保 compute shader 对 indirect buffer 的写入对 MDI 可见
-    if constexpr (ChunkManager::kUseGpuFrustumCulling)
+    if (ChunkManager::kUseGpuFrustumCulling)
         if (!cmds.empty())
             glMemoryBarrier(GL_COMMAND_BARRIER_BIT);
+#endif
 
     glViewport(0, 0, m_csmSize, m_csmSize);
     float prevSplit = nearP;
@@ -1617,12 +1753,18 @@ void RenderSystem::sunShineShadowMap(const ChunkManager& chunkManager, const std
         // 把 FBO 的深度附件指向本级联 layer，清深度，渲染
         glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, m_csmDepth, 0, i);
         glClear(GL_DEPTH_BUFFER_BIT);
+#ifdef IMC_BAKED_SECTION_MESH
+        // 烘焙路径：每级联也是逐 section 一条 glDrawElements
+        m_drawCalls += m_blockRenderer.renderBakedDepth(
+            chunkManager.getVisibleSections(), m_cascadeLightMatrix[i]);
+#else
         if (!cmds.empty()) {
             // renderDepth 的 near/far 参数 PCSS 不使用（projCoords.z 已是 [0,1] 线性），传 0/1 占位
             m_blockRenderer.renderDepth(chunkManager.getIndirectBuffer(), (int)cmds.size(),
                 m_cascadeLightMatrix[i], 0.0f, 1.0f);
             m_drawCalls++;
         }
+#endif
 
         // ── 渲染人物模型到本级联阴影贴图 ────────────────────────────────
         // drawPosed 内部有纹理绑定

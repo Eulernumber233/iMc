@@ -109,6 +109,13 @@ World::~World() {
 }
 
 int World::run() {
+
+#ifdef IMC_BAKED_SECTION_MESH
+    std::cout << "[RenderPath] baked\n";
+#else
+    std::cout << "[RenderPath] instanced\n";
+#endif
+
     // 纹理已在持久化 GL 上下文中加载，所有窗口共享，无需重复加载
     BlockFaceType::init_type_map();
     // 模型方块：把 (type, orient, variant) 的模型烘焙成全局 quad 表（依赖纹理层已就绪）

@@ -11,6 +11,68 @@
 #include <vector>
 #include <unordered_map>
 #include <shared_mutex>
+#include <utility>
+
+// ── 烘焙网格（baked section mesh）──────────────────────────────────────
+//
+// 由编译期宏 IMC_BAKED_SECTION_MESH 选择的第二条渲染路径
+// （宏在 VS 项目属性 → C/C++ → 预处理器定义 里配置）。
+// 与实例化路径完全独立的数据链路：
+//   实例化：每个可见面 = 一条 8 字节 InstanceData，几何全在 GPU 端由
+//           gl_DrawID / 顶点着色器展开；改一个方块只 patch 几条实例。
+//   烘焙：  直接从 BlockBox 的方块数据把整个 section 展开成顶点流 + 索引流，
+//           不进实例列表、不建哈希表；绘制时一条 glDrawElements 画完整个
+//           section，改一个方块整 section 重建。
+//
+// 这就是原版 MC 的静态批处理思路：绘制单位是 section，不是面。
+#ifdef IMC_BAKED_SECTION_MESH
+struct BakedVertex {
+    glm::vec3 position;   // section 局部坐标（0..16）
+    glm::vec3 normal;
+    glm::vec2 uv;
+    // 元数据打包：
+    //   bits  0..7   BlockType
+    //   bits  8..15  纹理层（sampler2DArray 的层索引）
+    //   bits 16..19  面索引（0..5；模型 quad = 15）
+    //   bits 20..23  标志位（bit0 = alpha test）
+    uint32_t  meta;
+};
+static_assert(sizeof(BakedVertex) == 36, "BakedVertex 布局需与 shader 属性 stride 一致");
+
+// section 烘焙网格的 GPU 句柄。move-only + RAII：
+//  - worker 线程构造的临时 Section 句柄恒为 0，析构时不会调 GL；
+//  - move 后源句柄清零，避免两个 Section 删同一个 buffer。
+struct BakedGpuMesh {
+    GLuint   vbo = 0;
+    GLuint   ebo = 0;
+    uint32_t indexCount = 0;
+
+    BakedGpuMesh() = default;
+    BakedGpuMesh(const BakedGpuMesh&) = delete;
+    BakedGpuMesh& operator=(const BakedGpuMesh&) = delete;
+    BakedGpuMesh(BakedGpuMesh&& o) noexcept { swapWith(o); }
+    BakedGpuMesh& operator=(BakedGpuMesh&& o) noexcept {
+        if (this != &o) { release(); swapWith(o); }
+        return *this;
+    }
+    ~BakedGpuMesh() { release(); }
+
+    bool valid() const { return vbo != 0 && ebo != 0 && indexCount > 0; }
+
+    void release() {
+        if (vbo) { glDeleteBuffers(1, &vbo); vbo = 0; }
+        if (ebo) { glDeleteBuffers(1, &ebo); ebo = 0; }
+        indexCount = 0;
+    }
+
+private:
+    void swapWith(BakedGpuMesh& o) noexcept {
+        std::swap(vbo, o.vbo);
+        std::swap(ebo, o.ebo);
+        std::swap(indexCount, o.indexCount);
+    }
+};
+#endif // IMC_BAKED_SECTION_MESH
 
 // Section：16x16x16 的子区块。Chunk 持有 4 个 Section 沿 Y 方向堆叠。
 // 它是 GPU arena slot 的真正所有者粒度。
@@ -64,7 +126,14 @@ public:
     size_t getInstanceCount() const { return m_instanceData.size(); }
 
     // 是否完全没有有效面（含全空气、全包裹的实心、纯被邻居挡住三种情况）。
-    bool isEmpty() const { return m_PosToInstanceIndex.empty(); }
+    // 烘焙模式下实例列表不维护，以展开后的顶点流为准。
+    bool isEmpty() const {
+#ifdef IMC_BAKED_SECTION_MESH
+        return m_bakedVertices.empty();
+#else
+        return m_PosToInstanceIndex.empty();
+#endif
+    }
 
     bool isDirty() const { return m_dirty; }
     void markDirty() { m_dirty = true; }
@@ -134,6 +203,29 @@ public:
 
     // 压缩 BLOCK_ERRER 占位面
     void compact();
+
+#ifdef IMC_BAKED_SECTION_MESH
+    // ── 烘焙网格（baked section mesh）────────────────────────────
+    // 直接从方块数据（m_box）构建整个 section 的顶点流 + 索引流。
+    // 不读 m_instanceData，也不产生任何实例/哈希簿记。纯 CPU，不碰 GL。
+    //   above/below：同 chunk 上下 section 的 BlockBox（可空，空 = 空气）；
+    //   neighbors[4]：+X / -X / +Z / -Z 相邻 chunk 同 sy section 的 BlockBox
+    //                 （可空，空 = 空气，即该方向视作世界边界）。
+    // 邻居 box 在函数内一次性持读锁拷出所需的一层，之后逐格查询不再加锁。
+    // 立方体面沿用与 addBlockInstances 相同的可见性规则；模型方块从
+    // BlockModelRegistry 的预烘焙 quad 模板直接拷贝。
+    void rebuildBakedMeshFromBlocks(const BlockBox* above, const BlockBox* below,
+                                    const BlockBox* neighbors[4]);
+
+    bool isBakedDirty() const { return m_bakedDirty; }
+    void markBakedDirty() { m_bakedDirty = true; }
+    const std::vector<BakedVertex>& getBakedVertices() const { return m_bakedVertices; }
+    const std::vector<uint32_t>&   getBakedIndices()  const { return m_bakedIndices;  }
+
+    BakedGpuMesh&       bakedGpu()       { return m_bakedGpu; }
+    const BakedGpuMesh& bakedGpu() const { return m_bakedGpu; }
+    void releaseBakedGpu() { m_bakedGpu.release(); }
+#endif
 
     // 给定局部坐标 + 面，根据当前 block 状态和给定的"邻居方块"重新计算该面是否可见。
     // 邻居方块 neighbor.type() == BLOCK_AIR 表示透空，否则不可见。
@@ -210,6 +302,15 @@ private:
     std::vector<uint32_t> m_dirtyIndices;
     std::vector<uint32_t> m_freeSlots;
     bool m_fullRebuildPending = false;
+
+#ifdef IMC_BAKED_SECTION_MESH
+    // 烘焙网格（CPU 顶点/索引 + GPU 句柄）。烘焙模式下它是唯一渲染数据源，
+    // 由 rebuildBakedMeshFromBlocks 从方块数据直接生成。
+    std::vector<BakedVertex> m_bakedVertices;
+    std::vector<uint32_t>    m_bakedIndices;
+    bool                     m_bakedDirty = true;   // CPU 顶点流是否过期（worker 产出后为 false）
+    BakedGpuMesh             m_bakedGpu;
+#endif
 
     // section 在世界中的位置信息（由 Chunk 设置）
     int m_chunkX = 0;

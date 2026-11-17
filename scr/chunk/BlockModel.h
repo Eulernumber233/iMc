@@ -34,6 +34,20 @@ enum ModelQuadFlags : uint32_t {
     MODEL_QUAD_ALPHA_TEST = 1u << 0,   // 采样后 alpha < 0.5 丢弃
 };
 
+// 烘焙路径直接拷贝的模型 quad 模板（顶点为 block 局部坐标 0..1）。
+// 与 GpuQuad 同源、同时构建：烘焙建 section 时对每个 quad 只需一次 memcpy
+// （加上 blockOrigin 平移），不再做任何解包/变换。
+#ifdef IMC_BAKED_SECTION_MESH
+struct BakedModelQuad {
+    glm::vec3 pos[4];
+    glm::vec3 normal;
+    glm::vec2 uv[4];
+    // 与 BakedVertex::meta 同布局：bits 0..7 BlockType（这里恒 0，由调用方按
+    // 方块类型 OR 进去）、8..15 纹理层、16..19 face(=15)、20..23 flags。
+    uint32_t  meta = 0;
+};
+#endif
+
 // GPU 端 quad 表布局。全部 vec4，std430 布局与 C++ 结构体严格一致。
 struct GpuQuad {
     glm::vec4 p0;      // xyz = corner0
@@ -80,6 +94,11 @@ public:
 
     const std::vector<GpuQuad>& gpuQuads() const { return m_gpuQuads; }
 
+#ifdef IMC_BAKED_SECTION_MESH
+    // 与 gpuQuads() 一一对应的 CPU 侧烘焙模板，供烘焙路径直接拷贝。
+    const std::vector<BakedModelQuad>& bakedQuadTemplates() const { return m_bakedQuadTemplates; }
+#endif
+
 private:
     BlockModelRegistry() = default;
 
@@ -98,4 +117,7 @@ private:
     // 非 0 variant 的稀疏表：key = type<<8 | orient<<4 | variant
     std::unordered_map<uint32_t, ModelState> m_statesOther;
     std::vector<GpuQuad> m_gpuQuads;
+#ifdef IMC_BAKED_SECTION_MESH
+    std::vector<BakedModelQuad> m_bakedQuadTemplates;
+#endif
 };

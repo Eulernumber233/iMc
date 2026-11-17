@@ -197,6 +197,20 @@ void BlockModelRegistry::addState(BlockType type, uint8_t orient, uint8_t varian
         g.uv23 = glm::vec4(q.uv[2], q.uv[3]);
         g.meta = glm::uvec4((uint32_t)q.textureLayer, q.flags, 0u, 0u);
         m_gpuQuads.push_back(g);
+
+#ifdef IMC_BAKED_SECTION_MESH
+        // 烘焙模板：与 BakedVertex::meta 同布局（type 位恒 0，由建 section 时补）。
+        BakedModelQuad bq;
+        for (int c = 0; c < 4; ++c) {
+            bq.pos[c] = q.corners[c];
+            bq.uv[c]  = q.uv[c];
+        }
+        bq.normal = q.normal;
+        const uint32_t layer = (q.textureLayer < 0) ? 0u
+            : (q.textureLayer > 255 ? 255u : (uint32_t)q.textureLayer);
+        bq.meta = (layer << 8) | (15u << 16) | ((q.flags & 0xFu) << 20);
+        m_bakedQuadTemplates.push_back(bq);
+#endif
     }
 
     m_isModel[static_cast<uint8_t>(type)] = true;

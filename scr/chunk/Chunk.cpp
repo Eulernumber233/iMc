@@ -122,8 +122,10 @@ BlockState Chunk::setBlockAndUpdate(int x, int y, int z, BlockState newState) {
     BlockState oldState = getBlock(x, y, z);
     if (oldState == newState) return oldState;
 
+#ifndef IMC_BAKED_SECTION_MESH
     BlockType oldType = oldState.type();
     BlockType newType = newState.type();
+#endif
 
     setBlock(x, y, z, newState);
 
@@ -131,6 +133,44 @@ BlockState Chunk::setBlockAndUpdate(int x, int y, int z, BlockState newState) {
     int ly = y % Section::HEIGHT;
     Section& s = m_sections[sy];
 
+#ifdef IMC_BAKED_SECTION_MESH
+    // ── 烘焙路径 ──────────────────────────────────────────────────────
+    // 没有实例列表要维护：只把受影响的 section 标脏，下一次上传时用当前
+    // 方块数据整 section 重建顶点流。模型方块也不再有逐 quad 的哈希增删。
+    (void)ly;
+    s.markDirty();
+    s.markBakedDirty();
+    markSectionDirty(sy);
+
+    // 6 个邻居格所在的 section 也要重建（自身 section / 同 chunk 邻 section /
+    // 相邻 chunk 的同 sy section —— 它们的烘焙网格包含对着这一格的面）。
+    // 多标脏是安全的，漏标才是 bug，所以不做精确判定。
+    glm::ivec3 dirs[6] = {
+        {x + 1,y,z}, {x - 1,y,z}, {x,y,z + 1}, {x,y,z - 1}, {x,y + 1,z}, {x,y - 1,z}
+    };
+    for (int i = 0; i < 6; ++i) {
+        int nx = dirs[i].x, ny = dirs[i].y, nz = dirs[i].z;
+        if (ny < 0 || ny >= HEIGHT) continue;
+        int nsy = ny / Section::HEIGHT;
+        if (nx < 0 || nx >= WIDTH || nz < 0 || nz >= DEPTH) {
+            Chunk* nc = getNeighborChunk(nx, nz);
+            if (!nc) continue;
+            Section& nsec = nc->getSection(nsy);
+            nsec.markDirty();
+            nsec.markBakedDirty();
+            nc->markSectionDirty(nsy);
+        } else {
+            Section& nsec = m_sections[nsy];
+            nsec.markDirty();
+            nsec.markBakedDirty();
+            markSectionDirty(nsy);
+        }
+    }
+
+    m_saveDirty = true;  // 方块变更，标记需要存档
+    // 非空 mask 等烘焙网格重建后再刷新（ChunkManager 上传后调用）。
+    return oldState;
+#else
     // 1. 删除旧方块产生的所有实例（立方体 6 面 / 模型 quad 列表）
     if (oldType != BLOCK_AIR) {
         s.removeBlockInstances(x, ly, z, oldState);
@@ -177,6 +217,7 @@ BlockState Chunk::setBlockAndUpdate(int x, int y, int z, BlockState newState) {
     m_saveDirty = true;  // 方块变更，标记需要存档
     refreshNonEmptyMask();
     return oldState;
+#endif
 }
 
 bool Chunk::aabbInFrustum(const glm::vec3& min, const glm::vec3& max,

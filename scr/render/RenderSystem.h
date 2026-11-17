@@ -17,6 +17,7 @@
 class Player;
 class NetManager;
 class DroppedItemManager;
+class Section;
 
 struct FaceVertex {
     glm::vec3 position;
@@ -36,6 +37,17 @@ public:
         const glm::mat4& view, const glm::mat4& projection);
     void renderDepth(GLuint indirectBuffer, int cmdCount,
         const glm::mat4& lightSpaceMatrix, float nearPlane, float farPlane);
+
+#ifdef IMC_BAKED_SECTION_MESH
+    // ── 烘焙路径 ──────────────────────────────────────────────────
+    // 逐个可见 section 发一条 glDrawElements：draw call 数 = 可见 section 数。
+    // 返回实际发出的 draw call 数。
+    int renderBakedSections(const std::vector<Section*>& sections,
+        const glm::mat4& view, const glm::mat4& projection);
+    int renderBakedDepth(const std::vector<Section*>& sections,
+        const glm::mat4& lightSpaceMatrix);
+#endif
+
     GLuint getVAO() const { return VAO; }
     void setTextureArray(GLuint texArray) { m_textureArray = texArray; }
     // 一次性上传"每种 BlockType 的端面纹理层"查表给 g_buffer shader。
@@ -48,6 +60,11 @@ private:
     // 模型 quad 表（binding=4）：静态只读，启动时上传一次
     void uploadQuadTable();
     void bindQuadTable();
+#ifdef IMC_BAKED_SECTION_MESH
+    // 烘焙路径 VAO：属性格式只建一次，逐 section 用 glBindVertexBuffer 换源
+    void createBakedVAO();
+    GLuint m_bakedVAO = 0;
+#endif
 
     GLuint VAO;
     GLuint VBO;
@@ -66,6 +83,17 @@ private:
         { GL_VERTEX_SHADER,   "shader/shadow_mapping_depth.vert" },
         { GL_FRAGMENT_SHADER, "shader/shadow_mapping_depth.frag" }
     } };
+#ifdef IMC_BAKED_SECTION_MESH
+    // 烘焙路径着色器：顶点属性是常规展开数据，不需要实例/quad 表/gl_DrawID。
+    Shader m_bakedShader{ {
+        { GL_VERTEX_SHADER,   "shader/g_buffer_baked.vert" },
+        { GL_FRAGMENT_SHADER, "shader/g_buffer.frag" }
+    } };
+    Shader m_bakedDepthShader{ {
+        { GL_VERTEX_SHADER,   "shader/shadow_mapping_depth_baked.vert" },
+        { GL_FRAGMENT_SHADER, "shader/shadow_mapping_depth_baked.frag" }
+    } };
+#endif
 };
 
 class RenderSystem {

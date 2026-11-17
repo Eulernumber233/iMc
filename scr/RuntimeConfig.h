@@ -30,6 +30,9 @@ public:
     // 注意：命令行 --rebuild-shaders / --no-rebuild-shaders 优先级高于此字段。
     bool forceRecompileShaders = false;
 
+    // 注：方块几何渲染路径（实例化 / 烘焙）由编译期宏 IMC_BAKED_SECTION_MESH 选择
+    // （VS 项目属性 → C/C++ → 预处理器定义），不在这里配置。
+
     // 调试模式：为 true 时物品注册表只加载标记了 load_in_debug 的物品图标，
     // 避免每次启动都加载 assert/minecraft/textures/item 下的全量图标（600+ 张）。
     // 正式发布时置 false 加载全量资源。

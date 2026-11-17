@@ -4,6 +4,9 @@
     "render_radius": 16,
     //   视野半径（chunk），实际加载 (2r+1)^2 个 chunk
 
+    // 注：方块几何渲染路径（实例化 / 烘焙）由编译期宏 IMC_BAKED_SECTION_MESH
+    // 选择（VS 项目属性 → C/C++ → 预处理器定义），不再是运行时配置项。
+
     "vertical_cull_ratio": 0.5,
     //   下方 section 剔除比例：maxDownSections = render_radius × 此值
     //   例 8×0.5=4 → 相机所在 section 向下 4 个以外不渲染。0 或负值 = 不限制

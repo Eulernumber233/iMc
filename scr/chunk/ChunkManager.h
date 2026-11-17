@@ -67,6 +67,12 @@ public:
     GLuint getSectionBaseSSBO() const { return m_sectionBaseSSBO; }
     int getVisibleInstanceCount() const { return m_visibleInstanceCount; }
 
+#ifdef IMC_BAKED_SECTION_MESH
+    // 烘焙路径的可见 section 列表（CPU 剔除后）。RenderSystem 按此逐 section
+    // 发 glDrawElements —— 每帧 draw call 数 = 可见 section 数。
+    const std::vector<Section*>& getVisibleSections() const { return m_visibleSections; }
+#endif
+
     Chunk* getChunk(const glm::ivec2& chunkPos);
     Chunk* getChunk(const int x, const int z);
     // 查找 loaded 中的区块（有完整 mesh）
@@ -243,6 +249,13 @@ private:
     GLuint m_indirectBuffer = 0;
     GLsizeiptr m_indirectBufferCapacityBytes = 0;
     int m_visibleInstanceCount = 0;
+
+#ifdef IMC_BAKED_SECTION_MESH
+    // ── 烘焙路径状态 ────────────────────────────────────────────────
+    // 可见 section 列表：CPU 剔除产出，RenderSystem 逐 section 发 glDrawElements。
+    std::vector<Section*> m_visibleSections;
+    GLuint m_bakedUploadVAO = 0;   // 上传 EBO 时用的临时 VAO（core profile 下 VAO 0 不能绑 EBO）
+#endif
 
     // ── GPU 视锥剔除 ────────────────────────────────────────────────
     // 全量模板（所有非空 section，不含剔除）仅在 section 集合变动时重建 + 上传；
@@ -422,6 +435,12 @@ private:
     void rebuildFullDrawList();     // 重建全量模板（无剔除，所有非空 section）
     void dispatchGpuCull();         // dispatch compute shader 改写 instanceCount
     void uploadSection(int chunkX, int chunkZ, int sectionY, Section& section, int& uploadBudget);
+#ifdef IMC_BAKED_SECTION_MESH
+    // 用当前方块数据 + 邻居边界整 section 重建烘焙顶点流（主线程改方块后的懒重建）。
+    void rebuildBakedForSection(int chunkX, int chunkZ, int sectionY, Section& section);
+    // 把 section 的烘焙网格（CPU 顶点/索引流）上传到它自己的 VBO/EBO。纯 GL 操作。
+    void uploadBakedMesh(Section& section);
+#endif
     void releaseSectionSlot(SectionKey key);
     void syncIndirectBuffer();
     void syncSectionBaseSSBO();

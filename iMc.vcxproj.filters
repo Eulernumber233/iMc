@@ -498,6 +498,9 @@
     <None Include="shader\model_depth.vert" />
     <None Include="shader\model_depth.frag" />
     <None Include="shader\frustum_cull.comp" />
+    <None Include="shader\g_buffer_baked.vert" />
+    <None Include="shader\shadow_mapping_depth_baked.frag" />
+    <None Include="shader\shadow_mapping_depth_baked.vert" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="assert\textures\block\birch_log.png">
